@@ -95,7 +95,7 @@ if __name__ == '__main__':
                         help='Path to output dir ')
 
     args = parser.parse_args()
-    from loader import VaeDataset, SequenceDataset
+    from loader_v2 import VaeDataset, SequenceDataset
 
     trainpath=args.train
     batch_size=32
