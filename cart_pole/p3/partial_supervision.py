@@ -6,6 +6,13 @@ import torchvision.utils as vutils
 import torch.nn.functional as F
 # Define VAE class with customizable latent size
 class VAE(nn.Module):
+
+    ###  torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)  ###
+    # This network takes the 3-channel image and creates 16->32->64 channels         #
+    # Each layer halves the dimensions (80/8 = 10, 120/8 = 15) * 64 channels         #
+    # Finally it encodes it into the latent space of [latent_size] (mean, logvar)    #
+    #                                                                                #
+    # Then the decoder reverses this process                                         #
     def __init__(self, latent_size=128):
         super(VAE, self).__init__()
         self.latent_size = latent_size
@@ -29,11 +36,14 @@ class VAE(nn.Module):
             nn.Sigmoid()
         )
 
+    ### This function returns a sample from a distribution defined by mean mu and std logvar ###
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
 
+    ###                                    Forward pass                                   ###
+    # Input -> 3 conv layers -> flatten for mu, logvar -> Random sample -> decode -> output #
     def forward(self, x):
         batch_size = x.size(0)
         encoded = self.encoder(x).view(batch_size, -1)
@@ -45,16 +55,21 @@ class VAE(nn.Module):
         return reconstructed, mu, logvar
 
 # Define loss function
+### We have 2 separate losses (ONLY for dimensions 4-63)                                ###
+# Reconstruction loss (MSE): Matches output image to input image                          #
+# KL divergence: Regularizes latent space to be close to standard normal distribution     #
 def vae_loss(recon_x, x, mu, logvar):
     recon_loss = nn.functional.mse_loss(recon_x, x, reduction='sum')
     kl_div = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return recon_loss + kl_div
 
 # Training function
+### We add an ADDITIONAL loss ONLY on dimensions 0-1 to match the true state            ###
+# I have NO idea why leaving dimensions 2,3 unattended is good                           #
 def train_vae(model, train_loader, optimizer, device,epoch):
     model.train()
     total_loss = 0
-    for batch_idx, data in enumerate(TrainLoader):
+    for batch_idx, data in enumerate(train_loader):
         input, label, action, use1, use2 = data
         x = input.to(device)
         optimizer.zero_grad()
@@ -85,13 +100,15 @@ if __name__ == '__main__':
                         help='Path to output dir ')
  
     args = parser.parse_args()
-    from loader import VaeDataset, SequenceDataset
+    from loader_v2 import VaeDataset, SequenceDataset
 
     trainpath=args.train
     batch_size=32
-    traindataset = VaeDataset(root=trainpath,shift=args.weight)
+    ### traindataset = VaeDataset(root=trainpath,shift=args.weight)
+    traindataset = VaeDataset(root=trainpath)
     TrainLoader = DataLoader(traindataset, batch_size=batch_size, shuffle=True, drop_last=True)
-    testdataset = VaeDataset(root=args.test,shift=args.weight)
+    ### testdataset = VaeDataset(root=args.test,shift=args.weight)
+    testdataset = VaeDataset(root=args.test)
     TestLoader = DataLoader(testdataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
     # Training loop with custom latent size

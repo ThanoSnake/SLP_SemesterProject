@@ -69,7 +69,7 @@ def vae_loss(recon_x, x, mu, logvar):
 def train_vae(model, train_loader, optimizer, device,epoch):
     model.train()
     total_loss = 0
-    for batch_idx, data in enumerate(TrainLoader):
+    for batch_idx, data in enumerate(train_loader):
         input, label, action, use1, use2 = data
         x = input.to(device)
         optimizer.zero_grad()
@@ -108,10 +108,10 @@ if __name__ == '__main__':
 
     trainpath=args.train
     batch_size=32
-    # traindataset = VaeDataset(root=trainpath,shift=args.weight)
+    ### traindataset = VaeDataset(root=trainpath,shift=args.weight)
     traindataset = VaeDataset(root=trainpath)
     TrainLoader = DataLoader(traindataset, batch_size=batch_size, shuffle=True, drop_last=True)
-    # testdataset = VaeDataset(root=args.test,shift=args.weight)
+    ### testdataset = VaeDataset(root=args.test,shift=args.weight)
     testdataset = VaeDataset(root=args.test)
     TestLoader = DataLoader(testdataset, batch_size=batch_size, shuffle=True, drop_last=True)
 

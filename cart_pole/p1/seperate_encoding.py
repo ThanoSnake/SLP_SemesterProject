@@ -99,10 +99,10 @@ if __name__ == '__main__':
 
     trainpath=args.train
     batch_size=32
-    #traindataset = VaeDataset(root=trainpath,shift=args.weight)
+    ### traindataset = VaeDataset(root=trainpath,shift=args.weight)
     traindataset = VaeDataset(root=trainpath)
     TrainLoader = DataLoader(traindataset, batch_size=batch_size, shuffle=True, drop_last=True)
-    #testdataset = VaeDataset(root=args.test,shift=args.weight)
+    ### testdataset = VaeDataset(root=args.test,shift=args.weight)
     testdataset = VaeDataset(root=args.test)
     TestLoader = DataLoader(testdataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
