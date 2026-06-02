@@ -6,6 +6,13 @@ import torchvision.utils as vutils
 import torch.nn.functional as F
 # Define VAE class with customizable latent size
 class VAE(nn.Module):
+
+    ###  torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)  ###
+    # This network takes the 3-channel image and creates 16->32->64 channels         #
+    # Each layer halves the dimensions (80/8 = 10, 120/8 = 15) * 64 channels         #
+    # Finally it encodes it into the latent space of [latent_size] (mean, logvar)    #
+    #                                                                                #
+    # Then the decoder reverses this process                                         #
     def __init__(self, latent_size=128):
         super(VAE, self).__init__()
         self.latent_size = latent_size
@@ -29,11 +36,14 @@ class VAE(nn.Module):
             nn.Sigmoid()
         )
 
+    ### This function returns a sample from a distribution defined by mean mu and std logvar ###
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
 
+    ###                                    Forward pass                                   ###
+    # Input -> 3 conv layers -> flatten for mu, logvar -> Random sample -> decode -> output #
     def forward(self, x):
         batch_size = x.size(0)
         encoded = self.encoder(x).view(batch_size, -1)
@@ -45,12 +55,17 @@ class VAE(nn.Module):
         return reconstructed, mu, logvar
 
 # Define loss function
+### We have 2 separate losses (ONLY for dimensions 4-63)                                ###
+# Reconstruction loss (MSE): Matches output image to input image                          #
+# KL divergence: Regularizes latent space to be close to standard normal distribution     #
 def vae_loss(recon_x, x, mu, logvar):
     recon_loss = nn.functional.mse_loss(recon_x, x, reduction='sum')
     kl_div = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return recon_loss + kl_div
 
 # Training function
+### We add an ADDITIONAL loss on dimensions 0-3 to match the true state                                      ###
+# loss3: Teach equivariance by enforcing that changes in true state linearly correspond to changes in dims 0-3 #
 def train_vae(model, train_loader, optimizer, device,epoch):
     model.train()
     total_loss = 0
@@ -61,9 +76,9 @@ def train_vae(model, train_loader, optimizer, device,epoch):
         use1=use1.to(device)
         errors =use1[16:,:] -use1[0:16,:]
         recon_x, mu, logvar = model(x)
-        loss1 = vae_loss(recon_x, x, mu[:,4:], logvar[:,4:])
-        mu_label_loss = F.mse_loss(mu[:,0:4], use1)
-        loss3 = F.mse_loss(mu[16:,0:4], mu[0:16,0:4]+errors)
+        loss1 = vae_loss(recon_x, x, mu[:,4:], logvar[:,4:])    # vae_loss on dims 4-63
+        mu_label_loss = F.mse_loss(mu[:,0:4], use1)             # MSE loss on dims 0-3 to match state (p1)
+        loss3 = F.mse_loss(mu[16:,0:4], mu[0:16,0:4]+errors)    # MSE loss to teach equivariance (p2)
         loss = loss1 +  mu_label_loss+loss3
 
         loss.backward()
@@ -89,13 +104,15 @@ if __name__ == '__main__':
                         help='Path to output dir ')
 
     args = parser.parse_args()
-    from loader import VaeDataset, SequenceDataset
+    from loader_v2 import VaeDataset, SequenceDataset
 
     trainpath=args.train
     batch_size=32
-    traindataset = VaeDataset(root=trainpath,shift=args.weight)
+    # traindataset = VaeDataset(root=trainpath,shift=args.weight)
+    traindataset = VaeDataset(root=trainpath)
     TrainLoader = DataLoader(traindataset, batch_size=batch_size, shuffle=True, drop_last=True)
-    testdataset = VaeDataset(root=args.test,shift=args.weight)
+    # testdataset = VaeDataset(root=args.test,shift=args.weight)
+    testdataset = VaeDataset(root=args.test)
     TestLoader = DataLoader(testdataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
     latent_size = 64  # Set your desired latent size here
