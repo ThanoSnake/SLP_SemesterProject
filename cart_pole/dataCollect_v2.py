@@ -1,129 +1,97 @@
-"""Collect CartPole trajectories for world-model training.
-
-Each episode is saved as an .npz file with keys:
-    imgs   : (T, IMG_H, IMG_W, 3)  uint8     -- rendered frames, pre-resized
-    acts   : (T,)                  int64     -- action taken at each step
-    states : (T, 4)                float32   -- [cart_pos, cart_vel, pole_angle, pole_ang_vel]
-
-Episodes are filtered to have at least --min_steps frames so they remain
-usable as fixed-length LSTM windows.
-"""
-import argparse
 import os
 
 import gymnasium as gym
 import numpy as np
 from PIL import Image
 
+# ----------------------------------------------------------------------------
+# Ρυθμίσεις συλλογής
+# ----------------------------------------------------------------------------
+NUM_EPISODES = 5000
+MAX_STEPS = 300                 # μήκος ακολουθίας-στόχος ανά επεισόδιο
+IMG_H, IMG_W = 80, 120          # resize ώστε να ταιριάζει στο VAE (encoder ÷8 -> 10x15)
+TEST_FRACTION = 0.1             # ποσοστό επεισοδίων που πάνε στο test set
 
-# VAE expects 80x120 input (its fc_mu = 64 * 10 * 15 after 3 stride-2 convs).
-IMG_H, IMG_W = 80, 120
+# PD / linear state-feedback controller με ε-greedy τυχαιότητα.
+# Στόχος: μεγαλύτερα επεισόδια ΚΑΙ ποικιλία μεταβάσεων (όχι μόνο "ισορροπημένες"
+# καταστάσεις) ώστε το world model να μάθει πλούσια δυναμική.
+KP_THETA, KD_THETA = 12.0, 2.0  # κέρδη γωνίας / γωνιακής ταχύτητας
+KP_X, KD_X = 0.0, 0.0           # κέρδη θέσης / ταχύτητας κάρου (0 = ανενεργά)
+EPSILON = 0.25                  # πιθανότητα τυχαίας ενέργειας (exploration)
 
-
-def pd_action(state, p_random):
-    """Simple PD controller for CartPole with epsilon-random exploration.
-
-    CartPole action space: 0 = push cart left, 1 = push cart right.
-    We push in the direction of `pole_angle + 0.5 * pole_ang_vel`, which keeps
-    the pole upright most of the time. The p_random branch injects exploration
-    so the trajectories don't all look like a perfect balance.
-    """
-    if np.random.random() < p_random:
-        return int(np.random.randint(2))
-    _, _, theta, theta_dot = state
-    return 1 if (theta + 0.5 * theta_dot) > 0.0 else 0
-
-
-def render_resized(env):
-    """Render the current frame and resize to (IMG_H, IMG_W)."""
-    frame = env.render()
-    img = Image.fromarray(frame).resize((IMG_W, IMG_H), Image.BILINEAR)
-    return np.asarray(img, dtype=np.uint8)
+# Θόρυβος που προστίθεται στην ΚΑΤΑΣΤΑΣΗ (μόνο θέση & γωνία, όχι ταχύτητες).
+# Τα labels (2/5/10) γίνονται κλειδιά noisy_states_2 / _5 / _10 στο .npz.
+NOISE_LEVELS = [(0.025, 2), (0.05, 5), (0.10, 10)]
+POSITION_REF = 4.8 * 2
+ANGLE_REF = 0.84
 
 
-def collect_episode(env, max_steps, p_random, seed=None):
-    if seed is not None:
-        obs, _ = env.reset(seed=seed)
-    else:
-        obs, _ = env.reset()
+def pd_action(obs, action_space):
+    """ PD/linear controller με ε-greedy τυχαιότητα.
+    obs = [x, x_dot, theta, theta_dot]. Επιστρέφει 0 (αριστερά) ή 1 (δεξιά). """
+    if np.random.rand() < EPSILON:
+        return action_space.sample()
+    x, x_dot, theta, theta_dot = obs
+    u = KP_THETA * theta + KD_THETA * theta_dot + KP_X * x + KD_X * x_dot
+    return 1 if u > 0 else 0
 
+
+def resize_frame(img):
+    """ RGB render -> (IMG_H, IMG_W, 3) uint8. """
+    return np.asarray(Image.fromarray(img).resize((IMG_W, IMG_H)), dtype=np.uint8)
+
+
+def collect_episode(env, max_steps=MAX_STEPS):
+    obs, _ = env.reset()
     imgs, acts, states = [], [], []
     for _ in range(max_steps):
-        imgs.append(render_resized(env))
-        action = pd_action(obs, p_random=p_random)
+        img = resize_frame(env.render())
+        action = pd_action(obs, env.action_space)
+
+        imgs.append(img)
         acts.append(action)
-        states.append(obs.copy())
+        states.append(obs)
 
         obs, _, terminated, truncated, _ = env.step(action)
         if terminated or truncated:
             break
 
-    return (
-        np.asarray(imgs,   dtype=np.uint8),
-        np.asarray(acts,   dtype=np.int64),
-        np.asarray(states, dtype=np.float32),
-    )
+    return (np.array(imgs),
+            np.array(acts),
+            np.array(states, dtype=np.float32))
 
 
-def collect_split(out_dir, n_episodes, max_steps, min_steps, p_random, seed):
-    os.makedirs(out_dir, exist_ok=True)
+def save_episode(save_dir, run_id, imgs, acts, states):
+    if len(states) == 0:
+        return
+
+    noisy_versions = {}
+    for level, label in NOISE_LEVELS:
+        noise = np.zeros_like(states)
+        noise[:, 0] = np.random.normal(0, level * POSITION_REF, size=states.shape[0])
+        noise[:, 2] = np.random.normal(0, level * ANGLE_REF, size=states.shape[0])
+        noisy_versions[f"noisy_states_{label}"] = (states + noise).astype(np.float32)
+
+    save_path = os.path.join(save_dir, f"{run_id}.npz")
+    np.savez_compressed(save_path, imgs=imgs, acts=acts, states=states, **noisy_versions)
+
+
+if __name__ == '__main__':
+    base_dir = "/kaggle/working/cartpole_data"
+    train_dir = os.path.join(base_dir, "train")
+    test_dir = os.path.join(base_dir, "test")
+    os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(test_dir, exist_ok=True)
+
     env = gym.make("CartPole-v1", render_mode="rgb_array")
 
-    saved, attempt = 0, 0
-    while saved < n_episodes:
-        imgs, acts, states = collect_episode(
-            env, max_steps=max_steps, p_random=p_random, seed=seed + attempt,
-        )
-        attempt += 1
-        if len(imgs) < min_steps:
-            continue
-        path = os.path.join(out_dir, f"ep_{saved:05d}.npz")
-        np.savez_compressed(path, imgs=imgs, acts=acts, states=states)
-        saved += 1
-        if saved % 50 == 0:
-            print(f"  {out_dir}: {saved}/{n_episodes}  (attempts={attempt})")
+    for i in range(NUM_EPISODES):
+        if i % 100 == 0:
+            print(f"Συλλογή επεισοδίου: {i}/{NUM_EPISODES}")
+
+        imgs, acts, states = collect_episode(env)
+        out_dir = test_dir if np.random.rand() < TEST_FRACTION else train_dir
+        save_episode(out_dir, i, imgs, acts, states)
 
     env.close()
-    print(f"  finished: {saved} episodes in {out_dir}")
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--save_dir",  type=str,   default="./cartpole_data")
-    parser.add_argument("--n_train",   type=int,   default=1000)
-    parser.add_argument("--n_test",    type=int,   default=200)
-    parser.add_argument("--max_steps", type=int,   default=500)
-    parser.add_argument("--min_steps", type=int,   default=33,
-                        help="reject episodes shorter than this (LSTM window=32+1)")
-    parser.add_argument("--p_random",  type=float, default=0.2,
-                        help="probability of a random action at each step")
-    parser.add_argument("--seed",      type=int,   default=42)
-    args = parser.parse_args()
-
-    np.random.seed(args.seed)
-
-    print(f"Collecting {args.n_train} training episodes -> {args.save_dir}/train")
-    collect_split(
-        out_dir   = os.path.join(args.save_dir, "train"),
-        n_episodes= args.n_train,
-        max_steps = args.max_steps,
-        min_steps = args.min_steps,
-        p_random  = args.p_random,
-        seed      = args.seed,
-    )
-
-    print(f"Collecting {args.n_test} test episodes -> {args.save_dir}/test")
-    collect_split(
-        out_dir   = os.path.join(args.save_dir, "test"),
-        n_episodes= args.n_test,
-        max_steps = args.max_steps,
-        min_steps = args.min_steps,
-        p_random  = args.p_random,
-        seed      = args.seed + 10_000,
-    )
-
-    print("Done.")
-
-
-if __name__ == "__main__":
-    main()
+    print("Η συλλογή δεδομένων ολοκληρώθηκε επιτυχώς!")
