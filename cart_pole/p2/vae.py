@@ -171,51 +171,75 @@ def color_invariance_loss(model, x, state_pred, cfg):
     return F.mse_loss(state_color, state_pred, reduction='sum')
 
 
+_LOSS_KEYS = ('recon', 'kl', 'state', 'equiv', 'color')
+
+
+def _component_losses(model, x, target, cfg):
+    """ Και οι 5 ΜΗ-σταθμισμένοι όροι loss για ένα batch frames (raw tensors). """
+    recon, state_pred, img_mu, img_logvar = model(x)
+    recon_loss = F.mse_loss(recon, x, reduction='sum')
+    kl_div = -0.5 * torch.sum(1 + img_logvar - img_mu.pow(2) - img_logvar.exp())
+    state_loss = F.mse_loss(state_pred, target, reduction='sum')          # P1 supervision
+    equiv_loss = equivariance_loss(model, x, state_pred, cfg)             # P2 equivariance (θέση)
+    color_loss = color_invariance_loss(model, x, state_pred, cfg)        # P2 invariance (χρώμα)
+    return {'recon': recon_loss, 'kl': kl_div, 'state': state_loss,
+            'equiv': equiv_loss, 'color': color_loss}
+
+
+def _weighted_total(L, cfg):
+    """ Σταθμισμένο άθροισμα = το πραγματικό objective που βελτιστοποιείται. """
+    return (L['recon'] + cfg.beta * L['kl'] + cfg.state_weight * L['state']
+            + cfg.equiv_weight * L['equiv'] + cfg.color_weight * L['color'])
+
+
+def _report(sums, n, cfg):
+    """ sums: αθροίσματα ΜΗ-σταθμισμένων όρων. Επιστρέφει (σταθμισμένο total per-sample,
+    dict ΜΗ-σταθμισμένων per-sample components) για logging. """
+    c = {k: v / max(n, 1) for k, v in sums.items()}
+    total = _weighted_total(c, cfg)
+    return total, c
+
+
+def _fmt(c):
+    return (f"recon {c['recon']:8.2f} | kl {c['kl']:7.3f} | state {c['state']:.4f} "
+            f"| equiv {c['equiv']:.4f} | color {c['color']:.4f}")
+
+
 def train_one_episode(model, frames, states, optimizer, device, cfg):
+    """ Επιστρέφει (dict αθροισμάτων ΜΗ-σταθμισμένων όρων, πλήθος frames). """
     n = frames.shape[0]
-    total_loss = 0.0
+    sums = {k: 0.0 for k in _LOSS_KEYS}
     for s in range(0, n, cfg.batch):
         x = frames[s:s + cfg.batch].to(device)
         target = states[s:s + cfg.batch].to(device).float()
         optimizer.zero_grad()
-
-        recon, state_pred, img_mu, img_logvar = model(x)
-        recon_loss = F.mse_loss(recon, x, reduction='sum')
-        kl_div = -0.5 * torch.sum(1 + img_logvar - img_mu.pow(2) - img_logvar.exp())
-        state_loss = F.mse_loss(state_pred, target, reduction='sum')          # P1 supervision
-        equiv_loss = equivariance_loss(model, x, state_pred, cfg)             # P2 equivariance (θέση)
-        color_loss = color_invariance_loss(model, x, state_pred, cfg)         # P2 invariance (χρώμα)
-
-        loss = (recon_loss + cfg.beta * kl_div + cfg.state_weight * state_loss
-                + cfg.equiv_weight * equiv_loss + cfg.color_weight * color_loss)
+        L = _component_losses(model, x, target, cfg)
+        loss = _weighted_total(L, cfg)         # ΑΥΤΟ βελτιστοποιείται
         loss.backward()
         optimizer.step()
-        total_loss += loss.item()
-    return total_loss, n
+        for k in _LOSS_KEYS:
+            sums[k] += L[k].item()
+    return sums, n
 
 
 @torch.no_grad()
 def evaluate(model, loader, device, cfg):
-    """ Validation: total (recon+β·KL+λ·state) per-frame, state MSE per-frame,
-    και equivariance error per-frame (διαγνωστικό). """
+    """ Validation σε ΟΛΟ το val. Επιστρέφει (dict αθροισμάτων όρων, πλήθος frames).
+    Το total υπολογίζεται με τα ΙΔΙΑ βάρη με το training (ΜΑΖΙ equiv+color) ώστε η
+    επιλογή best-model να εκφράζει ολόκληρη την Αρχή 2. """
     model.eval()
-    tot, state_se, equiv_se, color_se, n = 0.0, 0.0, 0.0, 0.0, 0
+    sums = {k: 0.0 for k in _LOSS_KEYS}
+    n = 0
     for frames, _img2, _act, states, _s2 in loader:
         nf = frames.shape[0]
         for s in range(0, nf, cfg.batch):
             x = frames[s:s + cfg.batch].to(device)
             target = states[s:s + cfg.batch].to(device).float()
-            recon, state_pred, img_mu, img_logvar = model(x)
-            recon_loss = F.mse_loss(recon, x, reduction='sum')
-            kl_div = -0.5 * torch.sum(1 + img_logvar - img_mu.pow(2) - img_logvar.exp())
-            state_loss = F.mse_loss(state_pred, target, reduction='sum')
-            tot += (recon_loss + cfg.beta * kl_div + cfg.state_weight * state_loss).item()
-            state_se += state_loss.item()
-            equiv_se += equivariance_loss(model, x, state_pred, cfg).item()
-            color_se += color_invariance_loss(model, x, state_pred, cfg).item()
+            L = _component_losses(model, x, target, cfg)
+            for k in _LOSS_KEYS:
+                sums[k] += L[k].item()
         n += nf
-    return (tot / max(n, 1), state_se / max(n, 1),
-            equiv_se / max(n, 1), color_se / max(n, 1))
+    return sums, n
 
 
 def train_vae(cfg, model, device):
@@ -235,17 +259,24 @@ def train_vae(cfg, model, device):
     epochs_no_improve = 0
     for epoch in range(cfg.epochs):
         model.train()
-        epoch_loss, epoch_n = 0.0, 0
+        train_sums = {k: 0.0 for k in _LOSS_KEYS}
+        train_n = 0
         for frames, _img2, _act, states, _s2 in tqdm(
                 TrainLoader, desc=f"Epoch {epoch + 1}", leave=False):
-            el, en = train_one_episode(model, frames, states, optimizer, device, cfg)
-            epoch_loss += el
-            epoch_n += en
-        train_loss = epoch_loss / max(epoch_n, 1)
+            sums, en = train_one_episode(model, frames, states, optimizer, device, cfg)
+            for k in _LOSS_KEYS:
+                train_sums[k] += sums[k]
+            train_n += en
+        train_total, tr = _report(train_sums, train_n, cfg)
 
-        val_loss, val_state, val_equiv, val_color = evaluate(model, ValLoader, device, cfg)
-        print(f'Epoch {epoch + 1}: train {train_loss:.2f} | val {val_loss:.2f} '
-              f'| state {val_state:.4f} | equiv {val_equiv:.4f} | color {val_color:.4f}')
+        val_sums, val_n = evaluate(model, ValLoader, device, cfg)
+        val_loss, va = _report(val_sums, val_n, cfg)
+
+        # total = ΣΤΑΘΜΙΣΜΕΝΟ objective (αυτό που βελτιστοποιείται/επιλέγει best)
+        # [...] = ΜΗ-σταθμισμένοι όροι (φυσική κλίμακα κάθε loss, για να ρυθμίζεις βάρη)
+        print(f'Epoch {epoch + 1}:')
+        print(f'  train  total {train_total:10.2f}  | {_fmt(tr)}')
+        print(f'  val    total {val_loss:10.2f}  | {_fmt(va)}')
 
         if val_loss < best_val - cfg.min_delta:
             best_val = val_loss
