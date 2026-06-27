@@ -1,292 +1,204 @@
-""" Some data loading utilities """
-from bisect import bisect
-from os import listdir
-from os.path import join, isdir
-from tqdm import tqdm
+""" loader.py — EAGER all-in-RAM loading (καμία cache/LRU, μηδέν IO στο train).
+
+Φιλοσοφία:
+  * Όλο το dataset φορτώνεται ΜΙΑ φορά στο __init__ (με progress bar). Μετά κάθε
+    __getitem__ είναι καθαρή RAM-πρόσβαση -> το γρηγορότερο δυνατό train.
+  * Οι εικόνες μένουν uint8 στη RAM· το /255 γίνεται per-sample (φθηνό). Έτσι ΔΕΝ
+    τετραπλασιάζουμε τη μνήμη (float θα ήταν 4×).
+  * Global flat index (αρχείο, θέση t) -> DataLoader(shuffle=True) δίνει αληθινό
+    ανακάτεμα ΑΝΑΜΕΣΑ σε επεισόδια.
+  * shift in {2,5,10} -> noisy_states_{shift}. Προαιρετικό standardize states.
+  * Με num_workers>0 σε Linux, το self.eps μοιράζεται μέσω fork copy-on-write
+    (δεν διπλασιάζεται η RAM). Χρησιμοποίησε persistent_workers=True.
+
+Ροή: VaePairDataset -> (train VAE) -> precompute_latents -> LatentSequenceDataset.
+"""
+from os import listdir, makedirs
+from os.path import join, isdir, basename
+
+import numpy as np
 import torch
 import torch.utils.data
-import numpy as np
-import torch.nn.functional as F
-from PIL import Image
-from scipy.ndimage import gaussian_filter
+from tqdm.auto import tqdm
 
-class _RolloutDataset(torch.utils.data.Dataset): # pylint: disable=too-few-public-methods
-    def __init__(self, root,shift, buffer_size=0, leng=0): # pylint: disable=too-many-arguments
-        self.leng=leng
-        self._files=[]
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def list_npz(root):
+    files = []
+    for sd in sorted(listdir(root)):
+        p = join(root, sd)
+        if isdir(p):
+            files += [join(p, f) for f in sorted(listdir(p)) if f.endswith(".npz")]
+        elif p.endswith(".npz"):
+            files.append(p)
+    return sorted(files)
+
+
+def load_norm_stats(path):
+    z = np.load(path)
+    return z["mean"].astype(np.float32), z["std"].astype(np.float32)
+
+
+def _standardize(s, mean, std):
+    return s if mean is None else ((s - mean) / std).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Κοινή βάση: EAGER load όλων των επεισοδίων στη RAM + flat index
+# ---------------------------------------------------------------------------
+class _BaseRollout(torch.utils.data.Dataset):
+    def __init__(self, root, window, stride=1, shift=0,
+                 state_mean=None, state_std=None, cache_size=None):
+        # cache_size: αγνοείται (κρατιέται για συμβατότητα με παλιές κλήσεις)
+        self.window = window
         self.shift = shift
+        self.mean = None if state_mean is None else np.asarray(state_mean, np.float32)
+        self.std = None if state_std is None else np.asarray(state_std, np.float32)
 
-        self.safeCache=0
-        for sd in listdir(root):
-            if isdir(join(root, sd)):
-                for ssd in listdir(root+sd):
-                    self._files.append(join(root,sd,ssd))
-            else:
-                self._files.append(join(root, sd))
+        files = list_npz(root)
+        if not files:
+            raise RuntimeError(f"Κανένα .npz στο: {root}")
 
-        self._files.sort()
-        self._cum_size = None
-        self._buffer = None
-        self._buffer_fnames = None
-        self._buffer_index = 0
-        # self._buffer_size = buffer_size
-        self._buffer_size = len(self._files)
-
-    def load_next_buffer(self):
-        """ Loads next buffer """
-        self._buffer_fnames = self._files[self._buffer_index:self._buffer_index + self._buffer_size]
-        self._buffer_index += self._buffer_size
-        self._buffer_index = self._buffer_index % len(self._files)
-        self._buffer = []
-        self._cum_size = [0]
-
-        # progress bar
-        pbar = tqdm(total=len(self._buffer_fnames),
-                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} {postfix}')
-        pbar.set_description("Loading file buffer ...")
-
-        for f in self._buffer_fnames:
-            with np.load(f) as data:
-                if len(data['imgs']) < 33:
-                    continue
-                tmp = {}
-                # tmp['actions'] =data['action']
-                tmp['observations'] =data['imgs']
-                # tmp['labels'] =data['label']
-                tmp['actions'] =data['acts']
-                tmp['states'] = data['states']
-
-                # tmp['safes'] =data['safe']
-                if self.shift == 10:
-
-                    tmp['x'] = data['states10']
-                    tmp['degree'] = data['states10']
-                    # print("x3")
-
-                elif self.shift == 5:
-                    tmp['x'] = data['states5']
-                    tmp['degree'] = data['states5']
-                    # print("x2")
-                elif self.shift == 25:
-                    tmp['x'] = data['states25']
-                    tmp['degree'] = data['states25']
-                    # print("x2")
-
-                else:
-                    tmp['x'] = data['states']
-                    tmp['degree'] = data['states']
-                    # print(self.shift)
-                    # print("x1")
-
-
-
-                self._buffer.append(tmp)
-                # for k, v in data.items():
-                #
-                #     self._buffer.append({k: np.copy(v)})
-
-                #     self._buffer +=[k: np.copy(v)]
-                # self._buffer += [{k: np.copy(v) for k, v in data.items()}]
-                self._cum_size += [self._cum_size[-1] +
-                                   self._data_per_sequence(data['states'].shape[0]-self.leng)]
-            pbar.update(1)
-        pbar.close()
+        self.eps, self.index, angles = [], [], []
+        tag = basename(root.rstrip("/")) or root
+        for fi, f in enumerate(tqdm(files, desc=f"loading '{tag}' -> RAM")):
+            with np.load(f) as d:
+                ep = {
+                    "imgs": d["imgs"],                                  # uint8 (T,H,W,3) — μένει uint8
+                    "acts": d["acts"].astype(np.float32),               # (T,)
+                    "states": d["states"].astype(np.float32),           # (T,4) clean
+                    "x": (d[f"noisy_states_{shift}"] if shift in (2, 5, 10)
+                          else d["states"]).astype(np.float32),         # (T,4) input
+                }
+            self.eps.append(ep)
+            T = ep["states"].shape[0]
+            for s in range(0, max(T - window + 1, 0), stride):
+                self.index.append((fi, s))
+                angles.append(ep["states"][s, 2])
+        self.angles = np.asarray(angles, np.float32)
 
     def __len__(self):
-        # to have a full sequence, you need self.seq_len + 1 elements, as
-        # you must produce both an seq_len obs and seq_len next_obs sequences
-        if not self._cum_size:
-            self.load_next_buffer()
-        return self._cum_size[-1]
+        return len(self.index)
+
+
+# ---------------------------------------------------------------------------
+# VAE: 1 δείγμα = ζεύγος (t, t+1)
+# ---------------------------------------------------------------------------
+class VaePairDataset(_BaseRollout):
+    """ Επιστρέφει: img_t, img_tp1 (3,H,W), action_t, state_t (4), state_tp1 (4). """
+    def __init__(self, root, **kw):
+        super().__init__(root, window=2, **kw)
 
     def __getitem__(self, i):
-        # binary search through cum_size
-        # while True:
-        number=np.random.randint(0,self._cum_size[-1])
-
-        i=number
-        file_index = bisect(self._cum_size, i) - 1
-        seq_index = i - self._cum_size[file_index]
-        data = self._buffer[file_index]
-        if seq_index >= (len(data['observations'])-1):
-            seq_index = np.random.randint(0,len(data['observations'])-1)
-        # safes = data['safes'][seq_index +self.leng]
-        # if safes!=self.safeCache:
-        #     self.safeCache=safes
-        #     # print(safes)
-        #     break
-
-        return self._get_data(data, seq_index)
-
-    def _get_data(self, data, seq_index):
-        pass
-
-    def _data_per_sequence(self, data_length):
-        pass
+        fi, t = self.index[i]
+        ep = self.eps[fi]
+        # Επιστρέφουμε uint8 (C,H,W)· το .float()/255 γίνεται στη GPU (run_epoch),
+        # ώστε να μη φορτώνεται η CPU και να μεταφέρονται 4× λιγότερα bytes στο PCIe.
+        img_t = torch.from_numpy(ep["imgs"][t]).permute(2, 0, 1)        # uint8
+        img_tp1 = torch.from_numpy(ep["imgs"][t + 1]).permute(2, 0, 1)  # uint8
+        action = torch.tensor(ep["acts"][t])
+        state_t = torch.from_numpy(_standardize(ep["x"][t], self.mean, self.std))
+        state_tp1 = torch.from_numpy(_standardize(ep["states"][t + 1], self.mean, self.std))
+        return img_t, img_tp1, action, state_t, state_tp1
 
 
+# ---------------------------------------------------------------------------
+# LSTM (image-based εναλλακτική): παράθυρο seq_len ζευγών
+# ---------------------------------------------------------------------------
+class SequenceDataset(_BaseRollout):
+    """ seq_len διαδοχικά ζεύγη (t,t+1). Για 30 βήματα -> seq_len=31.
+    Επιστρέφει: img_t (L,3,H,W), img_tp1 (L,3,H,W), actions (L,), states (L,4),
+                states_clean (L,4).  Ανακάτεψε τα ΠΑΡΑΘΥΡΑ (shuffle=True), όχι μέσα τους. """
+    def __init__(self, root, seq_len=31, stride=1, **kw):
+        self.seq_len = seq_len
+        super().__init__(root, window=seq_len + 1, stride=stride, **kw)
 
-class VaeDataset(_RolloutDataset): # pylint: disable=too-few-public-methods
-    """ Encapsulates rollouts.
-
-    Rollouts should be stored in subdirs of the root directory, in the form of npz files,
-    each containing a dictionary with the keys:
-        - observations: (rollout_len, *obs_shape)
-        - actions: (rollout_len, action_size)
-        - rewards: (rollout_len,)
-        - terminals: (rollout_len,), boolean
-
-     As the dataset is too big to be entirely stored in rams, only chunks of it
-     are stored, consisting of a constant number of files (determined by the
-     buffer_size parameter).  Once built, buffers must be loaded with the
-     load_next_buffer method.
-
-    Data are then provided in the form of images
-
-    :args root: root directory of data sequences
-    :args seq_len: number of timesteps extracted from each rollout
-    :args transform: transformation of the observations
-    :args test: if True, test data, else test
-    """
-    def _data_per_sequence(self, data_length):
-        return data_length
-
-    def change_background_to_grey(self,obs):
-        for i in range(96):
-            for j in range(96):
-                if obs[i][j] < 1:
-                    obs[i][j] = 0.1
-        for i in range(96):
-            for j in range(96):
-                if obs[i][j] == 1:
-                    obs[i][j] = 0.75
-        ot = gaussian_filter(obs, sigma=2)
-        # img = ot
-        # Convert numpy array back to PIL Image
-        # new_image = Image.fromarray(np_image)
-        return ot
-    def _get_data(self, data, seq_index):
-        img = data['observations'][seq_index:seq_index+2]
-        action = data['actions'][seq_index]
-        # new_image = Image.fromarray(img)
-        # grayscale_img = new_image.convert('L')
-        # img = np.array(grayscale_img)
-        # 转换为 Tensor
-        image_tensor = torch.from_numpy(img[0]/ 255.0).permute(2, 0, 1)  # 调整通道顺序
-        image_tensor2 = torch.from_numpy(img[1]/ 255.0).permute(2, 0, 1)  # 调整通道顺序
-
-        # 如果需要将数据类型从 float64 转为 float32（PyTorch 通常需要 float32）
-        image_tensor = image_tensor.float()
-        image_tensor2 = image_tensor2.float()
-
-        states = data['x']
-        xposition = states[seq_index][0]
-        yposition = states[seq_index][1]
-
-        # obs = torch.tensor(img)
-        # # tensor_img = obs.permute(2, 0, 1)
-        #
-        # # Normalize the tensor to the range [0, 1]
-        # tensor_img = obs.float()
-        # tensor_img = (obs.float() ).unsqueeze(1)
+    def __getitem__(self, i):
+        fi, s = self.index[i]
+        ep = self.eps[fi]
+        L = self.seq_len
+        frames = ep["imgs"][s:s + L + 1].astype(np.float32) / 255.0      # (L+1,H,W,3)
+        frames = torch.from_numpy(frames).permute(0, 3, 1, 2)            # (L+1,3,H,W)
+        img_t = frames[:L].contiguous()
+        img_tp1 = frames[1:].contiguous()
+        actions = torch.from_numpy(ep["acts"][s:s + L])
+        states = torch.from_numpy(_standardize(ep["x"][s:s + L], self.mean, self.std))
+        states_clean = torch.from_numpy(_standardize(ep["states"][s:s + L], self.mean, self.std))
+        return img_t, img_tp1, actions, states, states_clean
 
 
-        #               / 255.0)
-        # # tensor_img = self.change_background_to_grey(tensor_img)
-        # tensor_img = tensor_img.permute(0,3,1,2)
+# ---------------------------------------------------------------------------
+# Pre-encoding: τρέξε τον (παγωμένο) VAE μία φορά -> z-ακολουθίες
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def precompute_latents(encode_fn, root, out_root, shift=0, batch=256, device="cuda"):
+    """ encode_fn(img_t, img_tp1) -> z. Ανά επεισόδιο σώζει .npz με z,acts,states,x (N=T-1). """
+    makedirs(out_root, exist_ok=True)
+    for f in tqdm(list_npz(root), desc="encoding"):
+        with np.load(f) as d:
+            imgs = torch.from_numpy(d["imgs"].astype(np.float32) / 255.0).permute(0, 3, 1, 2)
+            acts = d["acts"].astype(np.float32)
+            states = d["states"].astype(np.float32)
+            x = (d[f"noisy_states_{shift}"] if shift in (2, 5, 10) else d["states"]).astype(np.float32)
 
-        # return tensor_img[0],tensor_img[1],action
-        return image_tensor,image_tensor2,action, data['x'][seq_index],data['states'][seq_index+1]
+        img_t, img_tp1 = imgs[:-1], imgs[1:]
+        zs = []
+        for b in range(0, img_t.shape[0], batch):
+            zb = encode_fn(img_t[b:b + batch].to(device), img_tp1[b:b + batch].to(device))
+            zs.append(zb.cpu().numpy())
+        z = np.concatenate(zs, 0).astype(np.float32) if zs else np.empty((0, 0), np.float32)
 
-
-class SequenceDataset(_RolloutDataset): # pylint: disable=too-few-public-methods
-    """ Encapsulates rollouts.
-
-    Rollouts should be stored in subdirs of the root directory, in the form of npz files,
-    each containing a dictionary with the keys:
-        - observations: (rollout_len, *obs_shape)
-        - actions: (rollout_len, action_size)
-        - rewards: (rollout_len,)
-        - terminals: (rollout_len,), boolean
-
-     As the dataset is too big to be entirely stored in rams, only chunks of it
-     are stored, consisting of a constant number of files (determined by the
-     buffer_size parameter).  Once built, buffers must be loaded with the
-     load_next_buffer method.
-
-    Data are then provided in the form of images
-
-    :args root: root directory of data sequences
-    :args seq_len: number of timesteps extracted from each rollout
-    :args transform: transformation of the observations
-    :args test: if True, test data, else test
-    """
-    def _data_per_sequence(self, data_length):
-        return data_length
-
-    def change_background_to_grey(self,obs):
-        for i in range(96):
-            for j in range(96):
-                if obs[i][j] < 1:
-                    obs[i][j] = 0.1
-        for i in range(96):
-            for j in range(96):
-                if obs[i][j] == 1:
-                    obs[i][j] = 0.75
-        ot = gaussian_filter(obs, sigma=2)
-        # img = ot
-        # Convert numpy array back to PIL Image
-        # new_image = Image.fromarray(np_image)
-        return ot
-    def _get_data(self, data, seq_index):
-
-        if seq_index+32>len(data['observations']):
-            seq_index=np.random.randint(len(data['observations'])-32)
-        img = data['observations'][seq_index:seq_index+31]
-        action = data['actions'][seq_index:seq_index+31]
-        # new_image = Image.fromarray(img)
-        # grayscale_img = new_image.convert('L')
-        # img = np.array(grayscale_img)
-        # 转换为 Tensor
-        image_tensor = torch.from_numpy(img[0:30]/ 255.0).permute(0,3, 1, 2)  # 调整通道顺序
-        image_tensor2 = torch.from_numpy(img[1:]/ 255.0).permute(0,3, 1, 2)  # 调整通道顺序
-
-        # 如果需要将数据类型从 float64 转为 float32（PyTorch 通常需要 float32）
-        image_tensor = image_tensor.float()
-        image_tensor2 = image_tensor2.float()
-
-        states = data['x']
-        xposition = states[seq_index:seq_index+31][0]
-        yposition = states[seq_index:seq_index+31][1]
-
-        # obs = torch.tensor(img)
-        # # tensor_img = obs.permute(2, 0, 1)
-        #
-        # # Normalize the tensor to the range [0, 1]
-        # tensor_img = obs.float()
-        # tensor_img = (obs.float() ).unsqueeze(1)
+        np.savez_compressed(join(out_root, basename(f)),
+                            z=z, acts=acts[:-1], states=states[:-1], x=x[:-1])
 
 
-        #               / 255.0)
-        # # tensor_img = self.change_background_to_grey(tensor_img)
-        # tensor_img = tensor_img.permute(0,3,1,2)
+# ---------------------------------------------------------------------------
+# LSTM (συνιστώμενο): παράθυρα latents (ήδη all-in-RAM)
+# ---------------------------------------------------------------------------
+class LatentSequenceDataset(torch.utils.data.Dataset):
+    """ seq_len ΜΕΤΑΒΑΣΕΙΣ latents. Για 30 βήματα -> seq_len=30.
+    Επιστρέφει: z_t (L,latent), action (L,), z_tp1 (L,latent), state_t (L,4), state_tp1 (L,4).
+      - state_t   : input state στο t  (x -> noisy αν shift), standardized
+      - state_tp1 : CLEAN state στο t+1, standardized (στόχος για physical MSE / hybrid gt) """
+    def __init__(self, root, seq_len=30, stride=1, state_mean=None, state_std=None):
+        self.seq_len = seq_len
+        self.mean = None if state_mean is None else np.asarray(state_mean, np.float32)
+        self.std = None if state_std is None else np.asarray(state_std, np.float32)
 
-        # return tensor_img[0],tensor_img[1],action
-        return image_tensor.unsqueeze(0),image_tensor2.unsqueeze(0),action,states[seq_index:seq_index+31],states[seq_index:seq_index+31]
-        # img = data['observations'][seq_index:seq_index+31]
-        # action = data['actions'][seq_index:seq_index+31]
-        # # new_image = Image.fromarray(img)
-        # # grayscale_img = new_image.convert('L')
-        # # img = np.array(grayscale_img)
-        # obs = torch.tensor(img)
-        # # # tensor_img = obs.permute(2, 0, 1)
-        # #
-        # # # Normalize the tensor to the range [0, 1]
-        # tensor_img = (obs.float() ).unsqueeze(1)
-        # #               / 255.0)
-        # # # tensor_img = self.change_background_to_grey(tensor_img)
-        # # tensor_img = tensor_img.permute(0,3,1,2)
-        #
-        # # return tensor_img[0],tensor_img[1],action
-        # return tensor_img,tensor_img,action,(data['x'][seq_index:seq_index+31]-10)/6.667,(data['degree'][seq_index:seq_index+31]-10)/6.667
-        #
+        self.eps, self.index = [], []
+        for fi, f in enumerate(tqdm(list_npz(root), desc="loading latents -> RAM")):
+            with np.load(f) as d:
+                ep = {k: d[k].astype(np.float32) for k in ("z", "acts", "states", "x")}
+            self.eps.append(ep)
+            n = ep["z"].shape[0] - (seq_len + 1) + 1
+            for s in range(0, max(n, 0), stride):
+                self.index.append((fi, s))
+        if not self.index:
+            raise RuntimeError(f"Δεν βγήκαν παράθυρα από: {root} (seq_len πολύ μεγάλο;)")
+
+    def __len__(self):
+        return len(self.index)
+
+    def __getitem__(self, i):
+        fi, s = self.index[i]
+        ep = self.eps[fi]
+        L = self.seq_len
+        z = ep["z"][s:s + L + 1]
+        z_t = torch.from_numpy(z[:-1])
+        z_tp1 = torch.from_numpy(z[1:])
+        action = torch.from_numpy(ep["acts"][s:s + L])
+        state_t = torch.from_numpy(_standardize(ep["x"][s:s + L], self.mean, self.std))
+        state_tp1 = torch.from_numpy(_standardize(ep["states"][s + 1:s + L + 1], self.mean, self.std))
+        return z_t, action, z_tp1, state_t, state_tp1
+
+
+# ---------------------------------------------------------------------------
+# Προαιρετικό: ισορρόπηση ουρών (σπάνιες γωνίες)
+# ---------------------------------------------------------------------------
+def angle_balanced_weights(dataset, bins=40):
+    ang = dataset.angles
+    hist, edges = np.histogram(ang, bins=bins)
+    idx = np.clip(np.digitize(ang, edges[:-1]) - 1, 0, len(hist) - 1)
+    return torch.as_tensor(1.0 / (hist[idx] + 1.0), dtype=torch.double)
