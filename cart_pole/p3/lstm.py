@@ -1,388 +1,252 @@
-# =============================================================================
-#  Principle 3 — LSTM (Memory/Dynamics) πάνω στο P3 latent space (semi / weak)
-#  Ίδια λογική με p1/p2 lstm (precomputed latents + cache), encoder = VAE_P1.
-#
-#  ΣΤΟΧΟΣ LSTM (ground truth), ανά διάσταση κατάστασης [x, ẋ, θ, θ̇]:
-#    - static (0,2)   -> ΑΛΗΘΙΝΟ x_{t+1}, θ_{t+1} (dataset)           [semi & weak]
-#    - velocity (1,3) -> semi: encoder latent (ΑΝΕΠΟΠΤΕΥΤΟ) ·
-#                         weak: ΕΚΤΙΜΗΣΗ ẋ_est,θ̇_est=Δθέση/dt (dataset positions)
-#    - image (4:)     -> encoder latent z_{t+1}
-#  Inference: φυσική κατάσταση = ẑ[..., :state_dim] (ΧΩΡΙΣ probe).
-#
-#  Προϋπόθεση: εκπαιδευμένο P3 VAE (vae_p3_<mode>.pth) από το p3/vae.py.
-#  Για Kaggle Notebook (χωρίς argparse).
-# =============================================================================
-import os
-import pickle
-from os import listdir
-from os.path import join, isdir
+"""
+lstm_principle3_alt.py — LSTM predictor trained on ENCODED mode (CartPole Principle 3).
 
+Difference from lstm_principle3.py (hybrid):
+  * NO hybrid-gt injection: seed & teacher-forcing targets use
+    EXCLUSIVELY VAE-encoded latents (z), NOT GT physical states.
+  * NO regime-aware _hybrid (no velocity estimation, no static-dim overrides).
+  * The LSTM sees ONLY what the frozen P3 VAE produced — exactly as in inference.
+  * Produces the *_alt checkpoints used in eval_baseline_vs_p3.py "encoded" mode.
+
+NOTE: Run SEPARATELY for SUPERVISION="semi" and ="weak" (must match the VAE checkpoint).
+The SUP_DIMS config still controls which dims get W_PHYS emphasis in the training loss,
+but this emphasis is applied to the VAE-encoded latent targets (not GT states).
+"""
+import os
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+import torch.optim as optim
+from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-CACHE_VERSION = "v3-p3"   # cache schema: z + acts + states (true) + vel_est
+from vae_principle3 import VAE, encode_fn
+from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
+
+# ---------------------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------------------
+SUPERVISION = "weak"       # "semi" | "weak" (MUST match the VAE checkpoint)
+
+DATA_ROOT = "/kaggle/working/cartpole_data"
+LATENT_ROOT = f"/kaggle/working/cartpole_latents_p3_{SUPERVISION}"
+NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
+VAE_CKPT = f"/kaggle/working/vae_p3_out/vae_p3_{SUPERVISION}_best.pth"
+SAVE_DIR = f"/kaggle/working/lstm_p3_{SUPERVISION}_alt_out"
+
+LATENT_SIZE = 64
+N_SUP = 4
+N_IMG = LATENT_SIZE - N_SUP
+N_ACTIONS = 2
+SHIFT = 0
+
+# Principle 3 supervision regime (controls W_PHYS emphasis dims in loss)
+STATIC_DIMS = (0, 2)       # x, theta
+VEL_DIMS = (1, 3)          # x_dot, theta_dot
+SUP_DIMS = sorted(STATIC_DIMS + (VEL_DIMS if SUPERVISION == "weak" else ()))
+
+SEQ_LEN = 30
+STRIDE = 5
+BATCH = 64
+
+HIDDEN = 64
+LAYERS = 2
+
+EPOCHS = 50
+LR = 1e-3
+CLIP = 1.0
+W_PHYS = 1.0
+
+# Scheduled sampling (per epoch)
+P_START = 1.0
+P_END = 0.3
+P_DECAY_EPOCHS = 40
+
+# Horizon curriculum (per epoch)
+L_START = 5
+CURRICULUM_EPOCHS = 15
+
+EARLY_STOP_PATIENCE = 6
+SCHED_PATIENCE = 4
+NUM_WORKERS = 2
+SEED = 0
+DO_PRECOMPUTE = True
 
 
-# ------------------------------- CONFIG --------------------------------------
-class CFG:
-    train        = "/kaggle/working/cartpole_data/train"
-    val          = "/kaggle/working/cartpole_data/val"
-
-    supervision  = "weak"    # "semi" | "weak" (ΠΡΕΠΕΙ να ταιριάζει με το VAE)
-    vae_weights  = None      # None -> "/kaggle/working/vae_p3_<mode>.pth"
-    save         = None      # None -> "/kaggle/working/p3lstm_<mode>.pth"
-    weights      = None      # None -> ίδιο με save
-    cache_train  = None      # None -> "/kaggle/working/p3_latents_<mode>_train.pkl"
-    cache_val    = None
-    force_retrain   = False
-    force_recompute = False
-
-    # --- model ---
-    latent       = 64
-    state_dim    = 4
-    static_dims  = (0, 2)
-    vel_dims     = (1, 3)
-    hidden       = 64
-    num_layers   = 2
-    dt           = 0.02      # για την εκτίμηση ταχύτητας (πρέπει να ταιριάζει με το VAE)
-
-    # --- training ---
-    seq_len      = 30
-    stride       = 1
-    enc_batch    = 256
-    batch        = 64
-    num_workers  = 0
-    epochs       = 200
-    patience     = 10
-    min_delta    = 0.0
-    lr           = 1e-3
-    state_weight = 10.0      # βάρος των ΕΠΟΠΤΕΥΟΜΕΝΩΝ state dims
-
-    @classmethod
-    def resolve(cls):
-        m = cls.supervision
-        if cls.vae_weights is None:
-            cls.vae_weights = f"/kaggle/working/vae_p3_{m}.pth"
-        if cls.save is None:
-            cls.save = f"/kaggle/working/p3lstm_{m}.pth"
-        if cls.weights is None:
-            cls.weights = cls.save
-        if cls.cache_train is None:
-            cls.cache_train = f"/kaggle/working/p3_latents_{m}_train.pkl"
-        if cls.cache_val is None:
-            cls.cache_val = f"/kaggle/working/p3_latents_{m}_val.pkl"
+def set_seed(s):
+    np.random.seed(s); torch.manual_seed(s); torch.cuda.manual_seed_all(s)
 
 
-def _list_npz(root):
-    files = []
-    for sd in sorted(listdir(root)):
-        p = join(root, sd)
-        if isdir(p):
-            for ssd in sorted(listdir(p)):
-                files.append(join(p, ssd))
-        else:
-            files.append(p)
-    return sorted(files)
+# ---------------------------------------------------------------------------
+# Model — residual latent predictor
+# ---------------------------------------------------------------------------
+class LatentPredictor(nn.Module):
+    def __init__(self, latent=64, action_dim=2, hidden=64, layers=2):
+        super().__init__()
+        self.hidden, self.layers = hidden, layers
+        self.lstm = nn.LSTM(latent + action_dim, hidden, layers, batch_first=True)
+        self.fc = nn.Linear(hidden, latent)
+        nn.init.zeros_(self.fc.weight); nn.init.zeros_(self.fc.bias)
+
+    def init_hidden(self, b, device):
+        return (torch.zeros(self.layers, b, self.hidden, device=device),
+                torch.zeros(self.layers, b, self.hidden, device=device))
+
+    def step(self, z, a_onehot, hidden):
+        inp = torch.cat([z, a_onehot], dim=-1).unsqueeze(1)
+        out, hidden = self.lstm(inp, hidden)
+        return z + self.fc(out.squeeze(1)), hidden
 
 
-# ------------------------------- MODELS --------------------------------------
-class VAE_P1(nn.Module):
-    """ Ίδιο split-encoding VAE — φορτώνεται παγωμένο από vae_p3_<mode>.pth. """
+# ---------------------------------------------------------------------------
+# Rollout — ENCODED mode: NO hybrid-gt injection, NO velocity estimation
+# ---------------------------------------------------------------------------
+def rollout(model, batch, p_tf, n_actions, free_running=False, max_len=None):
+    """Rollout without _hybrid: seed & teacher-forcing targets = pure VAE latents."""
+    z_t, action, z_tp1, state_t, state_tp1 = batch
+    L = z_t.shape[1] if max_len is None else min(max_len, z_t.shape[1])
+    B, _, D = z_t.shape
+    device = z_t.device
 
-    def __init__(self, latent_size=64, state_dim=4):
-        super(VAE_P1, self).__init__()
-        self.latent_size = latent_size
-        self.state_dim = state_dim
-        self.img_dim = latent_size - state_dim
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, 16, 4, 2, 1), nn.ReLU(inplace=True),
-            nn.Conv2d(16, 32, 4, 2, 1), nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, 4, 2, 1), nn.ReLU(inplace=True),
-        )
-        self.state_head = nn.Linear(64 * 10 * 15, state_dim)
-        self.fc_mu = nn.Linear(64 * 10 * 15, self.img_dim)
-        self.fc_logvar = nn.Linear(64 * 10 * 15, self.img_dim)
-        self.fc_decode = nn.Linear(latent_size, 64 * 10 * 15)
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, 4, 2, 1), nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(32, 16, 4, 2, 1), nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(16, 3, 4, 2, 1), nn.Sigmoid(),
-        )
+    # ENCODED seed: pure VAE latent (NO GT override, NO velocity estimation)
+    z_seed = z_t[:, 0]
+    # Teacher-forcing targets: pure VAE latents
+    z_gt = z_tp1[:, :L]
 
-
-class LSTMTimeSeries(nn.Module):
-    def __init__(self, input_size=65, hidden_size=64, num_layers=2, output_size=64):
-        super(LSTMTimeSeries, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, output_size)
-
-    def forward(self, x):
-        b = x.shape[0]
-        h0 = torch.zeros(self.num_layers, b, self.hidden_size, device=x.device)
-        c0 = torch.zeros(self.num_layers, b, self.hidden_size, device=x.device)
-        out, _ = self.lstm(x, (h0, c0))
-        return self.fc(out)
+    hidden = model.init_hidden(B, device)
+    z_in = z_seed
+    preds = []
+    for k in range(L):
+        a = F.one_hot(action[:, k].long(), n_actions).float()
+        z_pred, hidden = model.step(z_in, a, hidden)
+        preds.append(z_pred)
+        if k < L - 1:
+            if free_running:
+                z_in = z_pred.detach()
+            else:
+                use_tf = (torch.rand(B, 1, device=device) < p_tf).float()
+                z_in = use_tf * z_gt[:, k] + (1.0 - use_tf) * z_pred.detach()
+    return torch.stack(preds, dim=1), z_gt, state_tp1
 
 
-@torch.no_grad()
-def encode_latent(vae, frames, device, enc_batch=256):
-    """ ΝΤΕΤΕΡΜΙΝΙΣΤΙΚΟ latent: [state_head(feat) || fc_mu(feat)] -> (N, latent). """
-    outs = []
-    for s in range(0, frames.shape[0], enc_batch):
-        x = frames[s:s + enc_batch].to(device)
-        feat = vae.encoder(x).reshape(x.size(0), -1)
-        outs.append(torch.cat([vae.state_head(feat), vae.fc_mu(feat)], dim=1))
-    return torch.cat(outs, dim=0)
-
-
-def load_vae(cfg, device):
-    if not os.path.isfile(cfg.vae_weights):
-        raise FileNotFoundError(
-            f"Δεν βρέθηκαν βάρη P3 VAE στο '{cfg.vae_weights}'.\n"
-            f"Τρέξε πρώτα το p3/vae.py με ΙΔΙΟ CFG.supervision.")
-    vae = VAE_P1(latent_size=cfg.latent, state_dim=cfg.state_dim).to(device)
-    vae.load_state_dict(torch.load(cfg.vae_weights, map_location=device))
-    vae.eval()
-    for p in vae.parameters():
-        p.requires_grad_(False)
-    print(f"[P3-VAE] Παγωμένα βάρη φορτώθηκαν από {cfg.vae_weights}.")
-    return vae
-
-
-# --------------------------- PRECOMPUTE LATENTS ------------------------------
-def _vae_signature(vae_weights):
-    mtime = os.path.getmtime(vae_weights) if os.path.isfile(vae_weights) else None
-    return (vae_weights, mtime, CACHE_VERSION)
-
-
-@torch.no_grad()
-def precompute_latents(vae, root, device, cfg, cache_path, force=False):
-    """ Encode -> z, ΜΑΖΙ με ΑΛΗΘΙΝΑ states και ΕΚΤΙΜΗΣΗ ταχύτητας (Δθέση/dt). """
-    sig = _vae_signature(cfg.vae_weights)
-    if (not force) and os.path.isfile(cache_path):
-        with open(cache_path, 'rb') as fh:
-            blob = pickle.load(fh)
-        if blob.get('sig') == sig:
-            print(f"[CACHE] Latents από {cache_path} ({len(blob['episodes'])} επεισόδια).")
-            return blob['episodes']
-        print(f"[CACHE] Το {cache_path} είναι stale -> recompute.")
-
-    files = _list_npz(root)
-    if not files:
-        raise RuntimeError(f"Κανένα .npz αρχείο στο: {root}")
-
-    episodes = []
-    for f in tqdm(files, desc=f"Encoding P3 latents [{os.path.basename(root)}]"):
-        with np.load(f) as d:
-            imgs = d['imgs']
-            if imgs.shape[0] < 2:
-                continue
-            acts = d['acts'].astype(np.float32)
-            states = d['states'].astype(np.float32)            # (T,4) ΑΛΗΘΙΝΟ
-            frames = torch.from_numpy(imgs.astype(np.float32) / 255.0).permute(0, 3, 1, 2)
-        z = encode_latent(vae, frames, device, cfg.enc_batch).cpu().numpy().astype(np.float32)
-        T = states.shape[0]
-        vel_est = np.zeros((T, 2), dtype=np.float32)           # [ẋ_est, θ̇_est]
-        vel_est[:-1, 0] = (states[1:, 0] - states[:-1, 0]) / cfg.dt
-        vel_est[:-1, 1] = (states[1:, 2] - states[:-1, 2]) / cfg.dt
-        vel_est[-1] = vel_est[-2]                              # boundary: copy
-        episodes.append({'z': z, 'acts': acts, 'states': states, 'vel_est': vel_est})
-
-    with open(cache_path, 'wb') as fh:
-        pickle.dump({'episodes': episodes, 'sig': sig}, fh)
-    print(f"[CACHE] Αποθηκεύτηκαν {len(episodes)} επεισόδια latents -> {cache_path}")
-    return episodes
-
-
-# ----------------------------- DATASET (latents) -----------------------------
-class LatentSequenceDataset(Dataset):
-    def __init__(self, episodes, seq_len=30, stride=1):
-        self.episodes = episodes
-        self.seq_len = seq_len
-        self.index = []
-        for ei, ep in enumerate(episodes):
-            max_start = ep['z'].shape[0] - (seq_len + 1)
-            for s in range(0, max_start + 1, stride):
-                self.index.append((ei, s))
-        if not self.index:
-            raise RuntimeError(f"Κανένα έγκυρο παράθυρο μήκους {seq_len + 1}.")
-
-    def __len__(self):
-        return len(self.index)
-
-    def __getitem__(self, i):
-        ei, s = self.index[i]
-        ep = self.episodes[ei]
-        L = self.seq_len
-        z_in = torch.from_numpy(ep['z'][s:s + L])
-        z_out = torch.from_numpy(ep['z'][s + 1:s + L + 1])          # encoder latent (στόχος image/semi-vel)
-        act = torch.from_numpy(ep['acts'][s:s + L])
-        st_out = torch.from_numpy(ep['states'][s + 1:s + L + 1])    # (L,4) ΑΛΗΘΙΝΟ state_{t+1}
-        vel_out = torch.from_numpy(ep['vel_est'][s + 1:s + L + 1])  # (L,2) εκτίμηση ταχύτητας_{t+1}
-        return z_in, z_out, act, st_out, vel_out
-
-
-# ------------------------------- TRAINING ------------------------------------
-def _build_target(z_out, st_out, vel_out, cfg):
-    """ z_target = encoder latent, με overwrite στις φυσικές dims:
-        static(0,2) = ΑΛΗΘΙΝΟ· velocity(1,3) = εκτίμηση (μόνο weak). """
-    z_target = z_out.clone()
-    z_target[..., 0] = st_out[..., 0]       # true x
-    z_target[..., 2] = st_out[..., 2]       # true θ
-    if cfg.supervision == "weak":
-        z_target[..., 1] = vel_out[..., 0]  # ẋ_est
-        z_target[..., 3] = vel_out[..., 1]  # θ̇_est
-    return z_target
-
-
-def _dim_weights(cfg, device):
-    """ Βάρος ανά latent dim: state_weight στις ΕΠΟΠΤΕΥΟΜΕΝΕΣ φυσικές dims, αλλιώς 1. """
-    w = torch.ones(cfg.latent, device=device)
-    for d in cfg.static_dims:
-        w[d] = cfg.state_weight
-    if cfg.supervision == "weak":
-        for d in cfg.vel_dims:
-            w[d] = cfg.state_weight
-    return w
-
-
-def train_one_epoch(predictor, loader, optimizer, device, cfg, w):
-    predictor.train()
-    total_loss, total_n = 0.0, 0
-    for z_in, z_out, act, st_out, vel_out in tqdm(loader, desc="Training Progress", leave=False):
-        z_in = z_in.to(device)
-        z_out = z_out.to(device)
-        act = act.to(device).float()
-        st_out = st_out.to(device).float()
-        vel_out = vel_out.to(device).float()
-        lstm_in = torch.cat([z_in, act.unsqueeze(-1)], dim=-1)
+# ---------------------------------------------------------------------------
+# Train / Eval
+# ---------------------------------------------------------------------------
+def train_epoch(model, loader, optimizer, device, p_tf, cur_len, desc=""):
+    model.train()
+    tot, n = 0.0, 0
+    pbar = tqdm(loader, desc=desc, leave=False)
+    for batch in pbar:
+        batch = [b.to(device, non_blocking=True) for b in batch]
+        preds, z_gt, _ = rollout(model, batch, p_tf, N_ACTIONS,
+                                  free_running=False, max_len=cur_len)
+        # W_PHYS emphasis on supervised dims (same regime as hybrid version)
+        loss = (F.mse_loss(preds, z_gt, reduction="mean")
+                + W_PHYS * F.mse_loss(preds[..., SUP_DIMS], z_gt[..., SUP_DIMS], reduction="mean"))
 
         optimizer.zero_grad()
-        pred = predictor(lstm_in)
-        z_target = _build_target(z_out, st_out, vel_out, cfg)
-        loss = (((pred - z_target) ** 2) * w).sum()
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), CLIP)
         optimizer.step()
-        total_loss += loss.item()
-        total_n += z_in.shape[0] * z_in.shape[1]
-    return total_loss / max(total_n, 1)
+
+        bs = preds.size(0)
+        tot += loss.item() * bs; n += bs
+        pbar.set_postfix(loss=f"{tot/n:.5f}", p_tf=f"{p_tf:.2f}", H=cur_len)
+    return tot / n
 
 
 @torch.no_grad()
-def evaluate(predictor, loader, device, cfg, w):
-    """ Επιστρέφει (total per-step, static-MSE vs true, velocity-MSE vs ΑΛΗΘΙΝΗ). """
-    predictor.eval()
-    sd_idx = list(cfg.static_dims)
-    vd_idx = list(cfg.vel_dims)
-    total_loss, static_mse, vel_mse, total_n = 0.0, 0.0, 0.0, 0
-    for z_in, z_out, act, st_out, vel_out in loader:
-        z_in = z_in.to(device)
-        z_out = z_out.to(device)
-        act = act.to(device).float()
-        st_out = st_out.to(device).float()
-        vel_out = vel_out.to(device).float()
-        lstm_in = torch.cat([z_in, act.unsqueeze(-1)], dim=-1)
-        pred = predictor(lstm_in)
-        z_target = _build_target(z_out, st_out, vel_out, cfg)
-        total_loss += (((pred - z_target) ** 2) * w).sum().item()
-        static_mse += F.mse_loss(pred[..., sd_idx], st_out[..., sd_idx], reduction='sum').item()
-        # velocity vs ΑΛΗΘΙΝΗ ταχύτητα (diagnostic) -> δείχνει semi vs weak
-        vel_mse += F.mse_loss(pred[..., vd_idx], st_out[..., vd_idx], reduction='sum').item()
-        total_n += z_in.shape[0] * z_in.shape[1]
-    return (total_loss / max(total_n, 1), static_mse / max(total_n, 1),
-            vel_mse / max(total_n, 1))
+def eval_epoch(model, loader, device, std4, desc=""):
+    """FREE-RUNNING at full SEQ_LEN -> physical MSE per horizon (vs TRUE state, all 4 dims)."""
+    model.eval()
+    se, n = None, 0
+    for batch in tqdm(loader, desc=desc, leave=False):
+        batch = [b.to(device, non_blocking=True) for b in batch]
+        preds, _, state_tp1 = rollout(model, batch, 0.0, N_ACTIONS,
+                                       free_running=True, max_len=None)
+        err = (preds[..., :N_SUP] - state_tp1) * std4
+        s = (err ** 2).sum(dim=0)
+        se = s if se is None else se + s
+        n += preds.size(0)
+    return (se / n).mean(dim=1).cpu().numpy()
 
 
-def train_lstm(cfg, predictor, train_eps, val_eps, device):
-    traindataset = LatentSequenceDataset(train_eps, seq_len=cfg.seq_len, stride=cfg.stride)
-    valdataset = LatentSequenceDataset(val_eps, seq_len=cfg.seq_len, stride=cfg.stride)
-    print(f"[DATA] train windows: {len(traindataset)} | val windows: {len(valdataset)}")
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    assert SUPERVISION in ("semi", "weak"), "SUPERVISION ∈ {'semi','weak'} (full == baseline)"
+    set_seed(SEED)
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("device:", device, " | supervision:", SUPERVISION, " | SUP_DIMS:", SUP_DIMS)
 
-    TrainLoader = DataLoader(traindataset, batch_size=cfg.batch, shuffle=True,
-                             drop_last=True, num_workers=cfg.num_workers)
-    ValLoader = DataLoader(valdataset, batch_size=cfg.batch, shuffle=False,
-                           drop_last=False, num_workers=cfg.num_workers)
+    mean, std = load_norm_stats(NORM_STATS)
+    std4 = torch.tensor(std[:N_SUP], device=device)
 
-    optimizer = optim.Adam(predictor.parameters(), lr=cfg.lr)
-    w = _dim_weights(cfg, device)
+    if DO_PRECOMPUTE:
+        vae = VAE(latent_size=LATENT_SIZE).to(device)
+        vae.load_state_dict(torch.load(VAE_CKPT, map_location=device))
+        vae.eval()
+        enc = encode_fn(vae, device)
+        for split in ("train", "val", "test"):
+            src = os.path.join(DATA_ROOT, split)
+            if os.path.isdir(src):
+                print(f"pre-encoding {split} ...")
+                precompute_latents(enc, src, os.path.join(LATENT_ROOT, split),
+                                   shift=SHIFT, device=device)
+        del vae
 
-    best_val = float('inf')
-    epochs_no_improve = 0
-    for epoch in range(cfg.epochs):
-        train_loss = train_one_epoch(predictor, TrainLoader, optimizer, device, cfg, w)
-        val_loss, val_static, val_vel = evaluate(predictor, ValLoader, device, cfg, w)
-        print(f'Epoch {epoch + 1} [{cfg.supervision}]: train {train_loss:.4f} | '
-              f'val {val_loss:.4f} | static-MSE {val_static:.4f} | vel-MSE(vs true) {val_vel:.4f}')
+    train_ds = LatentSequenceDataset(os.path.join(LATENT_ROOT, "train"),
+                                     seq_len=SEQ_LEN, stride=STRIDE,
+                                     state_mean=mean, state_std=std)
+    val_ds = LatentSequenceDataset(os.path.join(LATENT_ROOT, "val"),
+                                   seq_len=SEQ_LEN, stride=STRIDE,
+                                   state_mean=mean, state_std=std)
+    pw = NUM_WORKERS > 0
+    train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True, drop_last=True,
+                          num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
+    val_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False,
+                        num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
+    print(f"train windows: {len(train_ds)} | val windows: {len(val_ds)}")
 
-        if val_loss < best_val - cfg.min_delta:
-            best_val = val_loss
-            epochs_no_improve = 0
-            torch.save(predictor.state_dict(), cfg.save)
-            print(f'  ✓ νέο καλύτερο val ({best_val:.4f}) -> {cfg.save}')
+    model = LatentPredictor(LATENT_SIZE, N_ACTIONS, HIDDEN, LAYERS).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=LR)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5,
+                                                      patience=SCHED_PATIENCE)
+
+    best, bad = float("inf"), 0
+    for epoch in range(1, EPOCHS + 1):
+        p_tf = max(P_END, P_START - (P_START - P_END) * (epoch - 1)
+                   / max(P_DECAY_EPOCHS, 1))
+        cur_len = int(round(min(SEQ_LEN, L_START + (SEQ_LEN - L_START)
+                                * (epoch - 1) / max(CURRICULUM_EPOCHS, 1))))
+
+        tr = train_epoch(model, train_dl, optimizer, device, p_tf, cur_len,
+                         desc=f"E{epoch:03d} train")
+        mse_h = eval_epoch(model, val_dl, device, std4, desc=f"E{epoch:03d} val")
+        val_mean = float(mse_h.mean())
+        scheduler.step(val_mean)
+        lr_now = optimizer.param_groups[0]["lr"]
+
+        h = {hh: mse_h[hh - 1] for hh in (1, 10, 20, SEQ_LEN) if hh <= SEQ_LEN}
+        h_str = "  ".join(f"h{k}={v:.4f}" for k, v in h.items())
+        print(f"E{epoch:03d} [{SUPERVISION}] | p_tf={p_tf:.2f} H_train={cur_len} lr={lr_now:.1e} | "
+              f"train={tr:.5f} | val phys-MSE mean={val_mean:.4f} | {h_str}")
+
+        if val_mean < best - 1e-6:
+            best, bad = val_mean, 0
+            torch.save(model.state_dict(),
+                       os.path.join(SAVE_DIR, f"lstm_p3_{SUPERVISION}_alt_best.pth"))
+            np.save(os.path.join(SAVE_DIR, "val_mse_per_horizon.npy"), mse_h)
+            print("  -> best model saved")
         else:
-            epochs_no_improve += 1
-            print(f'  χωρίς βελτίωση ({epochs_no_improve}/{cfg.patience})')
-            if epochs_no_improve >= cfg.patience:
-                print(f'Early stopping στο epoch {epoch + 1}.')
+            bad += 1
+            if bad >= EARLY_STOP_PATIENCE:
+                print(f"Early stopping at epoch {epoch}.")
                 break
-    return best_val
 
-
-def load_or_train_lstm(cfg=CFG):
-    cfg.resolve()
-    assert cfg.supervision in ("semi", "weak"), "CFG.supervision ∈ {'semi','weak'}"
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device} | supervision: {cfg.supervision}")
-
-    vae = load_vae(cfg, device)
-    predictor = LSTMTimeSeries(input_size=cfg.latent + 1, hidden_size=cfg.hidden,
-                               num_layers=cfg.num_layers, output_size=cfg.latent).to(device)
-
-    if (not cfg.force_retrain) and os.path.isfile(cfg.weights):
-        predictor.load_state_dict(torch.load(cfg.weights, map_location=device))
-        predictor.eval()
-        print(f"[P3-LSTM] Φορτώθηκαν έτοιμα βάρη από {cfg.weights} -> παράλειψη εκπαίδευσης.")
-        return vae, predictor, device
-
-    print(f"[P3-LSTM] Δεν βρέθηκε checkpoint (ή force_retrain=True) -> εκπαίδευση.")
-    train_eps = precompute_latents(vae, cfg.train, device, cfg, cfg.cache_train, cfg.force_recompute)
-    val_eps = precompute_latents(vae, cfg.val, device, cfg, cfg.cache_val, cfg.force_recompute)
-
-    best_val = train_lstm(cfg, predictor, train_eps, val_eps, device)
-    predictor.load_state_dict(torch.load(cfg.save, map_location=device))
-    predictor.eval()
-    print(f"[P3-LSTM] Φορτώθηκε το καλύτερο μοντέλο (val={best_val:.4f}) από {cfg.save}.")
-    return vae, predictor, device
-
-
-# =============================================================================
-#  INFERENCE — φυσική κατάσταση = ẑ[..., :state_dim] (χωρίς probe).
-# =============================================================================
-@torch.no_grad()
-def rollout_batch(lstm, z0, actions, device):
-    B, H = actions.shape
-    h = torch.zeros(lstm.num_layers, B, lstm.hidden_size, device=device)
-    c = torch.zeros_like(h)
-    z = z0.unsqueeze(1)
-    preds = []
-    for k in range(H):
-        a = actions[:, k].view(B, 1, 1)
-        out, (h, c) = lstm.lstm(torch.cat([z, a], dim=-1), (h, c))
-        z = lstm.fc(out)
-        preds.append(z)
-    return torch.cat(preds, dim=1)
-
-
-def latent_to_state(z, state_dim=4):
-    return z[..., :state_dim]
-
-
-# Φορτώνει παγωμένο P3 VAE + (φορτώνει ή εκπαιδεύει) LSTM σε precomputed P3 latents.
-vae_model, lstm_model, device = load_or_train_lstm(CFG)
+    torch.save(model.state_dict(),
+               os.path.join(SAVE_DIR, f"lstm_p3_{SUPERVISION}_alt_last.pth"))
+    print("Best val phys-MSE:", best)
