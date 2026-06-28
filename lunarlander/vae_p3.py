@@ -300,7 +300,7 @@ def _rmse_str(rmse, sup_dims):
         parts.append(f"{star}{nm}={rmse[i]:.4f}")
     return "  ".join(parts)
 
-
+'''
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -346,6 +346,7 @@ if __name__ == "__main__":
         def total(d):
             return d["recon"] + BETA_PHYS * d["kld_phys"] + beta_style * d["kld_style"] + LAMBDA_SUP * d["sup"]
         tr_total, va_total = total(tr), total(va)
+        '''
         val_score = va["recon"] + LAMBDA_SUP * va["sup"]    # selection (beta-independent)
         scheduler.step(val_score)
         lr_now = optimizer.param_groups[0]["lr"]
