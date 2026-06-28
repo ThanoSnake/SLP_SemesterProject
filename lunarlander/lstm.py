@@ -150,7 +150,7 @@ def eval_epoch(model, loader, device, std_phys, desc=""):
         n += preds.size(0)
     return (se / n).mean(dim=1).cpu().numpy()                  # (L,) physical MSE ανά ορίζοντα
 
-
+'''
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -218,3 +218,4 @@ if __name__ == "__main__":
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "lstm_baseline_alt_last.pth"))
     print("Best val phys-MSE:", best)
+'''
