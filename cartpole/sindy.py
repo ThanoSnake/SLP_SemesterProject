@@ -51,6 +51,10 @@ NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
 LATENT_ROOT = "/kaggle/working/cartpole_sindy_latents"
 SAVE_DIR = "/kaggle/working/cartpole_sindy"
 
+# Trained hybrid checkpoints (absolute, configurable per model)
+HYBRID_BASELINE_CKPT = "<hybrid-baseline>"
+HYBRID_P1_CKPT = "<hybrid-p1>"
+
 LATENT_SIZE = 64
 SHIFT = 0
 
@@ -71,12 +75,14 @@ MODELS = [
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
      "vae_ckpt": "<cartpole-baseline-vae>",
      "lstm_ckpt": "<cartpole-baseline-lstm>",
-     "latent_root": os.path.join(LATENT_ROOT, "baseline")},
+     "latent_root": os.path.join(LATENT_ROOT, "baseline"),
+     "hybrid_ckpt": HYBRID_BASELINE_CKPT},
     {"label": "Principle 1",
      "make_vae": lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG),
      "vae_ckpt": "<cartpole-p1-vae>",
      "lstm_ckpt": "<cartpole-p1-lstm>",
-     "latent_root": os.path.join(LATENT_ROOT, "p1")},
+     "latent_root": os.path.join(LATENT_ROOT, "p1"),
+     "hybrid_ckpt": HYBRID_P1_CKPT},
 ]
 
 SEQ_LEN = 30
@@ -110,6 +116,13 @@ TRAIN_STRIDE = 5
 TRAIN_BATCH = 64
 NUM_WORKERS = 2
 CORR_BOUND = None        # None -> unbounded residual; float -> CORR_BOUND*tanh(fc) for stability
+SHOW_PROGRESS = False    # tqdm bars render as line-spam under Kaggle's non-TTY logs -> off by default
+
+# Visual-noise sweep on TEST images before encoding (mirrors test_p1.py). Models are fit/trained
+# on CLEAN train/val latents; the test split is re-encoded at each level to measure robustness.
+NOISE_TYPE = "gaussian"                       # "gaussian" | "salt_pepper"
+NOISE_LEVELS = [0.0, 0.05, 0.10, 0.20, 0.30]  # std on [0,1] image; 0.0 = clean
+NOISE_SEED = 42
 
 
 #
@@ -320,7 +333,7 @@ def load_transitions(latent_dir, n_sup, n_actions, control_mode, max_samples=Non
     """Returns Z (M, n_sup), U (M, n_ctrl), dZ (M, n_sup) over all episodes in latent_dir.
     A transition is (z[k][:n_sup], acts[k]) -> z[k+1][:n_sup]; dZ is the residual target."""
     Zs, Us, dZs = [], [], []
-    for f in tqdm(list_npz(latent_dir), desc="building transitions"):
+    for f in tqdm(list_npz(latent_dir), desc="building transitions", disable=not SHOW_PROGRESS):
         with np.load(f) as d:
             z = d["z"].astype(np.float32)
             acts = d["acts"].astype(np.float32)
@@ -363,9 +376,65 @@ def save_model(path, library, Xi, cfg):
 #
 #  Encode a model's latents fresh from the dataset
 #
+def add_gaussian_noise(img, std, gen):
+    noise = torch.randn(img.shape, generator=gen, device=img.device) * std
+    return torch.clamp(img + noise, 0.0, 1.0)
+
+
+def add_salt_pepper_noise(img, amount, gen):
+    mask = torch.rand(img.shape, generator=gen, device=img.device)
+    out = img.clone()
+    out[mask < amount / 2] = 0.0
+    out[mask > 1 - amount / 2] = 1.0
+    return out
+
+
+def make_noise_fn(noise_type, level, seed, device):
+    """Returns (img_tensor) -> noisy_img_tensor with a fixed seed (reproducible)."""
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+    if level == 0.0:
+        return lambda x: x
+    if noise_type == "gaussian":
+        return lambda x: add_gaussian_noise(x, level, gen)
+    if noise_type == "salt_pepper":
+        return lambda x: add_salt_pepper_noise(x, level, gen)
+    raise ValueError(f"Unknown noise type: {noise_type}")
+
+
+def noise_tag(level):
+    return f"{NOISE_TYPE}_{level:.2f}".replace(".", "p")
+
+
+@torch.no_grad()
+def precompute_latents_noisy(encode_fn, root, out_root, noise_fn, shift=0, batch=256, device="cuda"):
+    """Like loader.precompute_latents but applies noise_fn to every frame BEFORE encoding.
+    The whole image sequence is noised once, then sliced into (t, t+1) pairs, so each physical
+    frame gets a single noise realization (consistent whether seen as t or t+1)."""
+    from os.path import join, basename
+    from os import makedirs
+    makedirs(out_root, exist_ok=True)
+    for f in tqdm(list_npz(root), desc="encoding (noisy)", disable=not SHOW_PROGRESS):
+        with np.load(f) as d:
+            imgs = torch.from_numpy(d["imgs"].astype(np.float32) / 255.0).permute(0, 3, 1, 2)
+            acts = d["acts"].astype(np.float32)
+            states = d["states"].astype(np.float32)
+            x = (d[f"noisy_states_{shift}"] if shift in (2, 5, 10) else d["states"]).astype(np.float32)
+        imgs = noise_fn(imgs.to(device))
+        img_t, img_tp1 = imgs[:-1], imgs[1:]
+        zs = []
+        for b in range(0, img_t.shape[0], batch):
+            zb = encode_fn(img_t[b:b + batch], img_tp1[b:b + batch])
+            zs.append(zb.cpu().numpy())
+        z = np.concatenate(zs, 0).astype(np.float32) if zs else np.empty((0, 0), np.float32)
+        np.savez_compressed(join(out_root, basename(f)),
+                            z=z, acts=acts[:-1], states=states[:-1], x=x[:-1])
+
+
 def encode_latents(cfg, device):
-    """Load the model's VAE and write z latents to cfg['latent_root']/{train,val,test}.
-    A single local encoder works for any VAE variant (both expose .encode -> (mu, logvar))."""
+    """Encode CLEAN train/val latents (for SINDy fit + hybrid training) and the TEST split at
+    each NOISE_LEVELS (for the robustness sweep). The VAE class (VAE / VAE_P1) + checkpoint are
+    used to produce mu; output goes to cfg['latent_root']/{train,val,test_<tag>}."""
     vae = cfg["make_vae"]().to(device)
     vae.load_state_dict(torch.load(cfg["vae_ckpt"], map_location=device))
     vae.eval()
@@ -376,12 +445,26 @@ def encode_latents(cfg, device):
         mu, _ = vae.encode(x)
         return mu
 
-    for split in ("train", "val", "test"):
+    # Clean train/val (models are fit/trained on these)
+    for split in ("train", "val"):
         src = os.path.join(DATA_ROOT, split)
         if os.path.isdir(src):
-            print(f"[{cfg['label']}] pre-encoding {split} ...")
+            print(f"[{cfg['label']}] encoding {split} (clean) ...")
             precompute_latents(_encode, src, os.path.join(cfg["latent_root"], split),
                                shift=SHIFT, device=device)
+
+    # Test split at every noise level
+    src = os.path.join(DATA_ROOT, "test")
+    if os.path.isdir(src):
+        for nl in NOISE_LEVELS:
+            out = os.path.join(cfg["latent_root"], f"test_{noise_tag(nl)}")
+            print(f"[{cfg['label']}] encoding test ({noise_tag(nl)}) ...")
+            if nl > 0.0:
+                noise_fn = make_noise_fn(NOISE_TYPE, nl, NOISE_SEED, device)
+                precompute_latents_noisy(_encode, src, out, noise_fn, shift=SHIFT, device=device)
+            else:
+                precompute_latents(_encode, src, out, shift=SHIFT, device=device)
+
     del vae
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -409,7 +492,7 @@ def free_run(model, batch, n_actions, n_sup):
 def eval_per_horizon(model, loader, device, std4, n_actions, n_sup):
     """Free-running rollout -> physical MSE per horizon (de-standardized to real units)."""
     se, n = None, 0
-    for batch in tqdm(loader, desc="eval", leave=False):
+    for batch in tqdm(loader, desc="eval", leave=False, disable=not SHOW_PROGRESS):
         batch = [b.to(device, non_blocking=True) for b in batch]
         preds, state_tp1 = free_run(model, batch, n_actions, n_sup)
         err = (preds[..., :n_sup] - state_tp1) * std4
@@ -422,8 +505,8 @@ def eval_per_horizon(model, loader, device, std4, n_actions, n_sup):
 #
 #  Per-model: build test loader, fit SINDy, load the trained LSTM
 #
-def make_test_loader(cfg, mean, std):
-    test_ds = LatentSequenceDataset(os.path.join(cfg["latent_root"], "test"),
+def make_test_loader(cfg, mean, std, level):
+    test_ds = LatentSequenceDataset(os.path.join(cfg["latent_root"], f"test_{noise_tag(level)}"),
                                     seq_len=SEQ_LEN, stride=TEST_STRIDE,
                                     state_mean=mean, state_std=std)
     return DataLoader(test_ds, batch_size=BATCH, shuffle=False, num_workers=2, pin_memory=True)
@@ -506,7 +589,8 @@ def train_hybrid(model, cfg, mean, std, std4, device):
     sched = optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=SCHED_PATIENCE)
 
     best, bad, best_state = float("inf"), 0, None
-    for epoch in tqdm(range(1, EPOCHS + 1), desc=f"train {cfg['label']} hybrid"):
+    print(f"  training {cfg['label']} hybrid (max {EPOCHS} epochs) ...")
+    for epoch in range(1, EPOCHS + 1):
         p_tf = max(P_END, P_START - (P_START - P_END) * (epoch - 1) / max(P_DECAY_EPOCHS, 1))
         cur_len = int(round(min(SEQ_LEN, L_START + (SEQ_LEN - L_START)
                                 * (epoch - 1) / max(CURRICULUM_EPOCHS, 1))))
@@ -524,20 +608,23 @@ def train_hybrid(model, cfg, mean, std, std4, device):
         mse_h = eval_per_horizon(model, val_dl, device, std4, N_ACTIONS, N_SUP)
         val_mean = float(mse_h.mean())
         sched.step(val_mean)
-        if val_mean < best - 1e-6:
+        improved = val_mean < best - 1e-6
+        if improved:
             best, bad, best_state = val_mean, 0, copy.deepcopy(model.state_dict())
         else:
             bad += 1
-            if bad >= EARLY_STOP_PATIENCE:
-                break
+        print(f"  E{epoch:02d}/{EPOCHS} | p_tf={p_tf:.2f} H={cur_len:2d} | "
+              f"val phys-MSE={val_mean:.4f}{'  *best' if improved else ''}")
+        if bad >= EARLY_STOP_PATIENCE:
+            print(f"  early stop at epoch {epoch} (no val improvement for {EARLY_STOP_PATIENCE} epochs)")
+            break
     if best_state is not None:
         model.load_state_dict(best_state)
     model.eval()
 
     # Persist the trained hybrid (residual LSTM weights + frozen Xi buffer).
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    slug = cfg["label"].lower().replace(" ", "_")
-    save_path = os.path.join(SAVE_DIR, f"hybrid_{slug}.pth")
+    save_path = cfg["hybrid_ckpt"]
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save(model.state_dict(), save_path)
     print(f"    [{cfg['label']}] hybrid trained: best val phys-MSE = {best:.4f}  -> {save_path}")
     return model
@@ -553,7 +640,7 @@ def eval_hybrid_residual_norm(model, loader, device):
     model.track = True
     corr_norms, sindy_norms = [], []
     try:
-        for batch in tqdm(loader, desc="residual norm", leave=False):
+        for batch in tqdm(loader, desc="residual norm", leave=False, disable=not SHOW_PROGRESS):
             batch = [b.to(device, non_blocking=True) for b in batch]
             z_t, action, z_tp1, _, _ = batch
             B, L, _ = z_t.shape
@@ -576,37 +663,61 @@ def eval_hybrid_residual_norm(model, loader, device):
 
 
 #
-#  Plot
+#  Plots
 #
-def plot_dynamics(results, save_dir):
-    """One subplot per model (Baseline, P1): per-horizon physical MSE, LSTM vs SINDy vs Hybrid."""
-    os.makedirs(save_dir, exist_ok=True)
-    horizons = np.arange(1, SEQ_LEN + 1)
-    labels = list(results.keys())
-    styles = {
-        "LSTM": ("C0", "-"),
-        "SINDy": ("C3", "--"),
-        "Hybrid": ("C2", "-.")
-    }
+METHODS = ("LSTM", "SINDy", "Hybrid")
+METHOD_STYLE = {"LSTM": ("C0", "-"), "SINDy": ("C3", "--"), "Hybrid": ("C2", "-.")}
 
+
+def plot_degradation(results, save_dir):
+    """One subplot per model: mean state-MSE (over horizon) vs noise level, one line per method.
+    Shows how each dynamics model degrades as the encoded latent gets noisier."""
+    os.makedirs(save_dir, exist_ok=True)
+    labels = list(results.keys())
     fig, axes = plt.subplots(1, len(labels), figsize=(6.0 * len(labels), 4.6), squeeze=False)
     for j, label in enumerate(labels):
         ax = axes[0][j]
-        for method in results[label].keys():
-            mse_h = results[label][method]
-            color, ls = styles.get(method, ("C7", "-"))
+        for method in METHODS:
+            ys = [results[label][nl][method].mean() for nl in NOISE_LEVELS]
+            color, ls = METHOD_STYLE[method]
+            ax.plot(NOISE_LEVELS, ys, color=color, ls=ls, lw=2, marker="o", label=method)
+        if LOG_Y:
+            ax.set_yscale("log")
+        ax.set_title(f"{label}: robustness to {NOISE_TYPE} noise")
+        ax.set_xlabel(f"noise level ({NOISE_TYPE})")
+        ax.set_ylabel("mean state MSE (over horizon)")
+        ax.grid(alpha=0.3, which="both")
+        ax.legend()
+    plt.tight_layout()
+    path = os.path.join(save_dir, "noise_degradation.png")
+    plt.savefig(path, dpi=150)
+    plt.show()
+    print("saved figure ->", path)
+
+
+def plot_horizon_at_level(results, save_dir, level):
+    """One subplot per model: per-horizon physical MSE at a single noise level, LSTM/SINDy/Hybrid."""
+    os.makedirs(save_dir, exist_ok=True)
+    horizons = np.arange(1, SEQ_LEN + 1)
+    labels = list(results.keys())
+    fig, axes = plt.subplots(1, len(labels), figsize=(6.0 * len(labels), 4.6), squeeze=False)
+    for j, label in enumerate(labels):
+        ax = axes[0][j]
+        for method in METHODS:
+            mse_h = results[label][level][method]
+            color, ls = METHOD_STYLE[method]
             ax.plot(horizons, mse_h, color=color, ls=ls, lw=2,
                     label=f"{method} (mean={mse_h.mean():.4f})")
         if LOG_Y:
             ax.set_yscale("log")
-        ax.set_title(f"{label}: Dynamics Comparison")
+        ax.set_title(f"{label}: per-horizon @ {noise_tag(level)}")
         ax.set_xlabel("Prediction horizon")
         ax.set_ylabel("State MSE (physical units)")
         ax.set_xlim(1, SEQ_LEN)
         ax.grid(alpha=0.3, which="both")
         ax.legend()
     plt.tight_layout()
-    path = os.path.join(save_dir, "dynamics_comparison.png")
+    path = os.path.join(save_dir, f"per_horizon_{noise_tag(level)}.png")
     plt.savefig(path, dpi=150)
     plt.show()
     print("saved figure ->", path)
@@ -631,49 +742,50 @@ if __name__ == "__main__":
                              include_coupling=INCLUDE_COUPLING, include_bias=INCLUDE_BIAS)
     print(f"library features: {library.n_features()}")
 
-    # For each model: encode latents, then eval THREE dynamics models (LSTM, SINDy, Hybrid)
-    # on the SAME clean test latents -> fully matched comparison.
-    results = {}   # results[label] = {"LSTM": mse_h, "SINDy": mse_h, "Hybrid": mse_h}
+    # For each model: encode clean train/val + noisy test sweep, fit/train on clean, then eval
+    # all THREE dynamics models (LSTM, SINDy, Hybrid) at every noise level.
+    results = {}   # results[label][noise_level] = {"LSTM": mse_h, "SINDy": mse_h, "Hybrid": mse_h}
     for cfg in MODELS:
         encode_latents(cfg, device)
-        test_dl = make_test_loader(cfg, mean, std)
         sindy_model, Xi = fit_sindy(cfg, library, ctrl_names, device)
         lstm_model = load_lstm(cfg, device)
 
-        # Build the hybrid (frozen SINDy + zero-init residual LSTM) and TRAIN the residual.
+        # Build the hybrid (frozen SINDy + zero-init residual LSTM) and TRAIN the residual (clean).
         hybrid_model = HybridPredictor(library, Xi, latent=LATENT_SIZE, action_dim=N_ACTIONS,
                                        hidden=HIDDEN, layers=LAYERS, n_sup=N_SUP,
                                        control_mode=CONTROL_MODE, corr_bound=CORR_BOUND).to(device)
         train_hybrid(hybrid_model, cfg, mean, std, std4, device)
 
-        # Compute test MSE
-        results[cfg["label"]] = {
-            "LSTM":   eval_per_horizon(lstm_model, test_dl, device, std4, N_ACTIONS, N_SUP),
-            "SINDy":  eval_per_horizon(sindy_model, test_dl, device, std4, N_ACTIONS, N_SUP),
-            "Hybrid": eval_per_horizon(hybrid_model, test_dl, device, std4, N_ACTIONS, N_SUP),
-        }
+        models = {"LSTM": lstm_model, "SINDy": sindy_model, "Hybrid": hybrid_model}
+        results[cfg["label"]] = {}
+        for nl in NOISE_LEVELS:
+            test_dl = make_test_loader(cfg, mean, std, nl)
+            results[cfg["label"]][nl] = {
+                name: eval_per_horizon(m, test_dl, device, std4, N_ACTIONS, N_SUP)
+                for name, m in models.items()
+            }
 
-        # Compute and report residual norm metrics on test set
-        mean_corr, mean_sindy = eval_hybrid_residual_norm(hybrid_model, test_dl, device)
-        print(f"\n[{cfg['label']}] Hybrid residual norm metrics (physical dims):")
-        print(f"  Mean LSTM correction ||corr||: {mean_corr:.6f}")
-        print(f"  Mean SINDy delta ||sindy_delta||: {mean_sindy:.6f}")
-        if mean_sindy > 0:
-            print(f"  Relative residual magnitude (||corr|| / ||sindy_delta||): {mean_corr / mean_sindy:.6f}")
+        # Residual-norm metric on the CLEAN test (how much work the LSTM does beyond physics)
+        clean_nl = 0.0 if 0.0 in NOISE_LEVELS else min(NOISE_LEVELS)
+        clean_dl = make_test_loader(cfg, mean, std, clean_nl)
+        mean_corr, mean_sindy = eval_hybrid_residual_norm(hybrid_model, clean_dl, device)
+        print(f"\n[{cfg['label']}] Hybrid residual norm (clean test, physical dims):")
+        print(f"  ||corr||={mean_corr:.6f}  ||sindy||={mean_sindy:.6f}"
+              + (f"  ratio={mean_corr / mean_sindy:.4f}" if mean_sindy > 0 else ""))
 
-    # Side-by-side comparison: model x method
-    HS = [h for h in (1, 10, 20, SEQ_LEN) if h <= SEQ_LEN]
-    print(f"\n{'='*78}")
-    print("Physical MSE per horizon (de-standardized) — lower is better")
-    print(f"{'='*78}")
-    header = f"{'model':<14}{'method':<8}" + "".join(f"{'h'+str(h):>11}" for h in HS) + f"{'mean':>11}"
-    print(header)
-    print("-" * len(header))
-    for label, by_method in results.items():
-        for method in ("LSTM", "SINDy", "Hybrid"):
-            mse_h = by_method[method]
-            row = f"{label:<14}{method:<8}" + "".join(f"{mse_h[h-1]:>11.4f}" for h in HS)
-            print(row + f"{mse_h.mean():>11.4f}")
+    # Robustness table: mean state-MSE (over horizon) per model x noise level x method
+    print(f"\n{'='*70}")
+    print(f"Mean state-MSE (over horizon) vs {NOISE_TYPE} noise level — lower is better")
+    print(f"{'='*70}")
+    for label in results:
+        print(f"\n{label}")
+        header = f"{'noise':<8}" + "".join(f"{m:>11}" for m in METHODS)
+        print(header)
+        print("-" * len(header))
+        for nl in NOISE_LEVELS:
+            row = f"{nl:<8.2f}" + "".join(f"{results[label][nl][m].mean():>11.4f}" for m in METHODS)
+            print(row)
 
-    plot_dynamics(results, SAVE_DIR)
+    plot_degradation(results, SAVE_DIR)
+    plot_horizon_at_level(results, SAVE_DIR, NOISE_LEVELS[0])
 
