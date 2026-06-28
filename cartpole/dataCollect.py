@@ -4,33 +4,33 @@ import gymnasium as gym
 import numpy as np
 from PIL import Image
 
-# ----------------------------------------------------------------------------
-# Ρυθμίσεις συλλογής
-# ----------------------------------------------------------------------------
+#
+#  Config
+#
 NUM_EPISODES = 5000
-MAX_STEPS = 200                 # μήκος ακολουθίας-στόχος ανά επεισόδιο
-IMG_H, IMG_W = 80, 120          # resize ώστε να ταιριάζει στο VAE (encoder ÷8 -> 10x15)
-SEED = 0                        # για αναπαραγωγιμότητα (σημαντικό σε reproduction paper)
+MAX_STEPS = 200   # target sequence length per episode
+IMG_H, IMG_W = 80, 120   # resize to match VAE input (encoder /8 -> 10x15)
+SEED = 0   # for reproducibility
 
-# Διαχωρισμός σε train / val / test (πρέπει να αθροίζουν σε 1.0)
+# Must sum to 1.0
 TRAIN_FRACTION = 0.8
 VAL_FRACTION = 0.1
 TEST_FRACTION = 0.1
 
-# PD / linear state-feedback controller με ε-greedy τυχαιότητα.
-KP_THETA, KD_THETA = 12.0, 2.0  # κέρδη γωνίας / γωνιακής ταχύτητας
-KP_X, KD_X = 0.0, 0.0           # κέρδη θέσης / ταχύτητας κάρου (0 = ανενεργά)
-EPSILON = 0.5                  # πιθανότητα τυχαίας ενέργειας (exploration)
+# PD / linear state-feedback controller with epsilon-greedy exploration.
+KP_THETA, KD_THETA = 12.0, 2.0   # gains for angle / angular velocity
+KP_X, KD_X = 0.0, 0.0            # gains for cart position / velocity (0 = disabled)
+EPSILON = 0.5                     # random action probability
 
-# Θόρυβος στην ΚΑΤΑΣΤΑΣΗ (μόνο θέση & γωνία). Labels -> noisy_states_2/_5/_10.
+# State noise (position & angle only). Saved as noisy_states_2/_5/_10.
 NOISE_LEVELS = [(0.025, 2), (0.05, 5), (0.10, 10)]
-POSITION_REF = 4.8 * 2          # πλήρες εύρος obs-space για x
-ANGLE_REF = 0.84                # πλήρες εύρος obs-space για theta
+POSITION_REF = 4.8 * 2   # full obs-space range for x
+ANGLE_REF = 0.84          # full obs-space range for theta
 
 
 def pd_action(obs, action_space, rng):
-    """ PD/linear controller με ε-greedy τυχαιότητα.
-    obs = [x, x_dot, theta, theta_dot]. Επιστρέφει 0 (αριστερά) ή 1 (δεξιά). """
+    """PD controller with epsilon-greedy exploration.
+    obs = [x, x_dot, theta, theta_dot]. Returns 0 (left) or 1 (right)."""
     if rng.random() < EPSILON:
         return int(action_space.sample())
     x, x_dot, theta, theta_dot = obs
@@ -39,8 +39,8 @@ def pd_action(obs, action_space, rng):
 
 
 def resize_frame(img):
-    """ RGB render -> (IMG_H, IMG_W, 3) uint8. ΔΕΝ κανονικοποιούμε εδώ· το /255
-    γίνεται στο dataloader για να μη 4πλασιάσουμε το μέγεθος στον δίσκο. """
+    """RGB render -> (IMG_H, IMG_W, 3) uint8. Division by 255 happens in the dataloader
+    to avoid quadrupling disk size."""
     return np.asarray(Image.fromarray(img).resize((IMG_W, IMG_H)), dtype=np.uint8)
 
 
@@ -90,8 +90,8 @@ def choose_split(rng):
 
 
 def compute_and_save_norm_stats(train_dir, out_path):
-    """ mean/std ΜΟΝΟ από το train set (αποφυγή leakage). Τα states μένουν raw
-    στον δίσκο· το standardize γίνεται στο dataloader με αυτά τα stats. """
+    """Compute mean/std from training set only (avoids leakage). States stay raw on disk;
+    standardization happens in the dataloader using these stats."""
     chunks = [np.load(os.path.join(train_dir, f))["states"]
               for f in os.listdir(train_dir) if f.endswith(".npz")]
     all_states = np.concatenate(chunks, axis=0)
@@ -117,7 +117,7 @@ if __name__ == '__main__':
     lengths = []
     for i in range(NUM_EPISODES):
         if i % 100 == 0:
-            print(f"Συλλογή επεισοδίου: {i}/{NUM_EPISODES}")
+            print(f"collecting episode: {i}/{NUM_EPISODES}")
 
         imgs, acts, states = collect_episode(env, rng, ep_seed=SEED + i)
         split = choose_split(rng)
@@ -127,9 +127,9 @@ if __name__ == '__main__':
     env.close()
 
     lengths = np.array(lengths)
-    print(f"\nΕπεισόδια: {len(lengths)} | mean={lengths.mean():.1f} "
+    print(f"\nEpisodes: {len(lengths)} | mean={lengths.mean():.1f} "
           f"median={np.median(lengths):.0f} min={lengths.min()} max={lengths.max()} "
-          f"| % που φτάνουν MAX_STEPS: {(lengths >= MAX_STEPS).mean() * 100:.1f}%")
+          f"| % reaching MAX_STEPS: {(lengths >= MAX_STEPS).mean() * 100:.1f}%")
 
     compute_and_save_norm_stats(dirs["train"], os.path.join(base_dir, "norm_stats.npz"))
-    print("Η συλλογή δεδομένων ολοκληρώθηκε επιτυχώς!")
+    print("Data collection complete.")

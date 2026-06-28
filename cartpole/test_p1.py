@@ -34,9 +34,9 @@ from vae_p1 import VAE_P1, encode_fn as encode_fn_p1
 from lstm import LatentPredictor
 from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, list_npz
 
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
+#
+#  Config
+#
 DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
 SAVE_DIR = "/kaggle/working/cartpole_p1_out"
@@ -52,19 +52,19 @@ N_BOOT = 1000
 BOOT_SEED = 0
 LOG_Y = True
 
-# ---------------------------------------------------------------------------
-# NOISE CONFIG — κύρια παράμετρος: ΤΙ ΕΙΔΟΣ ΘΟΡΥΒΟΥ και ΣΕ ΠΟΙΕΣ ΕΝΤΑΣΕΙΣ
-# ---------------------------------------------------------------------------
-NOISE_TYPE = "gaussian"           # "gaussian" ή "salt_pepper"
-# Sweep πολλαπλών επιπέδων θορύβου.
-# gaussian:      std τιμές (πάνω σε [0,1] εικόνα)
-# salt_pepper:   ποσοστό pixels που γίνονται 0/1
+#
+#  Noise Config
+#
+NOISE_TYPE = "gaussian"   # "gaussian" or "salt_pepper"
+# Sweep across multiple noise levels.
+# gaussian:    std value (on [0,1]-normalized image)
+# salt_pepper: fraction of pixels set to 0 or 1
 NOISE_LEVELS = [0.0, 0.05, 0.10, 0.20, 0.30]
-NOISE_SEED = 42                   # Reproducible noise
+NOISE_SEED = 42   # reproducible noise
 
-# ---------------------------------------------------------------------------
-# Model definitions (ΙΔΙΑ με eval_baseline_vs_p1.py)
-# ---------------------------------------------------------------------------
+#
+#  Model definitions
+#
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
@@ -85,9 +85,9 @@ MODELS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Noise injection — εφαρμόζεται σε float [0,1] image tensors
-# ---------------------------------------------------------------------------
+#
+#  Noise injection
+#
 def add_gaussian_noise(img_tensor, std, rng_gen):
     """Add Gaussian noise with given std to float [0,1] image tensor."""
     noise = torch.randn(img_tensor.shape, generator=rng_gen, device=img_tensor.device) * std
@@ -98,9 +98,7 @@ def add_salt_pepper_noise(img_tensor, amount, rng_gen):
     """Salt-and-pepper noise: random pixels become 0 or 1."""
     mask = torch.rand(img_tensor.shape, generator=rng_gen, device=img_tensor.device)
     out = img_tensor.clone()
-    # Bottom 'amount/2' fraction -> 0 (pepper)
     out[mask < amount / 2] = 0.0
-    # Top 'amount/2' fraction -> 1 (salt)
     out[mask > 1 - amount / 2] = 1.0
     return out
 
@@ -125,10 +123,9 @@ def make_noise_fn(noise_type, level, seed, device):
         raise ValueError(f"Unknown noise type: {noise_type}")
 
 
-# ---------------------------------------------------------------------------
-# NOISY precompute_latents — ίδια λογική με loader.precompute_latents,
-# αλλά εφαρμόζει noise ΠΡΙΝ το encoding.
-# ---------------------------------------------------------------------------
+#
+#  Noisy precompute
+#
 @torch.no_grad()
 def precompute_latents_noisy(encode_fn, root, out_root, noise_fn,
                               shift=0, batch=256, device="cuda"):
@@ -145,7 +142,7 @@ def precompute_latents_noisy(encode_fn, root, out_root, noise_fn,
             x = (d[f"noisy_states_{shift}"] if shift in (2, 5, 10)
                  else d["states"]).astype(np.float32)
 
-        # Εφαρμογή θορύβου ΣΕ ΟΛΑ τα frames ΠΡΙΝ το encoding
+        # Apply noise to all frames before encoding
         imgs = noise_fn(imgs.to(device))
 
         img_t, img_tp1 = imgs[:-1], imgs[1:]
@@ -159,11 +156,12 @@ def precompute_latents_noisy(encode_fn, root, out_root, noise_fn,
                             z=z, acts=acts[:-1], states=states[:-1], x=x[:-1])
 
 
-# ---------------------------------------------------------------------------
-# Rollout + per-window errors (ΙΔΙΟ με eval_baseline_vs_p1.py)
-# ---------------------------------------------------------------------------
+#
+#  Rollout / Errors
+#
 def _hybrid(z, state, n_sup):
-    h = z.clone(); h[..., :n_sup] = state
+    h = z.clone()
+    h[..., :n_sup] = state
     return h
 
 
@@ -184,7 +182,7 @@ def free_run(model, batch, encoded):
 
 @torch.no_grad()
 def collect_sq_err(model, loader, device, encoded):
-    """ -> (N, L, 4) STANDARDIZED squared error (preds[:, :4] vs GT standardized state). """
+    """Returns (N, L, 4) standardized squared error (preds[:4] vs GT standardized state)."""
     model.eval()
     chunks = []
     for batch in loader:
@@ -195,9 +193,9 @@ def collect_sq_err(model, loader, device, encoded):
     return np.concatenate(chunks, axis=0)
 
 
-# ---------------------------------------------------------------------------
-# Robust statistics (ΙΔΙΑ με eval_baseline_vs_p1.py)
-# ---------------------------------------------------------------------------
+#
+#  Robust statistics
+#
 def median_iqr(arr):
     """arr (N,L) -> median, q25, q75 per horizon."""
     return (np.median(arr, axis=0),
@@ -206,8 +204,8 @@ def median_iqr(arr):
 
 
 def bootstrap_paired(diff, n_boot, rng):
-    """diff (N,L) = mse_base − mse_p1 per window/horizon (>0 => p1 better).
-    -> median(diff) per horizon + 95% bootstrap CI (resample windows)."""
+    """diff (N,L) = mse_base - mse_p1 per window/horizon (>0 => p1 better).
+    Returns median(diff) per horizon + 95% bootstrap CI (resample windows)."""
     N, L = diff.shape
     med = np.median(diff, axis=0)
     boots = np.empty((n_boot, L), dtype=np.float64)
@@ -218,9 +216,9 @@ def bootstrap_paired(diff, n_boot, rng):
     return med, lo, hi
 
 
-# ---------------------------------------------------------------------------
-# Model evaluation at a given noise level
-# ---------------------------------------------------------------------------
+#
+#  Evaluate model
+#
 def evaluate_model_noisy(m, device, mean_s, std_s, noise_level, noise_type):
     """Load VAE, encode test images WITH noise, evaluate LSTM -> (N,L,4) per mode."""
     noise_fn = make_noise_fn(noise_type, noise_level, NOISE_SEED, device)
@@ -229,9 +227,9 @@ def evaluate_model_noisy(m, device, mean_s, std_s, noise_level, noise_type):
     print(f"\n[{m['label']}] noise={noise_type} level={noise_level:.2f}")
     print(f"  VAE ({m['vae_ckpt']}) -> precompute test latents (noisy)")
     vae = m["make_vae"]().to(device)
-    vae.load_state_dict(torch.load(m["vae_ckpt"], map_location=device)); vae.eval()
+    vae.load_state_dict(torch.load(m["vae_ckpt"], map_location=device))
+    vae.eval()
 
-    # Encode function — wraps the VAE's encode_fn
     @torch.no_grad()
     def _encode(img_t, img_tp1):
         vae.eval()
@@ -264,9 +262,9 @@ def evaluate_model_noisy(m, device, mean_s, std_s, noise_level, noise_type):
     return out
 
 
-# ---------------------------------------------------------------------------
-# Plotting helpers
-# ---------------------------------------------------------------------------
+#
+#  Plots
+#
 def plot_median_iqr_per_level(all_err, noise_levels, mode, save_dir, noise_type):
     """One figure per noise level: Baseline vs P1 median MSE curves."""
     base, p1 = MODELS[0]["label"], MODELS[1]["label"]
@@ -292,7 +290,7 @@ def plot_median_iqr_per_level(all_err, noise_levels, mode, save_dir, noise_type)
 
 
 def plot_paired_per_level(all_err, noise_levels, save_dir, noise_type, rng):
-    """Paired Δ (base − p1) per noise level, all modes."""
+    """Paired delta (base - p1) per noise level, all modes."""
     base, p1 = MODELS[0]["label"], MODELS[1]["label"]
     horizons = np.arange(1, SEQ_LEN + 1)
     paired_all = {}
@@ -307,12 +305,12 @@ def plot_paired_per_level(all_err, noise_levels, save_dir, noise_type, rng):
             paired_all[(mode, nl)] = (med, lo, hi)
             ax = axes[0][j]
             ax.axhline(0, color="k", lw=1)
-            ax.plot(horizons, med, color="C2", lw=2, label=f"median({base} − {p1})")
+            ax.plot(horizons, med, color="C2", lw=2, label=f"median({base} - {p1})")
             ax.fill_between(horizons, lo, hi, color="C2", alpha=0.25, label="95% bootstrap CI")
-            ax.set_title(f"paired Δ — {mode} | σ={nl:.2f}")
-            ax.set_xlabel("Horizon"); ax.set_ylabel("Δ state-MSE")
+            ax.set_title(f"paired delta — {mode} | σ={nl:.2f}")
+            ax.set_xlabel("Horizon"); ax.set_ylabel("delta state-MSE")
             ax.set_xlim(1, SEQ_LEN); ax.grid(alpha=0.3); ax.legend(fontsize=7)
-        plt.suptitle(f"Paired difference (>0 ⇒ {p1} better) — {noise_type}, {mode}", y=1.02)
+        plt.suptitle(f"Paired difference (>0 => {p1} better) — {noise_type}, {mode}", y=1.02)
         plt.tight_layout()
         plt.savefig(os.path.join(save_dir, f"noise_paired_{mode}_{noise_type}.png"),
                     dpi=150, bbox_inches="tight")
@@ -321,11 +319,10 @@ def plot_paired_per_level(all_err, noise_levels, save_dir, noise_type, rng):
 
 
 def plot_degradation_summary(all_err, noise_levels, save_dir, noise_type):
-    """Summary: median MSE at horizon H vs noise level, for each model & mode.
-    Shows how each model degrades with increasing noise."""
+    """Median MSE at fixed horizons vs noise level — shows how each model degrades."""
     base, p1 = MODELS[0]["label"], MODELS[1]["label"]
     cb, cp = MODELS[0]["color"], MODELS[1]["color"]
-    SUMMARY_HORIZONS = [1, 10, 20, 30]  # which horizons to show
+    SUMMARY_HORIZONS = [1, 10, 20, 30]
 
     for mode in SEED_MODES:
         fig, axes = plt.subplots(1, len(SUMMARY_HORIZONS),
@@ -393,9 +390,9 @@ def plot_perdim_per_level(all_err, noise_levels, save_dir, noise_type):
         plt.show()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+#
+#  Main
+#
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -407,8 +404,7 @@ def main():
 
     base, p1 = MODELS[0]["label"], MODELS[1]["label"]
 
-    # ---- Collect errors at each noise level ----
-    # all_err[noise_level][label][mode] = (N, L, 4)
+    # Collect errors at each noise level; all_err[noise_level][label][mode] = (N, L, 4)
     all_err = {}
     for nl in NOISE_LEVELS:
         print(f"\n{'='*60}")
@@ -419,7 +415,7 @@ def main():
             all_err[nl][m["label"]] = evaluate_model_noisy(
                 m, device, mean_s, std_s, nl, NOISE_TYPE)
 
-        # Align window counts between models (same as original)
+        # Align window counts between models
         for mode in SEED_MODES:
             nb = all_err[nl][base][mode].shape[0]
             np1 = all_err[nl][p1][mode].shape[0]
@@ -430,20 +426,20 @@ def main():
             all_err[nl][base][mode] = all_err[nl][base][mode][:n]
             all_err[nl][p1][mode] = all_err[nl][p1][mode][:n]
 
-    # ---- (1) Median + IQR curves per noise level ----
+    # (1) Median + IQR curves per noise level
     for mode in SEED_MODES:
         plot_median_iqr_per_level(all_err, NOISE_LEVELS, mode, SAVE_DIR, NOISE_TYPE)
 
-    # ---- (2) Paired Δ per noise level ----
+    # (2) Paired delta per noise level
     paired_all = plot_paired_per_level(all_err, NOISE_LEVELS, SAVE_DIR, NOISE_TYPE, rng)
 
-    # ---- (3) Per-dim curves per noise level (encoded mode) ----
+    # (3) Per-dim curves per noise level (encoded mode)
     plot_perdim_per_level(all_err, NOISE_LEVELS, SAVE_DIR, NOISE_TYPE)
 
-    # ---- (4) DEGRADATION SUMMARY: MSE vs noise level at fixed horizons ----
+    # (4) Degradation summary: MSE vs noise level at fixed horizons
     plot_degradation_summary(all_err, NOISE_LEVELS, SAVE_DIR, NOISE_TYPE)
 
-    # ---- (5) Summary table ----
+    # (5) Summary table
     HS = [h for h in (1, 10, 20, 30) if h <= SEQ_LEN]
     print(f"\n{'='*80}")
     print(f"=== SUMMARY: median state-MSE (standardized) under {NOISE_TYPE} noise ===")
@@ -458,11 +454,11 @@ def main():
                       "  ".join(f"h{h}={med[h-1]:.5f}" for h in HS))
             if (mode, nl) in paired_all:
                 med_d, lo_d, hi_d = paired_all[(mode, nl)]
-                print(f"      paired Δ(>0⇒{p1})  " +
+                print(f"      paired delta(>0=>{p1})  " +
                       "  ".join(f"h{h}={med_d[h-1]:+.5f}"
                                 f"[{lo_d[h-1]:+.5f},{hi_d[h-1]:+.5f}]" for h in HS))
 
-    # ---- save ----
+    # Save
     save_dict = {"horizons": horizons, "std4": std4,
                  "noise_type": NOISE_TYPE,
                  "noise_levels": np.array(NOISE_LEVELS),

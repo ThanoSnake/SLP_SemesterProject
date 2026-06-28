@@ -12,14 +12,13 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-# Depending on environment, adjust imports:
 from vae import VAE, encode_fn
 from lstm import LatentPredictor
 from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, list_npz
 
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
+#
+#  Config
+#
 DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
 SAVE_DIR = "/kaggle/working/cartpole_p3_out"
@@ -35,10 +34,10 @@ N_BOOT = 1000
 BOOT_SEED = 0
 LOG_Y = True
 
-# ---------------------------------------------------------------------------
-# NOISE CONFIG
-# ---------------------------------------------------------------------------
-NOISE_TYPE = "gaussian"           # "gaussian" or "salt_pepper"
+#
+#  Noise Config
+#
+NOISE_TYPE = "gaussian"   # "gaussian" or "salt_pepper"
 NOISE_LEVELS = [0.0, 0.05, 0.10, 0.20, 0.30]
 NOISE_SEED = 42
 
@@ -71,9 +70,9 @@ MODELS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Noise Injection Functions
-# ---------------------------------------------------------------------------
+#
+#  Noise injection
+#
 def add_gaussian_noise(img_tensor, std, rng_gen):
     noise = torch.randn(img_tensor.shape, generator=rng_gen, device=img_tensor.device) * std
     return torch.clamp(img_tensor + noise, 0.0, 1.0)
@@ -102,9 +101,9 @@ def make_noise_fn(noise_type, level, seed, device):
         raise ValueError(f"Unknown noise type: {noise_type}")
 
 
-# ---------------------------------------------------------------------------
-# Noisy Precomputation
-# ---------------------------------------------------------------------------
+#
+#  Noisy precompute
+#
 @torch.no_grad()
 def precompute_latents_noisy(encode_fn, root, out_root, noise_fn,
                               shift=0, batch=256, device="cuda"):
@@ -131,11 +130,12 @@ def precompute_latents_noisy(encode_fn, root, out_root, noise_fn,
                             z=z, acts=acts[:-1], states=states[:-1], x=x[:-1])
 
 
-# ---------------------------------------------------------------------------
-# Rollout and Evaluation Functions
-# ---------------------------------------------------------------------------
+#
+#  Rollout / Errors
+#
 def _hybrid(z, state, n_sup):
-    h = z.clone(); h[..., :n_sup] = state
+    h = z.clone()
+    h[..., :n_sup] = state
     return h
 
 
@@ -166,9 +166,9 @@ def collect_sq_err(model, loader, device, encoded):
     return np.concatenate(chunks, axis=0)
 
 
-# ---------------------------------------------------------------------------
-# Robust Statistics
-# ---------------------------------------------------------------------------
+#
+#  Robust statistics
+#
 def median_iqr(arr):
     return (np.median(arr, axis=0),
             np.percentile(arr, 25, axis=0),
@@ -186,16 +186,17 @@ def bootstrap_paired(diff, n_boot, rng):
     return med, lo, hi
 
 
-# ---------------------------------------------------------------------------
-# Evaluation Routine
-# ---------------------------------------------------------------------------
+#
+#  Evaluate model
+#
 def evaluate_model_noisy(m, device, mean_s, std_s, noise_level, noise_type):
     noise_fn = make_noise_fn(noise_type, noise_level, NOISE_SEED, device)
     noise_tag = f"{noise_type}_{noise_level:.2f}".replace(".", "p")
 
     print(f"\n[{m['label']}] noise={noise_type} level={noise_level:.2f}")
     vae = m["make_vae"]().to(device)
-    vae.load_state_dict(torch.load(m["vae_ckpt"], map_location=device)); vae.eval()
+    vae.load_state_dict(torch.load(m["vae_ckpt"], map_location=device))
+    vae.eval()
 
     @torch.no_grad()
     def _encode(img_t, img_tp1):
@@ -229,9 +230,9 @@ def evaluate_model_noisy(m, device, mean_s, std_s, noise_level, noise_type):
     return out
 
 
-# ---------------------------------------------------------------------------
-# Plotting Functions
-# ---------------------------------------------------------------------------
+#
+#  Plots
+#
 def plot_median_iqr_per_level(all_err, noise_levels, mode, save_dir, noise_type):
     horizons = np.arange(1, SEQ_LEN + 1)
     for nl in noise_levels:
@@ -271,12 +272,12 @@ def plot_paired_per_level(all_err, noise_levels, save_dir, noise_type, rng):
                 med, lo, hi = bootstrap_paired(diff, N_BOOT, rng)
                 paired_all[(mode, v["label"], nl)] = (med, lo, hi)
 
-                ax.plot(horizons, med, color=v["color"], lw=2, label=f"{base} − {v['label']}")
+                ax.plot(horizons, med, color=v["color"], lw=2, label=f"{base} - {v['label']}")
                 ax.fill_between(horizons, lo, hi, color=v["color"], alpha=0.18)
-            ax.set_title(f"paired Δ — {mode} | σ={nl:.2f}")
-            ax.set_xlabel("Horizon"); ax.set_ylabel("Δ state-MSE")
+            ax.set_title(f"paired delta — {mode} | σ={nl:.2f}")
+            ax.set_xlabel("Horizon"); ax.set_ylabel("delta state-MSE")
             ax.set_xlim(1, SEQ_LEN); ax.grid(alpha=0.3); ax.legend(fontsize=7)
-        plt.suptitle(f"Paired difference (>0 ⇒ variant better) — {noise_type}, {mode}", y=1.02)
+        plt.suptitle(f"Paired difference (>0 => variant better) — {noise_type}, {mode}", y=1.02)
         plt.tight_layout()
         plt.savefig(os.path.join(save_dir, f"noise_paired_{mode}_{noise_type}.png"),
                     dpi=150, bbox_inches="tight")
@@ -350,9 +351,9 @@ def plot_perdim_per_level(all_err, noise_levels, save_dir, noise_type):
         plt.show()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+#
+#  Main
+#
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -384,20 +385,20 @@ def main():
             for m in MODELS:
                 all_err[nl][m["label"]][mode] = all_err[nl][m["label"]][mode][:n]
 
-    # ---- (1) Plot Median + IQR Curves ----
+    # (1) Median + IQR curves per noise level
     for mode in SEED_MODES:
         plot_median_iqr_per_level(all_err, NOISE_LEVELS, mode, SAVE_DIR, NOISE_TYPE)
 
-    # ---- (2) Plot Paired Differences ----
+    # (2) Paired delta per noise level
     paired_all = plot_paired_per_level(all_err, NOISE_LEVELS, SAVE_DIR, NOISE_TYPE, rng)
 
-    # ---- (3) Plot Per-Dimension Curves ----
+    # (3) Per-dimension curves per noise level
     plot_perdim_per_level(all_err, NOISE_LEVELS, SAVE_DIR, NOISE_TYPE)
 
-    # ---- (4) Plot Degradation Summaries ----
+    # (4) Degradation summaries
     plot_degradation_summary(all_err, NOISE_LEVELS, SAVE_DIR, NOISE_TYPE)
 
-    # ---- (5) Summary Table ----
+    # (5) Summary table
     HS = [h for h in (1, 10, 20, 30) if h <= SEQ_LEN]
     print(f"\n{'='*80}")
     print(f"=== SUMMARY: median state-MSE (standardized) under {NOISE_TYPE} noise ===")
@@ -415,11 +416,11 @@ def main():
                 vl = v["label"]
                 if (mode, vl, nl) in paired_all:
                     med_d, lo_d, hi_d = paired_all[(mode, vl, nl)]
-                    print(f"      paired Δ(>0⇒{vl})  " +
+                    print(f"      paired delta(>0=>{vl})  " +
                           "  ".join(f"h{h}={med_d[h-1]:+.5f}"
                                     f"[{lo_d[h-1]:+.5f},{hi_d[h-1]:+.5f}]" for h in HS))
 
-    # ---- Save Data ----
+    # Save
     save_dict = {"horizons": horizons, "std4": std4,
                  "noise_type": NOISE_TYPE,
                  "noise_levels": np.array(NOISE_LEVELS),

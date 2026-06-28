@@ -165,7 +165,6 @@ def eval_epoch(model, loader, device, std4, desc=""):
         n += preds.size(0)
     return (se / n).mean(dim=1).cpu().numpy()
 
-"""
 #
 #  Main
 #
@@ -243,4 +242,3 @@ if __name__ == "__main__":
     torch.save(model.state_dict(),
                os.path.join(SAVE_DIR, "lstm_p1_alt_last.pth"))
     print("Best val phys-MSE:", best)
- """

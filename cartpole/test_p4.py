@@ -26,11 +26,11 @@ from vae import VAE
 from vae_p4 import VAE_P4
 
 
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
+#
+#  Config
+#
 DATA_ROOT = "<cartpole-dataset>"
-EVAL_DIR = os.path.join(DATA_ROOT, "val")          # ή ένα ξεχωριστό test split
+EVAL_DIR = os.path.join(DATA_ROOT, "val")   # or a dedicated test split
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
 BASELINE_CKPT = "<cartpole-baseline-vae>"
 P4_CKPT = "<cartpole-p4-vae>"
@@ -42,20 +42,20 @@ NUM_WORKERS = 4
 SAVE_FIG = "/kaggle/working/cartpole_p4_out/p4_compare.png"
 
 
-# ---------------------------------------------------------------------------
-# SSIM (self-contained, gaussian-windowed, channel-averaged)
-# ---------------------------------------------------------------------------
+#
+#  SSIM — self-contained, gaussian-windowed, channel-averaged
+#
 def _gaussian_window(ch, ksize=11, sigma=1.5, device="cpu"):
     coords = torch.arange(ksize, dtype=torch.float32, device=device) - (ksize - 1) / 2.0
     g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
     g = (g / g.sum()).unsqueeze(0)
-    w2d = (g.t() @ g).unsqueeze(0).unsqueeze(0)            # (1,1,k,k)
+    w2d = (g.t() @ g).unsqueeze(0).unsqueeze(0)   # (1,1,k,k)
     return w2d.expand(ch, 1, ksize, ksize).contiguous()
 
 
 @torch.no_grad()
 def ssim_batch(a, b, window=None):
-    """ a,b: (B,3,H,W) σε [0,1]. Επιστρέφει mean SSIM (scalar). """
+    """a, b: (B,3,H,W) in [0,1]. Returns mean SSIM (scalar)."""
     ch = a.size(1)
     if window is None:
         window = _gaussian_window(ch, device=a.device)
@@ -75,13 +75,13 @@ def count_params(*modules):
     return sum(p.numel() for m in modules for p in m.parameters())
 
 
-# ---------------------------------------------------------------------------
-# Εξαγωγή του reconstruction από ΟΠΟΙΟΔΗΠΟΤΕ μοντέλο (baseline ή P4)
-# ---------------------------------------------------------------------------
+#
+#  Reconstruction
+#
 @torch.no_grad()
 def model_recon(model, x):
     out = model(x)
-    return out[0]            # baseline -> recon ;  P4 -> composite (πρώτο στοιχείο)
+    return out[0]   # baseline -> recon, P4 -> composite (first element)
 
 
 @torch.no_grad()
@@ -104,8 +104,8 @@ def evaluate(model, loader, device):
 
 
 def decoder_param_count(model):
-    """ Μετράει ΜΟΝΟ τις παραμέτρους του decoder (το μέρος που αλλάζει το P4). """
-    if hasattr(model, "dec_cart"):           # VAE_P4
+    """Count decoder-only params (the part P4 replaces with three small decoders)."""
+    if hasattr(model, "dec_cart"):   # VAE_P4
         return count_params(model.dec_cart, model.dec_pole, model.dec_bg)
     parts = []
     if hasattr(model, "fc_decode"): parts.append(model.fc_decode)
@@ -115,32 +115,33 @@ def decoder_param_count(model):
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mean, std = load_norm_stats(NORM_STATS)                       # noqa: F821 (prior cell)
-    ds = VaePairDataset(EVAL_DIR, shift=0, state_mean=mean, state_std=std)  # noqa: F821
+    mean, std = load_norm_stats(NORM_STATS)
+    ds = VaePairDataset(EVAL_DIR, shift=0, state_mean=mean, state_std=std)
     dl = DataLoader(ds, batch_size=BATCH, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
 
-    base = VAE(latent_size=LATENT_SIZE).to(device)               # noqa: F821 (prior cell)
+    base = VAE(latent_size=LATENT_SIZE).to(device)
     base.load_state_dict(torch.load(BASELINE_CKPT, map_location=device))
-    p4 = VAE_P4(latent_size=LATENT_SIZE, n_sup=N_SUP).to(device)  # noqa: F821 (vae_principle4.py)
+    p4 = VAE_P4(latent_size=LATENT_SIZE, n_sup=N_SUP).to(device)
     p4.load_state_dict(torch.load(P4_CKPT, map_location=device))
 
     b_mse, b_ssim = evaluate(base, dl, device)
     p_mse, p_ssim = evaluate(p4, dl, device)
     b_dec, p_dec = decoder_param_count(base), decoder_param_count(p4)
-    b_tot = count_params(base); p_tot = count_params(p4)
+    b_tot = count_params(base)
+    p_tot = count_params(p4)
 
     print("\n" + "=" * 64)
-    print(f"{'metric':<22}{'baseline':>14}{'P4 (3 dec)':>14}{'Δ':>14}")
+    print(f"{'metric':<22}{'baseline':>14}{'P4 (3 dec)':>14}{'delta':>14}")
     print("-" * 64)
-    print(f"{'recon MSE  (↓)':<22}{b_mse:>14.6f}{p_mse:>14.6f}{(p_mse-b_mse):>+14.6f}")
-    print(f"{'SSIM       (↑)':<22}{b_ssim:>14.4f}{p_ssim:>14.4f}{(p_ssim-b_ssim):>+14.4f}")
-    print(f"{'decoder params (↓)':<22}{b_dec:>14,}{p_dec:>14,}{f'{100*(1-p_dec/b_dec):.1f}% less':>14}")
+    print(f"{'recon MSE  (lower)' :<22}{b_mse:>14.6f}{p_mse:>14.6f}{(p_mse-b_mse):>+14.6f}")
+    print(f"{'SSIM       (higher)':<22}{b_ssim:>14.4f}{p_ssim:>14.4f}{(p_ssim-b_ssim):>+14.4f}")
+    print(f"{'decoder params (lower)':<22}{b_dec:>14,}{p_dec:>14,}{f'{100*(1-p_dec/b_dec):.1f}% less':>14}")
     print(f"{'total params':<22}{b_tot:>14,}{p_tot:>14,}{f'{100*(1-p_tot/b_tot):.1f}% less':>14}")
     print("=" * 64)
-    print(f"\n>> P4: {100*(1-p_dec/b_dec):.1f}% λιγότερες decoder-params, ΔSSIM={p_ssim-b_ssim:+.4f}, "
-          f"ΔMSE={p_mse-b_mse:+.6f}")
+    print(f"\n>> P4: {100*(1-p_dec/b_dec):.1f}% fewer decoder params, "
+          f"dSSIM={p_ssim-b_ssim:+.4f}, dMSE={p_mse-b_mse:+.6f}")
 
-    # --- προαιρετικά: οπτική σύγκριση (full + 3 components του P4) ---
+    # Optional: visual comparison (full reconstruction + 3 P4 components)
     if SAVE_FIG:
         import matplotlib.pyplot as plt
         img_t, img_tp1, *_ = next(iter(dl))

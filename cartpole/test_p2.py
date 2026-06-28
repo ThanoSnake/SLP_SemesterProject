@@ -26,9 +26,9 @@ from vae_p2 import VAE_P2, encode_fn as encode_fn_p2
 from lstm import LatentPredictor
 from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, list_npz
 
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
+#
+#  Config
+#
 DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
 SAVE_DIR = "/kaggle/working/cartpole_p2_out"
@@ -44,17 +44,17 @@ N_BOOT = 1000
 BOOT_SEED = 0
 LOG_Y = True
 
-# ---------------------------------------------------------------------------
-# TRANSFORM CONFIG — photometric jitter (το invariance target του P2)
-# ---------------------------------------------------------------------------
-TRANSFORM_TYPE = "brightness_contrast"     # "brightness" | "contrast" | "brightness_contrast"
-# Sweep πολλαπλών εντάσεων (factor = 1 ± level· level=0 -> clean).
+#
+#  Transform Config — photometric jitter (P2's invariance target)
+#
+TRANSFORM_TYPE = "brightness_contrast"   # "brightness" | "contrast" | "brightness_contrast"
+# Sweep across multiple intensities (factor = 1 +/- level; level=0 -> clean).
 TRANSFORM_LEVELS = [0.0, 0.1, 0.2, 0.4, 0.6, 0.8]
-TRANSFORM_SIGN = +1.0                       # +1 -> πιο φωτεινό/αντίθετο· -1 -> πιο σκούρο
+TRANSFORM_SIGN = +1.0   # +1 -> brighter / higher contrast; -1 -> darker
 
-# ---------------------------------------------------------------------------
-# Model definitions — Baseline vs P2 (clean-trained VAE + encoded LSTM)
-# ---------------------------------------------------------------------------
+#
+#  Model definitions
+#
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
@@ -73,22 +73,22 @@ MODELS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Photometric transforms — εφαρμόζονται σε float [0,1] image tensors (T,3,H,W)
-# ---------------------------------------------------------------------------
+#
+#  Photometric transforms
+#
 def apply_brightness(img, level, sign):
-    """Multiplicative brightness: img * (1 ± level)."""
+    """Multiplicative brightness: img * (1 +/- level)."""
     return torch.clamp(img * (1.0 + sign * level), 0.0, 1.0)
 
 
 def apply_contrast(img, level, sign):
-    """Contrast γύρω από το per-frame mean: (img - m) * (1 ± level) + m."""
+    """Contrast around the per-frame mean: (img - m) * (1 +/- level) + m."""
     m = img.mean(dim=(1, 2, 3), keepdim=True)
     return torch.clamp((img - m) * (1.0 + sign * level) + m, 0.0, 1.0)
 
 
 def apply_brightness_contrast(img, level, sign):
-    """Brightness + contrast μαζί (όπως το color_jitter του P2 training)."""
+    """Brightness + contrast combined (matches the color_jitter from P2 training)."""
     out = img * (1.0 + sign * level)
     m = out.mean(dim=(1, 2, 3), keepdim=True)
     return torch.clamp((out - m) * (1.0 + sign * level) + m, 0.0, 1.0)
@@ -97,7 +97,7 @@ def apply_brightness_contrast(img, level, sign):
 def make_transform_fn(transform_type, level, device):
     """Returns a deterministic function (img_tensor) -> transformed_img_tensor."""
     if level == 0.0:
-        return lambda x: x  # no-op για clean baseline
+        return lambda x: x  # no-op for clean baseline
     sign = TRANSFORM_SIGN
     if transform_type == "brightness":
         return lambda x: apply_brightness(x, level, sign)
@@ -109,10 +109,9 @@ def make_transform_fn(transform_type, level, device):
         raise ValueError(f"Unknown transform type: {transform_type}")
 
 
-# ---------------------------------------------------------------------------
-# precompute_latents — ίδια λογική με loader.precompute_latents,
-# αλλά εφαρμόζει το transform ΠΡΙΝ το encoding.
-# ---------------------------------------------------------------------------
+#
+#  Transformed precompute
+#
 @torch.no_grad()
 def precompute_latents_transformed(encode_fn, root, out_root, transform_fn,
                                    shift=0, batch=256, device="cuda"):
@@ -129,7 +128,7 @@ def precompute_latents_transformed(encode_fn, root, out_root, transform_fn,
             x = (d[f"noisy_states_{shift}"] if shift in (2, 5, 10)
                  else d["states"]).astype(np.float32)
 
-        # Εφαρμογή transform ΣΕ ΟΛΑ τα frames ΠΡΙΝ το encoding
+        # Apply transform to all frames before encoding
         imgs = transform_fn(imgs.to(device))
 
         img_t, img_tp1 = imgs[:-1], imgs[1:]
@@ -143,11 +142,12 @@ def precompute_latents_transformed(encode_fn, root, out_root, transform_fn,
                             z=z, acts=acts[:-1], states=states[:-1], x=x[:-1])
 
 
-# ---------------------------------------------------------------------------
-# Rollout + per-window errors (ΙΔΙΟ με lunar_eval_baseline_vs_p1.py)
-# ---------------------------------------------------------------------------
+#
+#  Rollout / Errors
+#
 def _hybrid(z, state, n_sup):
-    h = z.clone(); h[..., :n_sup] = state
+    h = z.clone()
+    h[..., :n_sup] = state
     return h
 
 
@@ -168,7 +168,7 @@ def free_run(model, batch, encoded):
 
 @torch.no_grad()
 def collect_sq_err(model, loader, device, encoded):
-    """ -> (N, L, N_SUP) STANDARDIZED squared error (preds[:, :N_SUP] vs GT standardized state). """
+    """Returns (N, L, N_SUP) standardized squared error (preds[:N_SUP] vs GT standardized state)."""
     model.eval()
     chunks = []
     for batch in loader:
@@ -179,9 +179,9 @@ def collect_sq_err(model, loader, device, encoded):
     return np.concatenate(chunks, axis=0)
 
 
-# ---------------------------------------------------------------------------
-# Robust statistics (ΙΔΙΑ με lunar_eval_baseline_vs_p1.py)
-# ---------------------------------------------------------------------------
+#
+#  Robust statistics
+#
 def median_iqr(arr):
     """arr (N,L) -> median, q25, q75 per horizon."""
     return (np.median(arr, axis=0),
@@ -190,8 +190,8 @@ def median_iqr(arr):
 
 
 def bootstrap_paired(diff, n_boot, rng):
-    """diff (N,L) = mse_base − mse_p2 per window/horizon (>0 => p2 better).
-    -> median(diff) per horizon + 95% bootstrap CI (resample windows)."""
+    """diff (N,L) = mse_base - mse_p2 per window/horizon (>0 => p2 better).
+    Returns median(diff) per horizon + 95% bootstrap CI (resample windows)."""
     N, L = diff.shape
     med = np.median(diff, axis=0)
     boots = np.empty((n_boot, L), dtype=np.float64)
@@ -202,9 +202,9 @@ def bootstrap_paired(diff, n_boot, rng):
     return med, lo, hi
 
 
-# ---------------------------------------------------------------------------
-# Model evaluation at a given transform level
-# ---------------------------------------------------------------------------
+#
+#  Evaluate model
+#
 def evaluate_model_transformed(m, device, mean_s, std_s, level, transform_type):
     """Load VAE, encode test images WITH transform, evaluate LSTM -> (N,L,N_SUP) per mode."""
     transform_fn = make_transform_fn(transform_type, level, device)
@@ -213,9 +213,9 @@ def evaluate_model_transformed(m, device, mean_s, std_s, level, transform_type):
     print(f"\n[{m['label']}] transform={transform_type} level={level:.2f}")
     print(f"  VAE ({m['vae_ckpt']}) -> precompute test latents (transformed)")
     vae = m["make_vae"]().to(device)
-    vae.load_state_dict(torch.load(m["vae_ckpt"], map_location=device)); vae.eval()
+    vae.load_state_dict(torch.load(m["vae_ckpt"], map_location=device))
+    vae.eval()
 
-    # Encode function — wraps the VAE's encode
     @torch.no_grad()
     def _encode(img_t, img_tp1):
         vae.eval()
@@ -248,9 +248,9 @@ def evaluate_model_transformed(m, device, mean_s, std_s, level, transform_type):
     return out
 
 
-# ---------------------------------------------------------------------------
-# Plotting helpers
-# ---------------------------------------------------------------------------
+#
+#  Plots
+#
 def plot_median_iqr_per_level(all_err, levels, mode, save_dir, transform_type):
     """One figure per transform level: Baseline vs P2 median MSE curves."""
     base, p2 = MODELS[0]["label"], MODELS[1]["label"]
@@ -276,7 +276,7 @@ def plot_median_iqr_per_level(all_err, levels, mode, save_dir, transform_type):
 
 
 def plot_paired_per_level(all_err, levels, save_dir, transform_type, rng):
-    """Paired Δ (base − p2) per transform level, all modes."""
+    """Paired delta (base - p2) per transform level, all modes."""
     base, p2 = MODELS[0]["label"], MODELS[1]["label"]
     horizons = np.arange(1, SEQ_LEN + 1)
     paired_all = {}
@@ -291,12 +291,12 @@ def plot_paired_per_level(all_err, levels, save_dir, transform_type, rng):
             paired_all[(mode, nl)] = (med, lo, hi)
             ax = axes[0][j]
             ax.axhline(0, color="k", lw=1)
-            ax.plot(horizons, med, color="C2", lw=2, label=f"median({base} − {p2})")
+            ax.plot(horizons, med, color="C2", lw=2, label=f"median({base} - {p2})")
             ax.fill_between(horizons, lo, hi, color="C2", alpha=0.25, label="95% bootstrap CI")
-            ax.set_title(f"paired Δ — {mode} | level={nl:.2f}")
-            ax.set_xlabel("Horizon"); ax.set_ylabel("Δ state-MSE")
+            ax.set_title(f"paired delta — {mode} | level={nl:.2f}")
+            ax.set_xlabel("Horizon"); ax.set_ylabel("delta state-MSE")
             ax.set_xlim(1, SEQ_LEN); ax.grid(alpha=0.3); ax.legend(fontsize=7)
-        plt.suptitle(f"Paired difference (>0 ⇒ {p2} better) — {transform_type}, {mode}", y=1.02)
+        plt.suptitle(f"Paired difference (>0 => {p2} better) — {transform_type}, {mode}", y=1.02)
         plt.tight_layout()
         plt.savefig(os.path.join(save_dir, f"bc_paired_{mode}_{transform_type}.png"),
                     dpi=150, bbox_inches="tight")
@@ -305,11 +305,10 @@ def plot_paired_per_level(all_err, levels, save_dir, transform_type, rng):
 
 
 def plot_degradation_summary(all_err, levels, save_dir, transform_type):
-    """Summary: median MSE at horizon H vs transform level, for each model & mode.
-    Δείχνει πόσο degrade-άρει κάθε μοντέλο σε αυξανόμενη διαταραχή (P2 = πιο flat = invariant)."""
+    """Median MSE at fixed horizons vs transform level — a flatter curve means more invariant (P2 target)."""
     base, p2 = MODELS[0]["label"], MODELS[1]["label"]
     cb, cp = MODELS[0]["color"], MODELS[1]["color"]
-    SUMMARY_HORIZONS = [1, 10, 20, 30]  # which horizons to show
+    SUMMARY_HORIZONS = [1, 10, 20, 30]
 
     for mode in SEED_MODES:
         fig, axes = plt.subplots(1, len(SUMMARY_HORIZONS),
@@ -340,7 +339,7 @@ def plot_degradation_summary(all_err, levels, save_dir, transform_type):
             if hi == 0:
                 ax.set_ylabel("State MSE (median)")
             ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8)
-        plt.suptitle(f"Degradation under {transform_type} — {mode} (πιο flat = πιο invariant)", y=1.02)
+        plt.suptitle(f"Degradation under {transform_type} — {mode} (flatter = more invariant)", y=1.02)
         plt.tight_layout()
         plt.savefig(os.path.join(save_dir, f"bc_degradation_{mode}_{transform_type}.png"),
                     dpi=150, bbox_inches="tight")
@@ -376,9 +375,9 @@ def plot_perdim_per_level(all_err, levels, save_dir, transform_type):
         plt.show()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+#
+#  Main
+#
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -390,8 +389,7 @@ def main():
 
     base, p2 = MODELS[0]["label"], MODELS[1]["label"]
 
-    # ---- Collect errors at each transform level ----
-    # all_err[level][label][mode] = (N, L, N_SUP)
+    # Collect errors at each transform level; all_err[level][label][mode] = (N, L, N_SUP)
     all_err = {}
     for nl in TRANSFORM_LEVELS:
         print(f"\n{'='*60}")
@@ -402,7 +400,7 @@ def main():
             all_err[nl][m["label"]] = evaluate_model_transformed(
                 m, device, mean_s, std_s, nl, TRANSFORM_TYPE)
 
-        # Align window counts between models (same as original)
+        # Align window counts between models
         for mode in SEED_MODES:
             nb = all_err[nl][base][mode].shape[0]
             np2 = all_err[nl][p2][mode].shape[0]
@@ -413,20 +411,20 @@ def main():
             all_err[nl][base][mode] = all_err[nl][base][mode][:n]
             all_err[nl][p2][mode] = all_err[nl][p2][mode][:n]
 
-    # ---- (1) Median + IQR curves per transform level ----
+    # (1) Median + IQR curves per transform level
     for mode in SEED_MODES:
         plot_median_iqr_per_level(all_err, TRANSFORM_LEVELS, mode, SAVE_DIR, TRANSFORM_TYPE)
 
-    # ---- (2) Paired Δ per transform level ----
+    # (2) Paired delta per transform level
     paired_all = plot_paired_per_level(all_err, TRANSFORM_LEVELS, SAVE_DIR, TRANSFORM_TYPE, rng)
 
-    # ---- (3) Per-dim curves per transform level (encoded mode) ----
+    # (3) Per-dim curves per transform level (encoded mode)
     plot_perdim_per_level(all_err, TRANSFORM_LEVELS, SAVE_DIR, TRANSFORM_TYPE)
 
-    # ---- (4) DEGRADATION SUMMARY: MSE vs transform level at fixed horizons ----
+    # (4) Degradation summary: MSE vs transform level at fixed horizons
     plot_degradation_summary(all_err, TRANSFORM_LEVELS, SAVE_DIR, TRANSFORM_TYPE)
 
-    # ---- (5) Summary table ----
+    # (5) Summary table
     HS = [h for h in (1, 10, 20, 30) if h <= SEQ_LEN]
     print(f"\n{'='*80}")
     print(f"=== SUMMARY: median state-MSE (standardized) under {TRANSFORM_TYPE} ===")
@@ -441,11 +439,11 @@ def main():
                       "  ".join(f"h{h}={med[h-1]:.5f}" for h in HS))
             if (mode, nl) in paired_all:
                 med_d, lo_d, hi_d = paired_all[(mode, nl)]
-                print(f"      paired Δ(>0⇒{p2})  " +
+                print(f"      paired delta(>0=>{p2})  " +
                       "  ".join(f"h{h}={med_d[h-1]:+.5f}"
                                 f"[{lo_d[h-1]:+.5f},{hi_d[h-1]:+.5f}]" for h in HS))
 
-    # ---- save ----
+    # Save
     save_dict = {"horizons": horizons, "std4": std4,
                  "transform_type": TRANSFORM_TYPE,
                  "transform_levels": np.array(TRANSFORM_LEVELS),
