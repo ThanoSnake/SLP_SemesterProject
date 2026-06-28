@@ -44,7 +44,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from LunarLoader import VaePairDataset, load_norm_stats, list_npz
+from loader import VaePairDataset, load_norm_stats, list_npz
 
 # ---------------------------------------------------------------------------
 # CONFIG  (ΤΟΠΙΚΑ paths -> τρέχει στο Mac· για Kaggle άλλαξε σε /kaggle/working/...)

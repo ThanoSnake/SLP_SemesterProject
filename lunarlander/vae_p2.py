@@ -56,7 +56,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from LunarLoader import VaePairDataset, load_norm_stats
+from loader import VaePairDataset, load_norm_stats
 
 # ---------------------------------------------------------------------------
 # CONFIG  (ΙΔΙΑ paths/hyper με baseline & P1 -> τίμια σύγκριση)

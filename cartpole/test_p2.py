@@ -24,10 +24,10 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-#from vae_baseline import VAE, encode_fn as encode_fn_baseline
-#from vae_principle2 import VAE_P2, encode_fn as encode_fn_p2
-#from lstm_baseline import LatentPredictor
-#from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, list_npz
+from vae import VAE, encode_fn as encode_fn_baseline
+from vae_p2 import VAE_P2, encode_fn as encode_fn_p2
+from lstm import LatentPredictor
+from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, list_npz
 
 # ---------------------------------------------------------------------------
 # CONFIG

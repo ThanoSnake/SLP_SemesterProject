@@ -1,13 +1,24 @@
 """
-lstm_principle2_alt.py — LSTM predictor trained on ENCODED mode (CartPole Principle 2).
+lstm_baseline_alt.py — LSTM predictor εκπαιδευμένο σε ENCODED mode (CartPole Baseline).
 
-Difference from lstm_baseline.py:
-  * Uses VAE_P2 from vae_principle2.py.
-  * NO hybrid-gt injection: seed & teacher-forcing targets use
-    EXCLUSIVELY VAE-encoded latents (z), NOT GT physical states.
-  * Rollout is fully end-to-end using pure VAE-encoded latents.
-  * Saves latents under /kaggle/working/cartpole_latents_p2 and the checkpoints
-    under /kaggle/working/lstm_p2_alt_out.
+Διαφορά από lstm_baseline.py (hybrid):
+  * ΚΑΝΕΝΑ hybrid-gt injection: seed & teacher-forcing targets χρησιμοποιούν
+    ΑΠΟΚΛΕΙΣΤΙΚΑ τα VAE-encoded latents (z), ΟΧΙ τα GT physical states.
+  * Αυτό σημαίνει ότι κατά το training ο LSTM μαθαίνει πάνω στα ΠΡΑΓΜΑΤΙΚΑ
+    latents που θα δει στο inference (encoded mode), χωρίς κανένα GT "βοήθημα".
+  * Ο αξιολόγηση γίνεται πάντα end-to-end: z_0 από VAE -> LSTM rollout ->
+    σύγκριση πρόβλεψης[:4] με GT physical state (σε standardized μονάδες).
+
+ΓΙΑΤΙ:
+  * Στο inference ΔΕΝ υπάρχει GT -> ο LSTM πρέπει να δουλεύει μόνο με VAE latents.
+  * Ο hybrid-trained LSTM (lstm_baseline.py) αξιολογείται OOD στο encoded mode,
+    αφού ποτέ δεν είδε πραγματικά VAE-encoded physical dims κατά την εκπαίδευση.
+  * Αυτό το script παράγει τα *_alt checkpoints που χρησιμοποιεί το
+    eval_baseline_vs_p1.py στο "encoded" seed mode.
+
+Αρχιτεκτονική: ΙΔΙΑ LatentPredictor (residual LSTM).
+Τεχνικές: scheduled sampling, horizon curriculum, early stopping — ΙΔΙΑ με hybrid.
+Μόνη αλλαγή: rollout χωρίς _hybrid().
 """
 import os
 import numpy as np
@@ -18,20 +29,21 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from vae_principle2 import VAE_P2, encode_fn
+from vae import VAE, encode_fn
 from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
 DATA_ROOT = "/kaggle/input/datasets/iliasbakos/cartpole-dataset/cartpole_dataset"
-LATENT_ROOT = "/kaggle/working/cartpole_latents_p2"
+LATENT_ROOT = "/kaggle/working/cartpole_latents_baseline"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "/kaggle/working/vae_p2_out/vae_p2_best.pth"
-SAVE_DIR = "/kaggle/working/lstm_p2_alt_out"
+VAE_CKPT = "/kaggle/input/datasets/iliasbakos/extracted-features/baseline_vae/baseline_vae/vae_best.pth"
+SAVE_DIR = "/kaggle/working/lstm_baseline_alt_out"
 
 LATENT_SIZE = 64
 N_SUP = 4
+N_IMG = LATENT_SIZE - N_SUP
 N_ACTIONS = 2
 SHIFT = 0
 
@@ -45,7 +57,7 @@ LAYERS = 2
 EPOCHS = 50
 LR = 1e-3
 CLIP = 1.0
-W_PHYS = 1.0
+W_PHYS = 1.0               # extra weight on physical dims of the latent loss
 
 # Scheduled sampling (per epoch)
 P_START = 1.0
@@ -68,7 +80,7 @@ def set_seed(s):
 
 
 # ---------------------------------------------------------------------------
-# Model — residual latent predictor
+# Model — residual latent predictor (ΙΔΙΟ με hybrid version)
 # ---------------------------------------------------------------------------
 class LatentPredictor(nn.Module):
     def __init__(self, latent=64, action_dim=2, hidden=64, layers=2):
@@ -92,16 +104,21 @@ class LatentPredictor(nn.Module):
 # Rollout — ENCODED mode: NO hybrid-gt injection
 # ---------------------------------------------------------------------------
 def rollout(model, batch, p_tf, n_sup, n_actions, free_running=False, max_len=None):
-    """Rollout without _hybrid: seed & teacher-forcing targets = pure VAE latents."""
+    """Rollout χωρίς _hybrid: seed & teacher-forcing targets = καθαρά VAE latents.
+
+    - seed z_0 = z_t[:, 0]  (πλήρες VAE-encoded latent, ΟΧΙ GT physical override)
+    - teacher-forcing target = z_tp1[:, k]  (πλήρες VAE-encoded latent)
+    - evaluation target = state_tp1  (GT physical state, ΜΟΝΟ για MSE υπολογισμό)
+    """
     z_t, action, z_tp1, state_t, state_tp1 = batch
     L = z_t.shape[1] if max_len is None else min(max_len, z_t.shape[1])
     B, _, D = z_t.shape
     device = z_t.device
 
-    # ENCODED seed
-    z_seed = z_t[:, 0]
-    # Teacher-forcing targets
-    z_gt = z_tp1[:, :L]
+    # ENCODED seed: use VAE-encoded z directly (NO GT physical state injection)
+    z_seed = z_t[:, 0]                                              # (B, D)
+    # Teacher-forcing targets: pure VAE latents (NO hybrid GT override)
+    z_gt = z_tp1[:, :L]                                             # (B, L, D)
 
     hidden = model.init_hidden(B, device)
     z_in = z_seed
@@ -130,6 +147,7 @@ def train_epoch(model, loader, optimizer, device, p_tf, cur_len, desc=""):
         batch = [b.to(device, non_blocking=True) for b in batch]
         preds, z_gt, _ = rollout(model, batch, p_tf, N_SUP, N_ACTIONS,
                                   free_running=False, max_len=cur_len)
+        # Loss on FULL latent + extra weight on physical dims
         loss = (F.mse_loss(preds, z_gt, reduction="mean")
                 + W_PHYS * F.mse_loss(preds[..., :N_SUP], z_gt[..., :N_SUP], reduction="mean"))
 
@@ -146,18 +164,20 @@ def train_epoch(model, loader, optimizer, device, p_tf, cur_len, desc=""):
 
 @torch.no_grad()
 def eval_epoch(model, loader, device, std4, desc=""):
-    """FREE-RUNNING at full SEQ_LEN -> physical MSE per horizon."""
+    """FREE-RUNNING at full SEQ_LEN -> physical MSE per horizon.
+    Predictions[:4] compared against GT physical states (NOT VAE-encoded)."""
     model.eval()
     se, n = None, 0
     for batch in tqdm(loader, desc=desc, leave=False):
         batch = [b.to(device, non_blocking=True) for b in batch]
         preds, _, state_tp1 = rollout(model, batch, 0.0, N_SUP, N_ACTIONS,
                                        free_running=True, max_len=None)
+        # Compare predicted physical dims with GT physical state (de-standardized)
         err = (preds[..., :N_SUP] - state_tp1) * std4
-        s = (err ** 2).sum(dim=0)
+        s = (err ** 2).sum(dim=0)                                   # (L, n_sup)
         se = s if se is None else se + s
         n += preds.size(0)
-    return (se / n).mean(dim=1).cpu().numpy()
+    return (se / n).mean(dim=1).cpu().numpy()                       # (L,) physical MSE per horizon
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +193,7 @@ if __name__ == "__main__":
     std4 = torch.tensor(std[:N_SUP], device=device)
 
     if DO_PRECOMPUTE:
-        vae = VAE_P2(latent_size=LATENT_SIZE).to(device)
+        vae = VAE().to(device)
         vae.load_state_dict(torch.load(VAE_CKPT, map_location=device))
         vae.eval()
         enc = encode_fn(vae, device)
@@ -225,7 +245,7 @@ if __name__ == "__main__":
         if val_mean < best - 1e-6:
             best, bad = val_mean, 0
             torch.save(model.state_dict(),
-                       os.path.join(SAVE_DIR, "lstm_p2_alt_best.pth"))
+                       os.path.join(SAVE_DIR, "lstm_baseline_alt_best.pth"))
             np.save(os.path.join(SAVE_DIR, "val_mse_per_horizon.npy"), mse_h)
             print("  -> best model saved")
         else:
@@ -235,5 +255,5 @@ if __name__ == "__main__":
                 break
 
     torch.save(model.state_dict(),
-               os.path.join(SAVE_DIR, "lstm_p2_alt_last.pth"))
+               os.path.join(SAVE_DIR, "lstm_baseline_alt_last.pth"))
     print("Best val phys-MSE:", best)
