@@ -56,7 +56,7 @@ LOG_Y = True
 # TRANSFORM CONFIG — μοναδικό setting: brightness/contrast level=0.2
 # ---------------------------------------------------------------------------
 TRANSFORM_TYPE = "brightness_contrast"   # "brightness" | "contrast" | "brightness_contrast"
-TRANSFORM_LEVEL = 0.2                     # factor = 1 ± level
+TRANSFORM_LEVEL = 0.1                     # factor = 1 ± level
 TRANSFORM_SIGN = +1.0                     # +1 -> πιο φωτεινό/αντίθετο· -1 -> πιο σκούρο
 
 # Trajectory plot (4): τυχαίο test window
