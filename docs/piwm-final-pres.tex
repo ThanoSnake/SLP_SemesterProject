@@ -252,20 +252,80 @@
 % Slide 10 : Our Results 8 - Weak Supervision under Noise
 \begin{frame}{Τα Αποτελέσματά μας: Ασθενής Επίβλεψη υπό Θόρυβο}
     \begin{columns}[onlytextwidth, T]
-        \begin{column}{0.5\textwidth}
+        \begin{column}{0.46\textwidth}
             \begin{block}{Το Παράδοξο της Αρχής 3}
                 \begin{itemize}
-                    \item \scriptsize Υπό την παρουσία χωρικού θορύβου, το μοντέλο με ασθενή επίβλεψη (\textlatin{P3-weak}) \textbf{υπερτερεί} του πλήρως επιβλεπόμενου \textlatin{Baseline}!
-                    \item \scriptsize \textbf{Εξήγηση:} Η εκπαίδευση με «θορυβώδεις» εκτιμήσεις ταχυτήτων (μέσω πεπερασμένων διαφορών) λειτούργησε ως έμμεση κανονικοποίηση (\textlatin{implicit regularizer}).
-                    \item \scriptsize Απέτρεψε τον \textlatin{encoder} από το να κάνει \textlatin{overfit} στις τέλειες, καθαρές λεπτομέρειες των δεδομένων εκπαίδευσης, αυξάνοντας τη γενίκευση σε \textlatin{noisy OOD} καταστάσεις.
+                    \item \scriptsize Υπό χωρικό θόρυβο, η ασθενής επίβλεψη (\textlatin{P3-weak}) \textbf{υπερτερεί} του πλήρως επιβλεπόμενου \textlatin{Baseline}.
+                    \item \scriptsize \textbf{Εξήγηση:} οι «θορυβώδεις» εκτιμήσεις ταχυτήτων (πεπερασμένες διαφορές) δρουν ως έμμεση κανονικοποίηση (\textlatin{implicit regularizer}), αποτρέποντας \textlatin{overfit} στις καθαρές λεπτομέρειες.
                 \end{itemize}
             \end{block}
-        \end{column}
-        \begin{column}{0.46\textwidth}
             \setbeamercolor{block title}{bg=accentorange}
             \begin{block}{Συμπέρασμα}
-                \scriptsize Η απαίτηση για τέλεια δεδομένα επίβλεψης είναι μύθος. Η προσεγγιστική, ασθενής επίβλεψη φυσικών μεγεθών όχι μόνο επαρκεί, αλλά καθιστά το μοντέλο πιο εύρωστο σε συνθήκες εκτός κατανομής.
+                \scriptsize Η απαίτηση για τέλεια δεδομένα επίβλεψης είναι μύθος: η προσεγγιστική επίβλεψη καθιστά το μοντέλο πιο εύρωστο εκτός κατανομής.
             \end{block}
+        \end{column}
+        \begin{column}{0.52\textwidth}
+            \centering
+            \includegraphics[width=0.99\linewidth]{pics/p3_noise_degradation.png}\par
+            \scriptsize Σχ.\ 6: Αρχή 3 υπό \textlatin{Gaussian noise}. Σε υψηλό θόρυβο/ορίζοντα η \textlatin{P3-weak} (κόκκινο) πέφτει κάτω από το \textlatin{Baseline} (μπλε).
+        \end{column}
+    \end{columns}
+\end{frame}
+
+% Slide 10b : Our Results 9 - P4 Compositional Decoding (Αρχή 4)
+\begin{frame}{Τα Αποτελέσματά μας: Διαμέριση Εξόδου (Αρχή 4)}
+    \begin{columns}[onlytextwidth, T]
+        \begin{column}{0.46\textwidth}
+            \begin{itemize}
+                \item \scriptsize \textbf{Ιδέα:} Αντικατάσταση του μονολιθικού \textlatin{decoder} με τρεις μικρούς, ανεξάρτητους αποκωδικοποιητές (\textlatin{cart}, \textlatin{pole}, \textlatin{background}).
+                \item \scriptsize \textbf{Αποτέλεσμα:} \alert{$-75.4\%$} παράμετροι \textlatin{decoder} (\textlatin{665k} $\to$ \textlatin{164k}) και $-25.9\%$ συνολικά, με \emph{ταυτόσημη} ποιότητα ανακατασκευής.
+                \item \scriptsize Επιβεβαιώνεται ο ισχυρισμός του \textlatin{paper}: η συνθετικότητα μειώνει δραστικά το μέγεθος χωρίς απώλεια ποιότητας, διευκολύνοντας την επαλήθευση ανά αντικείμενο.
+            \end{itemize}
+            \vspace{0.1cm}
+            \centering\scriptsize
+            \begin{tabular}{l r r}
+                \toprule
+                \textlatin{Metric} & \textlatin{Baseline} & \textlatin{P4} \\
+                \midrule
+                \textlatin{recon MSE} $\downarrow$ & 0.00315 & 0.00306 \\
+                \textlatin{SSIM} $\uparrow$ & 0.9581 & 0.9582 \\
+                \textlatin{decoder params} $\downarrow$ & \textlatin{665k} & \textbf{\textlatin{164k}} \\
+                \bottomrule
+            \end{tabular}
+        \end{column}
+        \begin{column}{0.52\textwidth}
+            \centering
+            \includegraphics[width=0.99\linewidth]{pics/p4_compare.png}\par
+            \scriptsize Σχ.\ 7: \textlatin{GT} vs \textlatin{baseline} vs \textlatin{P4} (σύνθεση \& επιμέρους \textlatin{cart}/\textlatin{pole}/\textlatin{bg}).
+        \end{column}
+    \end{columns}
+\end{frame}
+
+% Slide 10c : Beyond-paper extension - Interpretable Dynamics with SINDy
+\begin{frame}{Επέκταση πέρα από το \textlatin{Paper}: Ερμηνεύσιμη Δυναμική (\textlatin{SINDy})}
+    \footnotesize Αν ο λανθάνων χώρος είναι όντως φυσικός, τότε και η \emph{δυναμική} του πρέπει να γράφεται ως αραιή εξίσωση — όχι «μαύρο κουτί». Εφαρμόσαμε \textlatin{SINDYc} στις φυσικές διαστάσεις και το συγκρίναμε με το \textlatin{LSTM} και ένα \textlatin{gray-box hybrid} (\textlatin{SINDy} + υπολειμματικό \textlatin{LSTM}).\par\vspace{0.15cm}
+    \begin{columns}[onlytextwidth, T]
+        \begin{column}{0.48\textwidth}
+            \begin{block}{Ανακαλυφθείσες εξισώσεις (12 όροι / 88)}
+                \scriptsize
+                \[ x_{t+1} = x_t + 0.021\,\dot{x} \]
+                \[ \theta_{t+1} = \theta_t + 0.176\,\dot{\theta} \]
+                \scriptsize Ανακτώνται \emph{αυτόματα} τα κινηματικά ολοκληρώματα και ο όρος βαρύτητας $\sin\theta$ — ρητή, αναγνώσιμη φυσική.
+            \end{block}
+        \end{column}
+        \begin{column}{0.48\textwidth}
+            \scriptsize \textbf{Ευρωστία σε θόρυβο} (\textlatin{mean State MSE}, \textlatin{Baseline}):
+            \par\vspace{0.1cm}\centering
+            \begin{tabular}{l r r r}
+                \toprule
+                $\sigma$ & \textlatin{LSTM} & \textlatin{SINDy} & \textlatin{Hybrid} \\
+                \midrule
+                $0.00$ & $0.033$ & $0.035$ & $\mathbf{0.027}$ \\
+                $0.30$ & $0.509$ & $\mathbf{0.130}$ & $0.441$ \\
+                \bottomrule
+            \end{tabular}
+            \par\vspace{0.15cm}
+            \raggedright\scriptsize Στο $\sigma=0.30$ το \textlatin{SINDy} υποβαθμίζεται $\times 3.7$ ενώ το \textlatin{LSTM} $\times 15$: η φυσική δομή δίνει ευρωστία και ερμηνευσιμότητα με $\sim$12 μόνο συντελεστές.
         \end{column}
     \end{columns}
 \end{frame}
@@ -289,8 +349,9 @@
         \begin{column}{0.48\textwidth}
             \begin{block}{Μελλοντικές Επεκτάσεις}
                 \begin{itemize}
-                    \item \scriptsize \textbf{Φυσικοί Κανόνες από LLMs:} Χρήση μεγάλων γλωσσικών μοντέλων για τον αυτόματο εντοπισμό και ορισμό κανόνων equivariance/invariance.
-                    \item \scriptsize \textbf{Σύνδεση με Έλεγχο:} Πραγματική ενσωμάτωση του ερμηνεύσιμου $z_{\text{phys}}$ σε ελεγκτές \textlatin{MPC} για ασφαλές \textlatin{planning}.
+                    \item \scriptsize \textbf{Ερμηνεύσιμη δυναμική:} επέκταση από \textlatin{SINDy} σε \textlatin{Hamiltonian/Lagrangian NNs} για δυναμική που διατηρεί την ενέργεια.
+                    \item \scriptsize \textbf{Φυσικοί Κανόνες από \textlatin{LLMs}:} αυτόματος εντοπισμός κανόνων \textlatin{equivariance/invariance}.
+                    \item \scriptsize \textbf{Σύνδεση με Έλεγχο:} ενσωμάτωση του ερμηνεύσιμου $z_{\text{phys}}$ σε ελεγκτές \textlatin{MPC} για ασφαλές \textlatin{planning}.
                 \end{itemize}
             \end{block}
         \end{column}
@@ -311,7 +372,7 @@
         \textbf{Μέλος Ομάδας} & \textbf{ΑΜ} & \textbf{Ρόλος \& Συνεισφορά στην Εργασία} \\
         \midrule
         \textbf{Πλουμής Φίλιππος} & 03122115 & Συλλογή δεδομένων, pipeline μεταφοράς στα μοντέλα. \\
-        \textbf{Ρήγας Αθανάσιος} & 03122078 & VAE/LSTM updates, Scheduled Sampling, Curriculum Learning. \\
+        \textbf{Ρήγας Αθανάσιος} & 03122078 & VAE/LSTM updates, Scheduled Sampling, Curriculum Learning, επέκταση SINDy / gray-box hybrid \& noise sweep. \\
         \textbf{Μπακογιώργος Ηλίας} & 03122019 & Υλοποίηση Αρχής 1 (disentanglement) \& Αρχής 2 (equivariance). \\
         \textbf{Φειδάκης Αθανάσιος} & 03122676 & Υλοποίηση Αρχής 3 (supervision), Αρχής 4 \& paired bootstrap eval. \\
         \bottomrule

@@ -38,15 +38,15 @@
 
 \title{\textlatin{Interpretable World Models Principles}}
 
-\author{\IEEEauthorblockN{Όνομα Επώνυμο}
-\IEEEauthorblockA{\textit{Τμήμα / Πανεπιστήμιο} \\
-\textlatin{email@domain.com}}
+\author{\IEEEauthorblockN{Φ. Πλουμής \quad Α. Ρήγας \quad Η. Μπακογιώργος \quad Α. Φειδάκης}
+\IEEEauthorblockA{\textit{Σχολή Ηλεκτρολόγων Μηχανικών \& Μηχανικών Υπολογιστών} \\
+\textit{Εθνικό Μετσόβιο Πολυτεχνείο}, Αθήνα}
 }
 
 \maketitle
 
 \begin{abstract}
-Η παρούσα εργασία παρουσιάζει την αναπαραγωγή και εκτεταμένη αξιολόγηση των αρχών σχεδιασμού για \textlatin{World Models} (\textlatin{PIWM}). Ενώ η αρχική μελέτη περιορίστηκε σε καθαρά περιβάλλοντα, η υλοποίησή μας αναβαθμίζει την αρχιτεκτονική (χρήση \textlatin{residual LSTMs}, \textlatin{curriculum learning}, \textlatin{scheduled sampling}) και εξετάζει την ευρωστία των μοντέλων σε συνθήκες εκτός κατανομής (\textlatin{Out-of-Distribution}, \textlatin{OOD}), όπως χωρικός θόρυβος και μεταβολές φωτεινότητας. Τα πειράματα στα περιβάλλοντα \textlatin{CartPole} και \textlatin{LunarLander} αναδεικνύουν άγνωστους περιορισμούς: η Αρχή 1 (αποσύνδεση αναπαραστάσεων) λειτουργεί ως ισχυρό φίλτρο χωρικού θορύβου, η Αρχή 2 (\textlatin{equivariance}) καταρρέει υπό τυχαίο θόρυβο αλλά διαπρέπει σε μεταβολές φωτεινότητας, ενώ η Αρχή 3 (ασθενής επίβλεψη) λειτουργεί ως έμμεση κανονικοποίηση, καθιστώντας το μοντέλο πιο ανθεκτικό από τα πλήρως επιβλεπόμενα \textlatin{baselines}.
+Η παρούσα εργασία παρουσιάζει την αναπαραγωγή και εκτεταμένη αξιολόγηση των αρχών σχεδιασμού για \textlatin{World Models} (\textlatin{PIWM}). Ενώ η αρχική μελέτη περιορίστηκε σε καθαρά περιβάλλοντα, η υλοποίησή μας αναβαθμίζει την αρχιτεκτονική (χρήση \textlatin{residual LSTMs}, \textlatin{curriculum learning}, \textlatin{scheduled sampling}) και εξετάζει την ευρωστία των μοντέλων σε συνθήκες εκτός κατανομής (\textlatin{Out-of-Distribution}, \textlatin{OOD}), όπως χωρικός θόρυβος και μεταβολές φωτεινότητας. Τα πειράματα στα περιβάλλοντα \textlatin{CartPole} και \textlatin{LunarLander} αναδεικνύουν άγνωστους περιορισμούς: η Αρχή 1 (αποσύνδεση αναπαραστάσεων) λειτουργεί ως ισχυρό φίλτρο χωρικού θορύβου, η Αρχή 2 (\textlatin{equivariance}) καταρρέει υπό τυχαίο θόρυβο αλλά διαπρέπει σε μεταβολές φωτεινότητας, ενώ η Αρχή 3 (ασθενής επίβλεψη) λειτουργεί ως έμμεση κανονικοποίηση, καθιστώντας το μοντέλο πιο ανθεκτικό από τα πλήρως επιβλεπόμενα \textlatin{baselines}. Υλοποιούμε επίσης την Αρχή 4 (διαμέριση εξόδου), επιτυγχάνοντας μείωση των παραμέτρων του \textlatin{decoder} κατά $75\%$ χωρίς απώλεια ποιότητας. Τέλος, ως επέκταση πέρα από το αρχικό άρθρο, αντικαθιστούμε το «μαύρο κουτί» \textlatin{LSTM} με αραιή ταυτοποίηση δυναμικής (\textlatin{SINDy}), η οποία ανακτά ρητές, ερμηνεύσιμες εξισώσεις κίνησης και επιδεικνύει σημαντικά μεγαλύτερη ευρωστία στον θόρυβο.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -56,9 +56,9 @@
 \section{\textbf{Εισαγωγή}}
 \label{sec:intro}
 
-Τα \textlatin{World Models} επιτρέπουν σε πράκτορες να μαθαίνουν ένα λανθάνον (\textlatin{latent}) μοντέλο δυναμικής του περιβάλλοντός τους. Η πρόσφατη βιβλιογραφία (\textlatin{PIWM}) προτείνει τρεις αρχές σχεδιασμού για την ενσωμάτωση φυσικής γνώσης: (1) αποσύνδεση φυσικής και οπτικής κατάστασης, (2) επιβολή ισοδυναμίας (\textlatin{equivariance}) σε μετασχηματισμούς, και (3) ασθενή επίβλεψη ταχύτητας.
+Τα \textlatin{World Models} επιτρέπουν σε πράκτορες να μαθαίνουν ένα λανθάνον (\textlatin{latent}) μοντέλο δυναμικής του περιβάλλοντός τους. Η πρόσφατη βιβλιογραφία (\textlatin{PIWM}) προτείνει τέσσερις αρχές σχεδιασμού για την ενσωμάτωση φυσικής γνώσης: (1) αποσύνδεση φυσικής και οπτικής κατάστασης, (2) επιβολή ισοδυναμίας (\textlatin{equivariance}) σε μετασχηματισμούς, (3) ασθενή επίβλεψη ταχύτητας, και (4) διαμέριση του \textlatin{decoder} ανά αντικείμενο της σκηνής.
 
-Στην παρούσα εργασία, δεν αναπαράγουμε απλώς τα αποτελέσματα, αλλά επεκτείνουμε τη μεθοδολογία. Εντοπίσαμε ότι ο κώδικας της αρχικής δημοσίευσης υστερούσε σε σταθερότητα κατά το \textlatin{rollout}. Εισάγουμε μια αναβαθμισμένη αρχιτεκτονική και, το σημαντικότερο, εισάγουμε \textlatin{OOD} παρεμβολές (\textlatin{Gaussian/Salt \& Pepper noise}, \textlatin{brightness jitter}). Αποδεικνύουμε ότι οι αρχές αυτές δεν προσφέρουν πλεονέκτημα σε καθαρά περιβάλλοντα (όπου το \textlatin{Baseline} υπερτερεί λόγω μεγαλύτερης χωρητικότητας), αλλά αποτελούν στοχευμένους μηχανισμούς άμυνας ενάντια σε συγκεκριμένες οπτικές αλλοιώσεις.
+Στην παρούσα εργασία, δεν αναπαράγουμε απλώς τα αποτελέσματα, αλλά επεκτείνουμε τη μεθοδολογία. Εντοπίσαμε ότι ο κώδικας της αρχικής δημοσίευσης υστερούσε σε σταθερότητα κατά το \textlatin{rollout}. Εισάγουμε μια αναβαθμισμένη αρχιτεκτονική και, το σημαντικότερο, εισάγουμε \textlatin{OOD} παρεμβολές (\textlatin{Gaussian/Salt \& Pepper noise}, \textlatin{brightness jitter}). Αποδεικνύουμε ότι οι αρχές αυτές δεν προσφέρουν πλεονέκτημα σε καθαρά περιβάλλοντα (όπου το \textlatin{Baseline} υπερτερεί λόγω μεγαλύτερης χωρητικότητας), αλλά αποτελούν στοχευμένους μηχανισμούς άμυνας ενάντια σε συγκεκριμένες οπτικές αλλοιώσεις. Ως επέκταση πέρα από το άρθρο, αντικαθιστούμε το \textlatin{LSTM} με αραιή ταυτοποίηση δυναμικής (\textlatin{SINDy}), δείχνοντας ότι ο φυσικά ερμηνεύσιμος λανθάνων χώρος επιτρέπει την εξαγωγή ρητών εξισώσεων κίνησης με αυξημένη ευρωστία.
 
 \section{\textbf{Μεθοδολογία και Υλοποίηση}}
 \label{sec:method}
@@ -88,6 +88,16 @@
     v_t \approx \frac{x_{t+1} - x_t}{\Delta t}
 \end{equation}
 Αυτές οι «θορυβώδεις» εκτιμήσεις χρησιμοποιούνται για την επίβλεψη των διαστάσεων ταχύτητας στον λανθάνοντα χώρο.
+
+\subsection{\textbf{Αρχή 4: Διαμέριση Εξόδου (\textlatin{Compositional Decoding})}}
+Αντί ενός μονολιθικού \textlatin{decoder}, η Αρχή 4 χρησιμοποιεί ανεξάρτητους αποκωδικοποιητές ανά αντικείμενο της σκηνής (π.χ. \textlatin{cart}, \textlatin{pole}, \textlatin{background}), των οποίων οι έξοδοι συντίθενται στην τελική εικόνα. Η διάσπαση αυτή μειώνει δραστικά τις παραμέτρους του \textlatin{decoder} και επιτρέπει την επαλήθευση ανά συνιστώσα.
+
+\subsection{\textbf{Επέκταση: Ερμηνεύσιμη Δυναμική με \textlatin{SINDy}}}
+Πέρα από το αρχικό άρθρο, εξετάζουμε αν η δυναμική του (φυσικά εποπτευόμενου) λανθάνοντος χώρου μπορεί να ταυτοποιηθεί \emph{ρητά}. Εφαρμόζουμε \textlatin{SINDYc} (\textlatin{Sparse Identification of Nonlinear Dynamics with control})~\cite{sindy} στις φυσικές διαστάσεις, μαθαίνοντας έναν αραιό πίνακα συντελεστών $\Xi$ πάνω σε μια βιβλιοθήκη υποψήφιων συναρτήσεων $\Theta(z,u)$ (πολυώνυμα, τριγωνομετρικοί όροι, συζεύξεις ελέγχου):
+\begin{equation}
+    \hat{z}_{t+1} = z_t + \Theta(z_t, u_t)\,\Xi ,
+\end{equation}
+όπου το $\Xi$ προκύπτει μέσω \textlatin{Sequentially Thresholded Least Squares} (\textlatin{STLSQ}). Δοκιμάζουμε επίσης ένα \textlatin{gray-box hybrid}, όπου ένα υπολειμματικό \textlatin{LSTM} διορθώνει το (παγωμένο) \textlatin{SINDy}: $\hat{z}_{t+1} = z_t + \Theta(z_t,u_t)\Xi + \text{\textlatin{LSTM}}(z_t,a_t)$.
 
 \section{\textbf{Πειραματική Διάταξη}}
 \label{sec:setup}
@@ -142,7 +152,59 @@
     \label{fig:p3_clean}
 \end{figure}
 
-Ωστόσο, το μοντέλο \textlatin{P3-weak} (ασθενής επίβλεψη μέσω πεπερασμένων διαφορών) αποδείχθηκε πιο ανθεκτικό στον οπτικό θόρυβο από το \textlatin{Baseline}. Καθώς εκπαιδεύτηκε με «θορυβώδεις» εκτιμήσεις ταχύτητας, ο λανθάνων χώρος του δεν έκανε \textlatin{overfit} στην ψευδαίσθηση των τέλειων δεδομένων, δρώντας ως \textlatin{implicit regularizer}. Αντίθετα, το \textlatin{P3-semi} (καμία επίβλεψη ταχύτητας) απέτυχε πλήρως υπό θόρυβο, επιβεβαιώνοντας ότι κάποια μορφή δυναμικής γνώσης είναι απαραίτητη.
+Ωστόσο, το μοντέλο \textlatin{P3-weak} (ασθενής επίβλεψη μέσω πεπερασμένων διαφορών) αποδείχθηκε πιο ανθεκτικό στον οπτικό θόρυβο από το \textlatin{Baseline} (Σχήμα~\ref{fig:p3_noise}). Καθώς εκπαιδεύτηκε με «θορυβώδεις» εκτιμήσεις ταχύτητας, ο λανθάνων χώρος του δεν έκανε \textlatin{overfit} στην ψευδαίσθηση των τέλειων δεδομένων, δρώντας ως \textlatin{implicit regularizer}. Αντίθετα, το \textlatin{P3-semi} (καμία επίβλεψη ταχύτητας) απέτυχε πλήρως υπό θόρυβο, επιβεβαιώνοντας ότι κάποια μορφή δυναμικής γνώσης είναι απαραίτητη.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{pics/p3_noise_degradation.png}
+    \caption{Αρχή 3 υπό \textlatin{Gaussian noise} (\textlatin{CartPole}). Σε μεγάλους ορίζοντες και υψηλό θόρυβο, η ασθενής επίβλεψη (\textlatin{P3-weak}, κόκκινο) ξεπερνά το πλήρως επιβλεπόμενο \textlatin{Baseline} (μπλε), δρώντας ως έμμεση κανονικοποίηση· η μερική επίβλεψη (\textlatin{P3-semi}) αποτυγχάνει.}
+    \label{fig:p3_noise}
+\end{figure}
+
+\subsection{\textbf{Αρχή 4: Συμπίεση χωρίς Απώλεια Ποιότητας}}
+Η συνθετική αποκωδικοποίηση επιβεβαίωσε τον ισχυρισμό του άρθρου. Στο \textlatin{CartPole}, οι τρεις ανεξάρτητοι αποκωδικοποιητές μείωσαν τις παραμέτρους του \textlatin{decoder} κατά \textbf{75.4\%} (από \textlatin{665k} σε \textlatin{164k}) και τις συνολικές κατά $25.9\%$, διατηρώντας ουσιαστικά ταυτόσημη ποιότητα ανακατασκευής (Πίνακας~\ref{tab:p4}, Σχήμα~\ref{fig:p4}). Η συνιστωσοποιημένη έξοδος προσφέρει επιπλέον δυνατότητα επαλήθευσης ανά αντικείμενο, στοιχείο κρίσιμο για την ασφάλεια.
+
+\begin{table}[h]
+\centering
+\caption{Αρχή 4: \textlatin{baseline} vs \textlatin{P4} στο \textlatin{CartPole}.}
+\label{tab:p4}
+\small
+\begin{tabular}{l r r}
+\toprule
+\textlatin{Metric} & \textlatin{Baseline} & \textlatin{P4} \\
+\midrule
+\textlatin{recon MSE} $\downarrow$ & 0.00315 & 0.00306 \\
+\textlatin{SSIM} $\uparrow$ & 0.9581 & 0.9582 \\
+\textlatin{decoder params} $\downarrow$ & \textlatin{665k} & \textlatin{164k} ($-75.4\%$) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{pics/p4_compare.png}
+    \caption{Αρχή 4: \textlatin{GT} vs \textlatin{baseline} vs \textlatin{P4} (σύνθεση και επιμέρους αποκωδικοποιητές \textlatin{cart}/\textlatin{pole}/\textlatin{bg}).}
+    \label{fig:p4}
+\end{figure}
+
+\subsection{\textbf{Ερμηνεύσιμη Δυναμική: \textlatin{SINDy} vs \textlatin{LSTM}}}
+Η αραιή ταυτοποίηση ανέκτησε αυτόματα ερμηνεύσιμες εξισώσεις κίνησης με μόλις 12 μη-μηδενικούς όρους (από 88), συμπεριλαμβανομένων των κινηματικών ολοκληρωμάτων (π.χ. $x_{t+1}=x_t+0.021\,\dot{x}$, $\theta_{t+1}=\theta_t+0.176\,\dot{\theta}$) και του όρου βαρύτητας $\sin\theta$. Στην αξιολόγηση ευρωστίας (Πίνακας~\ref{tab:sindy}), αν και σε καθαρές συνθήκες τα τρία μοντέλα ισοβαθμούν, υπό έντονο θόρυβο ($\sigma=0.30$) το \textlatin{SINDy} υποβαθμίζεται μόλις $\times 3.7$ έναντι $\times 15$ του \textlatin{LSTM}, επιβεβαιώνοντας ότι η ρητή φυσική δομή προσφέρει ευρωστία. Το \textlatin{gray-box hybrid} επιτυγχάνει το χαμηλότερο σφάλμα σε καθαρές συνθήκες, αλλά με μη φραγμένη υπολειμματική διόρθωση κληρονομεί την ευθραυστότητα του \textlatin{LSTM} στον θόρυβο.
+
+\begin{table}[h]
+\centering
+\caption{Ευρωστία δυναμικής σε \textlatin{Gaussian noise} (\textlatin{mean State MSE}, \textlatin{Baseline} latent).}
+\label{tab:sindy}
+\small
+\begin{tabular}{l r r r}
+\toprule
+$\sigma$ & \textlatin{LSTM} & \textlatin{SINDy} & \textlatin{Hybrid} \\
+\midrule
+0.00 & 0.033 & 0.035 & \textbf{0.027} \\
+0.10 & 0.085 & \textbf{0.045} & 0.075 \\
+0.30 & 0.509 & \textbf{0.130} & 0.441 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{\textbf{Συζήτηση}}
 \label{sec:discussion}
@@ -150,7 +212,7 @@
 
 \section{\textbf{Συμπεράσματα}}
 \label{sec:conclusion}
-Αναπτυξαμε ένα εύρωστο \textlatin{pipeline} εκπαίδευσης και αξιολόγησης για \textlatin{Physics-Informed World Models}. Μέσω αυστηρών \textlatin{OOD} πειραμάτων, δεν αναπαράγαμε απλώς τη σχετική βιβλιογραφία, αλλά αποκαλύψαμε κρίσιμους, αδημοσίευτους μηχανισμούς σχετικά με το πώς η αποσύνδεση, η ισοδυναμία και η ασθενής επίβλεψη συμπεριφέρονται κάτω από ρεαλιστικό αισθητηριακό θόρυβο. Τα αποτελέσματα αυτά προσφέρουν πρακτικές οδηγίες για την ανάπτυξη πραγματικών ρομποτικών συστημάτων.
+Αναπτυξαμε ένα εύρωστο \textlatin{pipeline} εκπαίδευσης και αξιολόγησης για \textlatin{Physics-Informed World Models}. Μέσω αυστηρών \textlatin{OOD} πειραμάτων, δεν αναπαράγαμε απλώς τη σχετική βιβλιογραφία, αλλά αποκαλύψαμε κρίσιμους, αδημοσίευτους μηχανισμούς σχετικά με το πώς η αποσύνδεση, η ισοδυναμία και η ασθενής επίβλεψη συμπεριφέρονται κάτω από ρεαλιστικό αισθητηριακό θόρυβο. Επιπλέον, δείξαμε ότι η συνθετική αποκωδικοποίηση (Αρχή 4) συμπιέζει τον \textlatin{decoder} κατά $75\%$ χωρίς απώλεια ποιότητας, και ότι η αραιή ταυτοποίηση δυναμικής (\textlatin{SINDy}) εξάγει ερμηνεύσιμες και εύρωστες εξισώσεις κίνησης, ανοίγοντας δρόμο προς δυναμικά μοντέλα που διατηρούν φυσικές εγγυήσεις (π.χ. \textlatin{Hamiltonian NNs}). Τα αποτελέσματα αυτά προσφέρουν πρακτικές οδηγίες για την ανάπτυξη πραγματικών ρομποτικών συστημάτων.
 
 \begin{thebibliography}{00}
 \selectlanguage{english}
@@ -159,6 +221,9 @@ Original PIWM Authors, "World Model Principles", \textit{Conference/Journal Name
 
 \bibitem{worldmodels}
 D. Ha and J. Schmidhuber, "World Models", \textit{arXiv preprint arXiv:1803.10122}, 2018.
+
+\bibitem{sindy}
+S. L. Brunton, J. L. Proctor, and J. N. Kutz, "Discovering governing equations from data by sparse identification of nonlinear dynamical systems", \textit{PNAS}, vol. 113, no. 15, pp. 3932--3937, 2016.
 \end{thebibliography}
 
 \end{document}
