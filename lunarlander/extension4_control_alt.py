@@ -26,7 +26,7 @@ extension4_control_alt.py — Επέκταση 4 (ΒΕΛΤΙΩΜΕΝΗ, wind-ori
 
 CONTROLLERS (ίδια seeds):
    enc_pid         : PD στο ΦΙΛΤΡΑΡΙΣΜΕΝΟ encoder-estimate      (encoder ως αισθητήρας + filter)
-   guided_mpc_*    : PID-guided CEM shield/corrector με grid-search πάνω στα override gates
+   guided_mpc_*    : PID-guided CEM shield/corrector με diagnostic modes πάνω στα override gates
 
 Για γρήγορο tuning, τα true_pid / latent_mpc_rand είναι προσωρινά εκτός CONTROLLERS.
 
@@ -111,20 +111,18 @@ MPC_MARGIN = 25.0                # override μόνο αν dream-value(MPC) > dre
 RISK_TRIGGER = 10.0              # override μόνο αν το PID dream έχει ουσιαστικό predicted risk
 RISK_MARGIN = 5.0                # και ο MPC μειώνει το risk τουλάχιστον τόσο
 
-# --- Local search γύρω από το καλύτερο αρχικό setting: "medium" ---
+# --- Diagnostics γύρω από το καλύτερο αρχικό setting: "medium" ---
 # Κάθε config τρέχει σαν ξεχωριστός "guided_mpc_<label>" controller, στα ίδια episode seeds.
-# Αλλάζουμε ένα-δύο knobs τη φορά για να δούμε ΤΙ επιτρέπει useful override χωρίς model exploitation.
+# Τα mode δείχνουν ποιο gate κόβει τα overrides και αν το MPC βοηθά όταν το αφήνουμε πιο ελεύθερο.
 GUIDED_GRID = [
-    # reference: το καλύτερο από το προηγούμενο sweep
-    {"label": "med_ref",      "mpc_margin": 5.0, "risk_trigger": 2.0, "risk_margin": 1.0,  "pid_bias": 0.75},
-    # ίδιο safety gate, περισσότερη εξερεύνηση στο CEM
-    {"label": "med_explore",  "mpc_margin": 5.0, "risk_trigger": 2.0, "risk_margin": 1.0,  "pid_bias": 0.60},
-    # ίδιο risk gate, χαμηλότερη απαίτηση σε value improvement
-    {"label": "med_value",    "mpc_margin": 3.0, "risk_trigger": 2.0, "risk_margin": 1.0,  "pid_bias": 0.75},
-    # ίδιο value gate, λίγο πιο εύκολο να θεωρηθεί risky/safer
-    {"label": "med_risk",     "mpc_margin": 5.0, "risk_trigger": 1.5, "risk_margin": 0.75, "pid_bias": 0.75},
-    # συνδυαστικά λίγο πιο ανοιχτό, αλλά όχι τόσο όσο το προηγούμενο loose
-    {"label": "med_balanced", "mpc_margin": 3.0, "risk_trigger": 1.5, "risk_margin": 0.75, "pid_bias": 0.65},
+    # κανονικό safety shield: όλα τα gates ενεργά
+    {"label": "med_full",   "mode": "shield",     "mpc_margin": 5.0, "risk_trigger": 2.0, "risk_margin": 1.0, "pid_bias": 0.75},
+    # diagnostic: αγνοεί το risk gate, κρατά μόνο value improvement
+    {"label": "value_only", "mode": "value_only", "mpc_margin": 5.0, "risk_trigger": 2.0, "risk_margin": 1.0, "pid_bias": 0.75},
+    # diagnostic: αγνοεί το value gate, κρατά μόνο risk improvement
+    {"label": "risk_only",  "mode": "risk_only",  "mpc_margin": 5.0, "risk_trigger": 2.0, "risk_margin": 1.0, "pid_bias": 0.75},
+    # diagnostic stress test: αν το MPC προτείνει άλλο action, το παίρνουμε
+    {"label": "force_diff", "mode": "force_diff", "mpc_margin": 5.0, "risk_trigger": 2.0, "risk_margin": 1.0, "pid_bias": 0.75},
 ]
 
 FUEL_COST = [0.0, 0.03, 0.30, 0.03]   # ανά action {noop,left,main,right}
@@ -426,6 +424,7 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed,
     total_r, fuel, last_r = 0.0, 0.0, 0.0
     dist_log, frames = [], []
     n_override, n_mpc, n_steps = 0, 0, 0
+    n_diff_action, n_risky_pid, n_safer_mpc, n_better_mpc, n_all_gates = 0, 0, 0, 0, 0
 
     for _ in range(MAX_STEPS):
         n_steps += 1
@@ -463,10 +462,31 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed,
                 risk_trigger = float(cfg_get(mpc_cfg, "risk_trigger", RISK_TRIGGER))
                 risk_margin = float(cfg_get(mpc_cfg, "risk_margin", RISK_MARGIN))
                 mpc_margin = float(cfg_get(mpc_cfg, "mpc_margin", MPC_MARGIN))
+                mode = cfg_get(mpc_cfg, "mode", "shield")
+                diff_action = a_mpc != a_pid
                 risky_pid = risk_pid > risk_trigger
                 safer_mpc = risk_mpc + risk_margin < risk_pid
                 better_mpc = v_mpc > v_pid + mpc_margin
-                if a_mpc != a_pid and risky_pid and safer_mpc and better_mpc:
+                all_gates = diff_action and risky_pid and safer_mpc and better_mpc
+
+                n_diff_action += int(diff_action)
+                n_risky_pid += int(risky_pid)
+                n_safer_mpc += int(safer_mpc)
+                n_better_mpc += int(better_mpc)
+                n_all_gates += int(all_gates)
+
+                if mode == "shield":
+                    do_override = all_gates
+                elif mode == "value_only":
+                    do_override = diff_action and better_mpc
+                elif mode == "risk_only":
+                    do_override = diff_action and risky_pid and safer_mpc
+                elif mode == "force_diff":
+                    do_override = diff_action
+                else:
+                    raise ValueError(f"Unknown guided_mpc mode: {mode}")
+
+                if do_override:
                     a = a_mpc
                     n_override += 1
                 else:
@@ -486,9 +506,15 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed,
     crashed = last_r <= -100.0
     override_pct = (100.0 * n_override / n_steps) if n_steps else 0.0
     mpc_attempt_pct = (100.0 * n_mpc / n_steps) if n_steps else 0.0
+    gate_pct = lambda n: (100.0 * n / n_mpc) if n_mpc else 0.0
     return {"return": total_r, "landed": landed, "crashed": crashed, "fuel": fuel,
             "dist": dist_log, "frames": frames, "override_pct": override_pct,
-            "mpc_attempt_pct": mpc_attempt_pct}
+            "mpc_attempt_pct": mpc_attempt_pct,
+            "diff_action_pct": gate_pct(n_diff_action),
+            "risky_pid_pct": gate_pct(n_risky_pid),
+            "safer_mpc_pct": gate_pct(n_safer_mpc),
+            "better_mpc_pct": gate_pct(n_better_mpc),
+            "all_gates_pct": gate_pct(n_all_gates)}
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +593,23 @@ def main():
               f"{fuel:>11.1f}{ovr_s}{used_s}")
     print("=" * 104)
 
+    guided_labels = [s["label"] for s in run_specs if s["controller"] == "guided_mpc"]
+    if guided_labels:
+        print(f"\n{'='*104}")
+        print("GATE DIAGNOSTICS (% of MPC-used steps)")
+        print(f"{'controller':<22}{'diff action':>13}{'risky PID':>12}{'safer MPC':>12}"
+              f"{'better MPC':>13}{'all gates':>12}")
+        print("-" * 104)
+        for label in guided_labels:
+            diff = np.mean([r["diff_action_pct"] for r in results[label]])
+            risky = np.mean([r["risky_pid_pct"] for r in results[label]])
+            safer = np.mean([r["safer_mpc_pct"] for r in results[label]])
+            better = np.mean([r["better_mpc_pct"] for r in results[label]])
+            allg = np.mean([r["all_gates_pct"] for r in results[label]])
+            print(f"{label:<22}{diff:>12.1f}%{risky:>11.1f}%{safer:>11.1f}%"
+                  f"{better:>12.1f}%{allg:>11.1f}%")
+        print("=" * 104)
+
     # ---- plot 1: return distribution ----
     plt.figure(figsize=(max(7.6, 1.8 * len(labels)), 4.8))
     data = [[r["return"] for r in results[label]] for label in labels]
@@ -602,6 +645,12 @@ def main():
              landed=np.array([[r["landed"] for r in results[label]] for label in labels]),
              override_pct=np.array([[r["override_pct"] for r in results[label]] for label in labels]),
              mpc_attempt_pct=np.array([[r["mpc_attempt_pct"] for r in results[label]] for label in labels]),
+             diff_action_pct=np.array([[r["diff_action_pct"] for r in results[label]] for label in labels]),
+             risky_pid_pct=np.array([[r["risky_pid_pct"] for r in results[label]] for label in labels]),
+             safer_mpc_pct=np.array([[r["safer_mpc_pct"] for r in results[label]] for label in labels]),
+             better_mpc_pct=np.array([[r["better_mpc_pct"] for r in results[label]] for label in labels]),
+             all_gates_pct=np.array([[r["all_gates_pct"] for r in results[label]] for label in labels]),
+             grid_mode=np.array([cfg_get(s["mpc_cfg"], "mode", "") for s in run_specs]),
              grid_mpc_margin=np.array([cfg_get(s["mpc_cfg"], "mpc_margin", np.nan) for s in run_specs]),
              grid_risk_trigger=np.array([cfg_get(s["mpc_cfg"], "risk_trigger", np.nan) for s in run_specs]),
              grid_risk_margin=np.array([cfg_get(s["mpc_cfg"], "risk_margin", np.nan) for s in run_specs]),
