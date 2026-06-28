@@ -17,8 +17,8 @@ extension4_control_alt.py — Επέκταση 4 (ΒΕΛΤΙΩΜΕΝΗ, wind-ori
       effective horizon (συνεκτικά bursts, που χρειάζεται η προσγείωση).
 
   (3) MPC ως SHIELD/CORRECTOR. Default = PID· ο MPC κάνει override ΜΟΝΟ όταν (α) το μοντέλο είναι
-      έμπιστο (χαμηλό disturbance residual) ΚΑΙ (β) το «όνειρό» του είναι σαφώς καλύτερο από το
-      PID-plan. Εγγύηση ≥ PID, αποφυγή model-exploitation. Υπό WIND (υψηλό residual) -> PID.
+      έμπιστο (χαμηλό disturbance residual), (β) το PID-plan προβλέπεται επικίνδυνο, ΚΑΙ
+      (γ) το «όνειρο» του MPC είναι σαφώς ασφαλέστερο. Υπό WIND/υψηλό residual -> PID.
 
   (4) COMPLEMENTARY STATE FILTER. Ο encoder είναι θορυβώδης στις ΤΑΧΥΤΗΤΕΣ. Συνδυάζουμε encoder +
       1-step model-prediction (gated από το residual: υψηλό residual -> εμπιστεύσου τον encoder).
@@ -78,20 +78,20 @@ RECORD_GIF = True
 GIF_FPS = 30
 
 # --- Complementary state filter (encoder + model, gated από το residual) ---
-USE_FILTER = True
+USE_FILTER = False               # wind/OOD: μην ανακατεύεις model prediction μέσα στον sensor estimate
 #                x     y     vx    vy    theta omega leg1  leg2   (βάρος του ΜΟΝΤΕΛΟΥ ανά dim)
 W_MODEL = np.array([0.15, 0.15, 0.50, 0.50, 0.20, 0.45, 0.00, 0.00], dtype=np.float64)
 RESID_SCALE0 = 1.0               # αρχικό scale του gate πριν μαζευτεί ιστορικό residual
 FILTER_WARMUP = 5                # βήματα πριν ενεργοποιηθεί το adaptive scaling/threshold
 
 # --- Guided MPC (CEM shield/corrector) ---
-MPC_HORIZON = 8                  # K macro-βήματα απόφασης
-MPC_REPEAT = 3                   # action-repeat -> effective horizon = K*REPEAT (=24)
+MPC_HORIZON = 5                  # κοντός ορίζοντας ασφάλειας -> λιγότερο model exploitation
+MPC_REPEAT = 1                   # no macro-repeat: κρατάμε τις ουρές κοντά στο training distribution
 MPC_SAMPLES = 256                # ακολουθίες ανά CEM iteration
 CEM_ITERS = 3                    # iterations του Cross-Entropy Method
 CEM_ELITE = 32                   # πλήθος elites
 CEM_LR = 0.7                     # refit rate της κατανομής προς τα elites
-PID_BIAS = 0.5                   # warm-start: μάζα πιθανότητας στο PID-nominal action ανά βήμα
+PID_BIAS = 0.85                  # warm-start: ισχυρή μάζα στο PID-nominal action ανά βήμα
 MPC_SEED = 0
 
 # --- Cost weights (tunable· οι τιμές είναι σε «φυσικές μονάδες» του LunarLander shaping) ---
@@ -103,8 +103,13 @@ SAFE_SPEED = 0.5                 # «ασφαλής» ταχύτητα προσ�
 
 # --- Shield / corrector ---
 USE_SHIELD = True
-TRUST_FACTOR = 2.0               # distrust όταν residual > TRUST_FACTOR * median(residual)
-MPC_MARGIN = 5.0                 # override μόνο αν dream-value(MPC) > dream-value(PID) + MARGIN
+TRUST_FACTOR = 1.2               # distrust όταν residual > TRUST_FACTOR * median(residual)
+TRUST_FLOOR = 0.05               # αποφυγή μηδενικού threshold όταν το median είναι πολύ μικρό
+TRUST_ABS_MAX = 0.75             # absolute cap σε φυσικές μονάδες· persistent wind δεν γίνεται "normal"
+MPC_MIN_HISTORY = 8              # πριν έχουμε residual history, default PID
+MPC_MARGIN = 25.0                # override μόνο αν dream-value(MPC) > dream-value(PID) + MARGIN
+RISK_TRIGGER = 10.0              # override μόνο αν το PID dream έχει ουσιαστικό predicted risk
+RISK_MARGIN = 5.0                # και ο MPC μειώνει το risk τουλάχιστον τόσο
 
 FUEL_COST = [0.0, 0.03, 0.30, 0.03]   # ανά action {noop,left,main,right}
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
@@ -206,9 +211,13 @@ class StateEstimator:
         return RESID_SCALE0 if len(self.resid_hist) < FILTER_WARMUP else max(np.median(self.resid_hist), 1e-6)
 
     def trust_threshold(self):
-        if len(self.resid_hist) < FILTER_WARMUP:
-            return float("inf")   # warmup -> πάντα έμπιστο (MPC ενεργό)
-        return float(np.median(self.resid_hist) * TRUST_FACTOR)
+        if len(self.resid_hist) < MPC_MIN_HISTORY:
+            return 0.0             # warmup -> όχι MPC, μόνο PID
+        med = float(np.median(self.resid_hist))
+        return min(TRUST_ABS_MAX, max(TRUST_FLOOR, med * TRUST_FACTOR))
+
+    def model_trusted(self):
+        return len(self.resid_hist) >= MPC_MIN_HISTORY and self.resid <= self.trust_threshold()
 
     @torch.no_grad()
     def update(self, mu):
@@ -290,6 +299,24 @@ def dream_value(phys_traj, prim_acts, device):
     return prog - FUEL_W * fuel + TERM_W * term
 
 
+def dream_risk(phys_traj):
+    """Predicted danger proxy. 0≈safe, larger=worse.
+    Το χρησιμοποιούμε μόνο ως shield gate, όχι ως reward προς βελτιστοποίηση."""
+    x = phys_traj[:, :, 0]
+    y = phys_traj[:, :, 1]
+    vx = phys_traj[:, :, 2]
+    vy = phys_traj[:, :, 3]
+    theta = phys_traj[:, :, 4]
+    speed = torch.sqrt(vx * vx + vy * vy + 1e-8)
+    low_alt = (y < 0.25).float()
+    return (
+        80.0 * torch.relu(torch.abs(x).max(dim=1).values - 1.0)
+        + 80.0 * torch.relu(torch.abs(theta).max(dim=1).values - 0.75)
+        + 120.0 * torch.relu((speed * low_alt).max(dim=1).values - SAFE_SPEED)
+        + 80.0 * torch.relu((-y).max(dim=1).values)
+    )
+
+
 @torch.no_grad()
 def pid_nominal_dream(lstm, z0, mean_t, std_t, device):
     """Roll τον PID ΜΕΣΑ στο όνειρο -> nominal macro-ακολουθία + dream-value της (warm-start & shield)."""
@@ -305,7 +332,8 @@ def pid_nominal_dream(lstm, z0, mean_t, std_t, device):
     macro_t = torch.tensor(macro, device=device).unsqueeze(0)          # (1,K)
     phys_traj, prim = dream_rollout(lstm, z0, macro_t, mean_t, std_t, device)
     v = float(dream_value(phys_traj, prim, device)[0].item())
-    return np.array(macro), v
+    risk = float(dream_risk(phys_traj)[0].item())
+    return np.array(macro), v, risk
 
 
 @torch.no_grad()
@@ -315,7 +343,7 @@ def cem_plan(lstm, z0, nominal_macro, mean_t, std_t, device, rng):
     K = MPC_HORIZON
     probs = np.full((K, N_ACTIONS), (1.0 - PID_BIAS) / N_ACTIONS)
     probs[np.arange(K), nominal_macro] += PID_BIAS                      # μάζα στο PID action ανά βήμα
-    best_v, best_a0 = -1e18, int(nominal_macro[0])
+    best_v, best_seq = -1e18, nominal_macro.copy()
 
     for _ in range(CEM_ITERS):
         cdf = probs.cumsum(axis=1)
@@ -333,10 +361,11 @@ def cem_plan(lstm, z0, nominal_macro, mean_t, std_t, device, rng):
 
         top = elite_idx[-1]
         if sc[top] > best_v:
-            best_v, best_a0 = float(sc[top]), int(samples[top, 0])
+            best_v, best_seq = float(sc[top]), samples[top].copy()
 
-    a0 = int(np.argmax(probs[0]))                                      # mode της refined κατανομής
-    return a0, best_v
+    # Επιστρέφουμε την 1η ενέργεια της best-valued sequence. Πριν γυρνούσε το mode των
+    # refined probabilities, αλλά σύγκρινε με το value άλλης sequence -> ψεύτικα overrides.
+    return int(best_seq[0]), best_v, best_seq
 
 
 # ---------------------------------------------------------------------------
@@ -369,9 +398,10 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, mpc_
     est = StateEstimator(lstm, mean_t, std_t, device)
     total_r, fuel, last_r = 0.0, 0.0, 0.0
     dist_log, frames = [], []
-    n_override, n_mpc = 0, 0
+    n_override, n_mpc, n_steps = 0, 0, 0
 
     for _ in range(MAX_STEPS):
+        n_steps += 1
         raw = env.render()
         f_cur = resize_frame(raw)
         if record:
@@ -392,15 +422,21 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, mpc_
             a = mpc_plan_random(lstm, fused_mu, mean_t, std_t, device, mpc_rng)
         elif controller == "guided_mpc":
             a_pid = heuristic_control(phys_est)
-            if USE_SHIELD and est.resid > est.trust_threshold():
+            if USE_SHIELD and not est.model_trusted():
                 a = a_pid                                         # μοντέλο αναξιόπιστο (wind/OOD) -> PID
             else:
-                nominal_macro, v_pid = pid_nominal_dream(lstm, fused_mu, mean_t, std_t, device)
-                a_mpc, v_mpc = cem_plan(lstm, fused_mu, nominal_macro, mean_t, std_t, device, mpc_rng)
+                nominal_macro, v_pid, risk_pid = pid_nominal_dream(lstm, fused_mu, mean_t, std_t, device)
+                a_mpc, v_mpc, mpc_macro = cem_plan(lstm, fused_mu, nominal_macro, mean_t, std_t, device, mpc_rng)
+                mpc_t = torch.tensor(mpc_macro, device=device).long().unsqueeze(0)
+                phys_mpc, _ = dream_rollout(lstm, fused_mu, mpc_t, mean_t, std_t, device)
+                risk_mpc = float(dream_risk(phys_mpc)[0].item())
                 n_mpc += 1
-                if v_mpc > v_pid + MPC_MARGIN:                    # override μόνο αν σαφώς καλύτερο
+                risky_pid = risk_pid > RISK_TRIGGER
+                safer_mpc = risk_mpc + RISK_MARGIN < risk_pid
+                better_mpc = v_mpc > v_pid + MPC_MARGIN
+                if a_mpc != a_pid and risky_pid and safer_mpc and better_mpc:
                     a = a_mpc
-                    n_override += int(a_mpc != a_pid)
+                    n_override += 1
                 else:
                     a = a_pid
         else:
@@ -416,9 +452,11 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, mpc_
 
     landed = last_r >= 100.0
     crashed = last_r <= -100.0
-    override_pct = (100.0 * n_override / n_mpc) if n_mpc else 0.0
+    override_pct = (100.0 * n_override / n_steps) if n_steps else 0.0
+    mpc_attempt_pct = (100.0 * n_mpc / n_steps) if n_steps else 0.0
     return {"return": total_r, "landed": landed, "crashed": crashed, "fuel": fuel,
-            "dist": dist_log, "frames": frames, "override_pct": override_pct}
+            "dist": dist_log, "frames": frames, "override_pct": override_pct,
+            "mpc_attempt_pct": mpc_attempt_pct}
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +493,8 @@ def main():
                 if rec:
                     save_gif(res["frames"], os.path.join(SAVE_DIR, f"ext4alt_{MODEL}_{c}.gif"))
             res["frames"] = []
-            extra = f"  override={res['override_pct']:.0f}%" if c in ("guided_mpc",) else ""
+            extra = (f"  override={res['override_pct']:.0f}%  mpc_used={res['mpc_attempt_pct']:.0f}%"
+                     if c in ("guided_mpc",) else "")
             print(f"  ep{ep:02d}  return={res['return']:8.1f}  "
                   f"{'LAND' if res['landed'] else 'CRASH' if res['crashed'] else 'timeout':6}  "
                   f"fuel={res['fuel']:.1f}{extra}")
@@ -480,7 +519,7 @@ def main():
     # ---- plot 1: return distribution ----
     plt.figure(figsize=(7.6, 4.6))
     data = [[r["return"] for r in results[c]] for c in CONTROLLERS]
-    plt.boxplot(data, labels=CONTROLLERS, showmeans=True)
+    plt.boxplot(data, tick_labels=CONTROLLERS, showmeans=True)
     plt.axhline(200, color="g", ls="--", lw=1, label="solved (≥200)")
     plt.axhline(0, color="0.6", lw=0.8)
     plt.ylabel("episode return")
@@ -510,6 +549,7 @@ def main():
              returns=np.array([[r["return"] for r in results[c]] for c in CONTROLLERS]),
              landed=np.array([[r["landed"] for r in results[c]] for c in CONTROLLERS]),
              override_pct=np.array([[r["override_pct"] for r in results[c]] for c in CONTROLLERS]),
+             mpc_attempt_pct=np.array([[r["mpc_attempt_pct"] for r in results[c]] for c in CONTROLLERS]),
              wind=ENABLE_WIND)
     print(f"\nsaved figures + ext4alt_{MODEL}_results.npz -> {SAVE_DIR}")
 
