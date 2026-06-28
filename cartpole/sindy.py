@@ -26,12 +26,14 @@ Note: equations are in the STANDARDIZED latent space (the space the VAE was supe
 Multiply through by the state std to recover physical units.
 """
 import os
+import copy
 import itertools
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -94,6 +96,21 @@ THRESHOLD = 0.02         # STLSQ cutoff: coeffs below this are pruned to zero
 RIDGE_ALPHA = 1e-3       # small L2 for numerical stability
 MAX_SAMPLES = 500_000    # subsample transitions if more than this (memory cap)
 SEED = 0
+
+# Hybrid training (residual LSTM on top of the frozen SINDy core) — mirrors lstm_p1.py
+EPOCHS = 50
+LR = 1e-3
+CLIP = 1.0
+W_PHYS = 1.0
+P_START, P_END, P_DECAY_EPOCHS = 1.0, 0.3, 40   # scheduled sampling
+L_START, CURRICULUM_EPOCHS = 5, 15              # horizon curriculum
+EARLY_STOP_PATIENCE = 6
+SCHED_PATIENCE = 3
+TRAIN_STRIDE = 5
+TRAIN_BATCH = 64
+NUM_WORKERS = 2
+CORR_BOUND = None        # None -> unbounded residual; float -> CORR_BOUND*tanh(fc) for stability
+
 
 
 #
@@ -237,6 +254,75 @@ class SINDyPredictor(nn.Module):
         return out, hidden
 
 
+class HybridPredictor(nn.Module):
+    """Hybrid Predictor that combines a frozen SINDy core with a trainable residual LSTM.
+    For physical dimensions (0..n_sup-1), the prediction is:
+        z_{t+1} = z_t + SINDy(z_t, u_t) + LSTM_residual(z_t, u_t, h_t)
+    For style/image dimensions (n_sup..), SINDy is not applied, so the prediction is:
+        z_{t+1} = z_t + LSTM_residual(z_t, u_t, h_t)
+    """
+    def __init__(self, library, Xi, latent=64, action_dim=2, hidden=64, layers=2,
+                 n_sup=4, control_mode="signed", corr_bound=None):
+        super().__init__()
+        self.library = library
+        self.n_sup = n_sup
+        self.latent = latent
+        self.action_dim = action_dim
+        self.control_mode = control_mode
+        self.corr_bound = corr_bound
+        
+        # SINDy Xi is frozen
+        self.register_buffer("Xi", Xi if torch.is_tensor(Xi) else torch.as_tensor(Xi))
+        
+        # Residual LSTM parameters
+        self.hidden, self.layers = hidden, layers
+        self.lstm = nn.LSTM(latent + action_dim, hidden, layers, batch_first=True)
+        self.fc = nn.Linear(hidden, latent)
+        nn.init.zeros_(self.fc.weight)   # zero-init -> residual correction starts at zero
+        nn.init.zeros_(self.fc.bias)
+        
+        self.reset_tracking()
+
+    def init_hidden(self, b, device):
+        return (torch.zeros(self.layers, b, self.hidden, device=device),
+                torch.zeros(self.layers, b, self.hidden, device=device))
+
+    def reset_tracking(self):
+        self._last_corrs = []
+        self._last_sindys = []
+
+    def get_tracked(self):
+        corrs = torch.stack(self._last_corrs, dim=1) if self._last_corrs else torch.tensor(0.0)
+        sindys = torch.stack(self._last_sindys, dim=1) if self._last_sindys else torch.tensor(0.0)
+        return corrs, sindys
+
+    def step(self, z, a_onehot, hidden):
+        # 1. Residual LSTM correction
+        inp = torch.cat([z, a_onehot], dim=-1).unsqueeze(1)
+        out_lstm, hidden = self.lstm(inp, hidden)
+        corr = self.fc(out_lstm.squeeze(1))
+        if self.corr_bound is not None:
+            corr = self.corr_bound * torch.tanh(corr)
+            
+        if hasattr(self, "_last_corrs") and self._last_corrs is not None:
+            self._last_corrs.append(corr)
+            
+        # 2. SINDy physics delta on physical dims
+        zp = z[:, :self.n_sup]
+        u = action_to_control(a_onehot.argmax(dim=-1), self.action_dim, self.control_mode)
+        phi = self.library.transform(zp, u.to(zp.dtype))
+        sindy_delta = phi @ self.Xi.to(zp.dtype)
+        
+        if hasattr(self, "_last_sindys") and self._last_sindys is not None:
+            self._last_sindys.append(sindy_delta)
+            
+        # 3. Combine: z_{t+1} = z_t + corr + SINDy_delta (only on physical dims)
+        z_next = z + corr
+        z_next[:, :self.n_sup] = z_next[:, :self.n_sup] + sindy_delta
+        return z_next, hidden
+
+
+
 #
 #  Build transition pairs from precomputed latents
 #
@@ -354,7 +440,7 @@ def make_test_loader(cfg, mean, std):
 
 
 def fit_sindy(cfg, library, ctrl_names, device):
-    """Fit SINDYc on the model's train latents; print equations; save; return the predictor."""
+    """Fit SINDYc on the model's train latents; print equations; save; return predictor, Xi."""
     Z, U, dZ = load_transitions(os.path.join(cfg["latent_root"], "train"), N_SUP, N_ACTIONS,
                                 CONTROL_MODE, max_samples=MAX_SAMPLES, seed=SEED)
     Phi = library.transform(Z, U)
@@ -363,6 +449,15 @@ def fit_sindy(cfg, library, ctrl_names, device):
     print(f"\n=== {cfg['label']} ===  transitions={Z.shape[0]}  nonzero={nnz}/{Xi.numel()}")
     print_equations(library, Xi, STATE_NAMES, ctrl_names)
 
+    # Compute per-dim train R^2 as an informative printout
+    dZ_pred = Phi @ Xi
+    ss_res = ((dZ - dZ_pred) ** 2).sum(dim=0)
+    ss_tot = ((dZ - dZ.mean(dim=0)) ** 2).sum(dim=0)
+    r2 = 1.0 - ss_res / ss_tot
+    print("\nPer-dimension train R^2 (SINDy fit quality):")
+    for name, val in zip(STATE_NAMES, r2):
+        print(f"  {name}: {val.item():.4f}")
+
     slug = cfg["label"].lower().replace(" ", "_")
     save_model(os.path.join(SAVE_DIR, f"sindy_{slug}.npz"), library, Xi, cfg={
         "n_sup": N_SUP, "n_actions": N_ACTIONS, "control_mode": CONTROL_MODE,
@@ -370,7 +465,9 @@ def fit_sindy(cfg, library, ctrl_names, device):
         "angle_dims": np.array(ANGLE_DIMS), "include_coupling": INCLUDE_COUPLING,
         "include_bias": INCLUDE_BIAS,
     })
-    return SINDyPredictor(library, Xi, N_SUP, N_ACTIONS, CONTROL_MODE).to(device)
+    predictor = SINDyPredictor(library, Xi, N_SUP, N_ACTIONS, CONTROL_MODE).to(device)
+    return predictor, Xi
+
 
 
 def load_lstm(cfg, device):
@@ -381,27 +478,222 @@ def load_lstm(cfg, device):
     return model
 
 
+def hybrid_rollout(model, batch, p_tf, n_actions, free_running=False, max_len=None):
+    """Rollout with teacher-forcing or free-running.
+    Returns:
+      preds: predicted latents, shape (B, L, D)
+      z_gt: ground-truth target latents, shape (B, L, D)
+      state_tp1: ground-truth physical states, shape (B, L, n_sup)
+    """
+    z_t, action, z_tp1, state_t, state_tp1 = batch
+    L = z_t.shape[1] if max_len is None else min(max_len, z_t.shape[1])
+    B, _, D = z_t.shape
+    device = z_t.device
+
+    z_seed = z_t[:, 0]
+    z_gt = z_tp1[:, :L]
+
+    hidden = model.init_hidden(B, device)
+    z_in = z_seed
+    preds = []
+    for k in range(L):
+        a = F.one_hot(action[:, k].long(), n_actions).float()
+        z_pred, hidden = model.step(z_in, a, hidden)
+        preds.append(z_pred)
+        if k < L - 1:
+            if free_running:
+                z_in = z_pred.detach()
+            else:
+                use_tf = (torch.rand(B, 1, device=device) < p_tf).float()
+                z_in = use_tf * z_gt[:, k] + (1.0 - use_tf) * z_pred.detach()
+    return torch.stack(preds, dim=1), z_gt, state_tp1[:, :L]
+
+
+def train_hybrid_epoch(model, loader, optimizer, device, p_tf, cur_len, w_phys=1.0, desc=""):
+    model.train()
+    tot, n = 0.0, 0
+    pbar = tqdm(loader, desc=desc, leave=False)
+    for batch in pbar:
+        batch = [b.to(device, non_blocking=True) for b in batch]
+        model.reset_tracking()
+        preds, z_gt, _ = hybrid_rollout(model, batch, p_tf, N_ACTIONS,
+                                         free_running=False, max_len=cur_len)
+        loss = (F.mse_loss(preds, z_gt, reduction="mean")
+                + w_phys * F.mse_loss(preds[..., :model.n_sup], z_gt[..., :model.n_sup], reduction="mean"))
+
+        optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), CLIP)
+        optimizer.step()
+
+        bs = preds.size(0)
+        tot += loss.item() * bs
+        n += bs
+        pbar.set_postfix(loss=f"{tot/n:.5f}", p_tf=f"{p_tf:.2f}", H=cur_len)
+    return tot / n
+
+
+@torch.no_grad()
+def eval_hybrid_val(model, loader, device, std4):
+    """Free-running rollout on validation set -> mean physical MSE."""
+    model.eval()
+    se, n = None, 0
+    for batch in loader:
+        batch = [b.to(device, non_blocking=True) for b in batch]
+        preds, state_tp1 = free_run(model, batch, N_ACTIONS, model.n_sup)
+        err = (preds[..., :model.n_sup] - state_tp1) * std4
+        s = (err ** 2).sum(dim=0)
+        se = s if se is None else se + s
+        n += preds.size(0)
+    return (se / n).mean().item()
+
+
+def train_hybrid(cfg, library, Xi, device, mean, std, std4):
+    """Train the HybridPredictor (frozen SINDy + trainable residual LSTM) on precomputed latents."""
+    train_ds = LatentSequenceDataset(os.path.join(cfg["latent_root"], "train"),
+                                     seq_len=SEQ_LEN, stride=TRAIN_STRIDE,
+                                     state_mean=mean, state_std=std)
+    val_ds = LatentSequenceDataset(os.path.join(cfg["latent_root"], "val"),
+                                   seq_len=SEQ_LEN, stride=TRAIN_STRIDE,
+                                   state_mean=mean, state_std=std)
+    pw = NUM_WORKERS > 0
+    train_dl = DataLoader(train_ds, batch_size=TRAIN_BATCH, shuffle=True, drop_last=True,
+                          num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
+    val_dl = DataLoader(val_ds, batch_size=TRAIN_BATCH, shuffle=False,
+                        num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
+    
+    print(f"\nTraining Hybrid for {cfg['label']} | train windows: {len(train_ds)} | val windows: {len(val_ds)}")
+    
+    model = HybridPredictor(
+        library=library,
+        Xi=Xi,
+        latent=LATENT_SIZE,
+        action_dim=N_ACTIONS,
+        hidden=HIDDEN,
+        layers=LAYERS,
+        n_sup=N_SUP,
+        control_mode=CONTROL_MODE,
+        corr_bound=CORR_BOUND
+    ).to(device)
+
+    
+    optimizer = optim.Adam(model.parameters(), lr=LR)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=SCHED_PATIENCE)
+    
+    best_val_loss = float("inf")
+    bad_epochs = 0
+    slug = cfg["label"].lower().replace(" ", "_")
+    best_ckpt_path = os.path.join(SAVE_DIR, f"hybrid_{slug}_best.pth")
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    
+    for epoch in range(1, EPOCHS + 1):
+        p_tf = max(P_END, P_START - (P_START - P_END) * (epoch - 1) / max(P_DECAY_EPOCHS, 1))
+        cur_len = int(round(min(SEQ_LEN, L_START + (SEQ_LEN - L_START) * (epoch - 1) / max(CURRICULUM_EPOCHS, 1))))
+        
+        tr_loss = train_hybrid_epoch(
+            model=model,
+            loader=train_dl,
+            optimizer=optimizer,
+            device=device,
+            p_tf=p_tf,
+            cur_len=cur_len,
+            w_phys=W_PHYS,
+            desc=f"E{epoch:03d} train"
+        )
+        
+        val_loss = eval_hybrid_val(model, val_dl, device, std4)
+        scheduler.step(val_loss)
+        lr_now = optimizer.param_groups[0]["lr"]
+        
+        print(f"E{epoch:03d} | p_tf={p_tf:.2f} H_train={cur_len} lr={lr_now:.1e} | "
+              f"train={tr_loss:.5f} | val phys-MSE={val_loss:.4f}")
+        
+        if val_loss < best_val_loss - 1e-6:
+            best_val_loss = val_loss
+            bad_epochs = 0
+            torch.save(model.state_dict(), best_ckpt_path)
+            print("  -> best model saved")
+        else:
+            bad_epochs += 1
+            if bad_epochs >= EARLY_STOP_PATIENCE:
+                print(f"Early stopping at epoch {epoch}.")
+                break
+                
+    # Load the best weights before returning
+    if os.path.exists(best_ckpt_path):
+        model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
+        print(f"Loaded best hybrid model checkpoint from {best_ckpt_path}")
+        
+    return model
+
+
+@torch.no_grad()
+def eval_hybrid_residual_norm(model, loader, device):
+    """Evaluate average norm of LSTM correction and SINDy delta on the given dataset.
+    Only computes norms over the physical dimensions (0..n_sup-1).
+    """
+    model.eval()
+    corr_norms = []
+    sindy_norms = []
+    
+    for batch in tqdm(loader, desc="eval residual norm", leave=False):
+        batch = [b.to(device, non_blocking=True) for b in batch]
+        z_t, action, z_tp1, _, _ = batch
+        B, L, _ = z_t.shape
+        
+        z_in = z_t[:, 0]
+        hidden = model.init_hidden(B, device)
+        
+        model.reset_tracking()
+        
+        for k in range(L):
+            a = F.one_hot(action[:, k].long(), N_ACTIONS).float()
+            z_in, hidden = model.step(z_in, a, hidden)
+            
+        corrs, sindys = model.get_tracked() # corrs: (B, L, D), sindys: (B, L, n_sup)
+        
+        # Calculate norms over physical dimensions (0..n_sup-1)
+        corr_phys = corrs[..., :model.n_sup]
+        c_norm = torch.linalg.norm(corr_phys, dim=-1) # (B, L)
+        s_norm = torch.linalg.norm(sindys, dim=-1)    # (B, L)
+        
+        corr_norms.append(c_norm.cpu().numpy())
+        sindy_norms.append(s_norm.cpu().numpy())
+        
+    all_corr = np.concatenate(corr_norms, axis=0)   # (N, L)
+    all_sindy = np.concatenate(sindy_norms, axis=0) # (N, L)
+    
+    mean_corr = float(all_corr.mean())
+    mean_sindy = float(all_sindy.mean())
+    
+    return mean_corr, mean_sindy
+
+
 #
 #  Plot
 #
 def plot_lstm_vs_sindy(results, save_dir):
-    """One subplot per model (Baseline, P1): per-horizon physical MSE, LSTM vs SINDy."""
+    """One subplot per model (Baseline, P1): per-horizon physical MSE, LSTM vs SINDy vs Hybrid."""
     os.makedirs(save_dir, exist_ok=True)
     horizons = np.arange(1, SEQ_LEN + 1)
     labels = list(results.keys())
-    styles = {"LSTM": ("C0", "-"), "SINDy": ("C3", "--")}
+    styles = {
+        "LSTM": ("C0", "-"), 
+        "SINDy": ("C3", "--"),
+        "Hybrid": ("C2", "-.")
+    }
 
     fig, axes = plt.subplots(1, len(labels), figsize=(6.0 * len(labels), 4.6), squeeze=False)
     for j, label in enumerate(labels):
         ax = axes[0][j]
-        for method in ("LSTM", "SINDy"):
+        for method in results[label].keys():
             mse_h = results[label][method]
-            color, ls = styles[method]
+            color, ls = styles.get(method, ("C7", "-"))
             ax.plot(horizons, mse_h, color=color, ls=ls, lw=2,
                     label=f"{method} (mean={mse_h.mean():.4f})")
         if LOG_Y:
             ax.set_yscale("log")
-        ax.set_title(f"{label}: LSTM vs SINDy")
+        ax.set_title(f"{label}: Dynamics Comparison")
         ax.set_xlabel("Prediction horizon")
         ax.set_ylabel("State MSE (physical units)")
         ax.set_xlim(1, SEQ_LEN)
@@ -433,18 +725,31 @@ if __name__ == "__main__":
                              include_coupling=INCLUDE_COUPLING, include_bias=INCLUDE_BIAS)
     print(f"library features: {library.n_features()}")
 
-    # For each model: encode latents, then eval BOTH dynamics models (LSTM, SINDy) on the
-    # SAME clean test latents -> fully matched comparison.
-    results = {}   # results[label] = {"LSTM": mse_h, "SINDy": mse_h}
+    # For each model: encode latents, then eval THREE dynamics models (LSTM, SINDy, Hybrid)
+    # on the SAME clean test latents -> fully matched comparison.
+    results = {}   # results[label] = {"LSTM": mse_h, "SINDy": mse_h, "Hybrid": mse_h}
     for cfg in MODELS:
         encode_latents(cfg, device)
         test_dl = make_test_loader(cfg, mean, std)
-        sindy_model = fit_sindy(cfg, library, ctrl_names, device)
+        sindy_model, Xi = fit_sindy(cfg, library, ctrl_names, device)
         lstm_model = load_lstm(cfg, device)
+        hybrid_model = train_hybrid(cfg, library, Xi, device, mean, std, std4)
+
+        
+        # Compute test MSE
         results[cfg["label"]] = {
-            "LSTM":  eval_per_horizon(lstm_model, test_dl, device, std4, N_ACTIONS, N_SUP),
-            "SINDy": eval_per_horizon(sindy_model, test_dl, device, std4, N_ACTIONS, N_SUP),
+            "LSTM":   eval_per_horizon(lstm_model, test_dl, device, std4, N_ACTIONS, N_SUP),
+            "SINDy":  eval_per_horizon(sindy_model, test_dl, device, std4, N_ACTIONS, N_SUP),
+            "Hybrid": eval_per_horizon(hybrid_model, test_dl, device, std4, N_ACTIONS, N_SUP),
         }
+        
+        # Compute and report residual norm metrics on test set
+        mean_corr, mean_sindy = eval_hybrid_residual_norm(hybrid_model, test_dl, device)
+        print(f"\n[{cfg['label']}] Hybrid residual norm metrics (physical dims):")
+        print(f"  Mean LSTM correction ||corr||: {mean_corr:.6f}")
+        print(f"  Mean SINDy delta ||sindy_delta||: {mean_sindy:.6f}")
+        if mean_sindy > 0:
+            print(f"  Relative residual magnitude (||corr|| / ||sindy_delta||): {mean_corr / mean_sindy:.6f}")
 
     # Side-by-side comparison: model x method
     HS = [h for h in (1, 10, 20, SEQ_LEN) if h <= SEQ_LEN]
@@ -455,9 +760,10 @@ if __name__ == "__main__":
     print(header)
     print("-" * len(header))
     for label, by_method in results.items():
-        for method in ("LSTM", "SINDy"):
+        for method in ("LSTM", "SINDy", "Hybrid"):
             mse_h = by_method[method]
             row = f"{label:<14}{method:<8}" + "".join(f"{mse_h[h-1]:>11.4f}" for h in HS)
             print(row + f"{mse_h.mean():>11.4f}")
 
     plot_lstm_vs_sindy(results, SAVE_DIR)
+
