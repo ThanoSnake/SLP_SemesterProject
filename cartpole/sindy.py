@@ -116,6 +116,7 @@ TRAIN_STRIDE = 5
 TRAIN_BATCH = 64
 NUM_WORKERS = 2
 CORR_BOUND = None        # None -> unbounded residual; float -> CORR_BOUND*tanh(fc) for stability
+TRAIN_HYBRID = False     # True -> train a fresh hybrid (+save); False -> load from cfg['hybrid_ckpt']
 SHOW_PROGRESS = False    # tqdm bars render as line-spam under Kaggle's non-TTY logs -> off by default
 
 # Visual-noise sweep on TEST images before encoding (mirrors test_p1.py). Models are fit/trained
@@ -630,6 +631,18 @@ def train_hybrid(model, cfg, mean, std, std4, device):
     return model
 
 
+def load_hybrid(cfg, library, Xi, device):
+    """Reconstruct the hybrid shell (frozen SINDy + residual LSTM) and load trained weights
+    from cfg['hybrid_ckpt'] (skips retraining)."""
+    model = HybridPredictor(library, Xi, latent=LATENT_SIZE, action_dim=N_ACTIONS,
+                            hidden=HIDDEN, layers=LAYERS, n_sup=N_SUP,
+                            control_mode=CONTROL_MODE, corr_bound=CORR_BOUND).to(device)
+    model.load_state_dict(torch.load(cfg["hybrid_ckpt"], map_location=device))
+    model.eval()
+    print(f"    [{cfg['label']}] hybrid loaded from {cfg['hybrid_ckpt']}")
+    return model
+
+
 
 @torch.no_grad()
 def eval_hybrid_residual_norm(model, loader, device):
@@ -750,11 +763,14 @@ if __name__ == "__main__":
         sindy_model, Xi = fit_sindy(cfg, library, ctrl_names, device)
         lstm_model = load_lstm(cfg, device)
 
-        # Build the hybrid (frozen SINDy + zero-init residual LSTM) and TRAIN the residual (clean).
-        hybrid_model = HybridPredictor(library, Xi, latent=LATENT_SIZE, action_dim=N_ACTIONS,
-                                       hidden=HIDDEN, layers=LAYERS, n_sup=N_SUP,
-                                       control_mode=CONTROL_MODE, corr_bound=CORR_BOUND).to(device)
-        train_hybrid(hybrid_model, cfg, mean, std, std4, device)
+        # Hybrid (frozen SINDy + residual LSTM): train fresh or load a previous run.
+        if TRAIN_HYBRID:
+            hybrid_model = HybridPredictor(library, Xi, latent=LATENT_SIZE, action_dim=N_ACTIONS,
+                                           hidden=HIDDEN, layers=LAYERS, n_sup=N_SUP,
+                                           control_mode=CONTROL_MODE, corr_bound=CORR_BOUND).to(device)
+            train_hybrid(hybrid_model, cfg, mean, std, std4, device)
+        else:
+            hybrid_model = load_hybrid(cfg, library, Xi, device)
 
         models = {"LSTM": lstm_model, "SINDy": sindy_model, "Hybrid": hybrid_model}
         results[cfg["label"]] = {}
