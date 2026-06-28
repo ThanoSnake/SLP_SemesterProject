@@ -98,7 +98,7 @@ MAX_SAMPLES = 500_000    # subsample transitions if more than this (memory cap)
 SEED = 0
 
 # Hybrid training (residual LSTM on top of the frozen SINDy core) — mirrors lstm_p1.py
-EPOCHS = 50
+EPOCHS = 40
 LR = 1e-3
 CLIP = 1.0
 W_PHYS = 1.0
@@ -110,7 +110,6 @@ TRAIN_STRIDE = 5
 TRAIN_BATCH = 64
 NUM_WORKERS = 2
 CORR_BOUND = None        # None -> unbounded residual; float -> CORR_BOUND*tanh(fc) for stability
-
 
 
 #
@@ -255,11 +254,14 @@ class SINDyPredictor(nn.Module):
 
 
 class HybridPredictor(nn.Module):
-    """Hybrid Predictor that combines a frozen SINDy core with a trainable residual LSTM.
-    For physical dimensions (0..n_sup-1), the prediction is:
-        z_{t+1} = z_t + SINDy(z_t, u_t) + LSTM_residual(z_t, u_t, h_t)
-    For style/image dimensions (n_sup..), SINDy is not applied, so the prediction is:
-        z_{t+1} = z_t + LSTM_residual(z_t, u_t, h_t)
+    """Frozen SINDy physics core + trainable residual LSTM.
+
+        physical dims:  z_{t+1} = z_t + LSTM_resid(z_t, u_t, h_t) + SINDy(z_t, u_t)
+        style dims:     z_{t+1} = z_t + LSTM_resid(z_t, u_t, h_t)
+
+    The embedded LatentPredictor zero-inits its output head, so the hybrid STARTS as pure SINDy
+    and training teaches the LSTM only the residual (Δz_true - SINDy). SINDy (Xi) stays frozen.
+    Per-step corr/sindy tracking is OPT-IN (self.track) so normal eval stays leak-free.
     """
     def __init__(self, library, Xi, latent=64, action_dim=2, hidden=64, layers=2,
                  n_sup=4, control_mode="signed", corr_bound=None):
@@ -270,13 +272,10 @@ class HybridPredictor(nn.Module):
         self.action_dim = action_dim
         self.control_mode = control_mode
         self.corr_bound = corr_bound
-        
-        # SINDy Xi is frozen
-        self.register_buffer("Xi", Xi if torch.is_tensor(Xi) else torch.as_tensor(Xi))
-        
-        # Embed the exact same LatentPredictor class from lstm.py
+        self.track = False
+        self.register_buffer("Xi", Xi.detach().clone() if torch.is_tensor(Xi) else torch.as_tensor(Xi))
+        # Same residual LSTM as lstm.py; its zero-init head means corr=0 at start -> pure SINDy.
         self.lstm_model = LatentPredictor(latent, action_dim, hidden, layers)
-        
         self.reset_tracking()
 
     def init_hidden(self, b, device):
@@ -291,28 +290,25 @@ class HybridPredictor(nn.Module):
         sindys = torch.stack(self._last_sindys, dim=1) if self._last_sindys else torch.tensor(0.0)
         return corrs, sindys
 
+    def _sindy_delta(self, zp, a_onehot):
+        u = action_to_control(a_onehot.argmax(dim=-1), self.action_dim, self.control_mode)
+        return self.library.transform(zp, u.to(zp.dtype)) @ self.Xi.to(zp.dtype)
+
     def step(self, z, a_onehot, hidden):
-        # 1. Residual LSTM correction from the standard LatentPredictor
+        # LSTM residual correction (corr = the learned delta from the embedded predictor)
         z_lstm_next, hidden = self.lstm_model.step(z, a_onehot, hidden)
         corr = z_lstm_next - z
         if self.corr_bound is not None:
             corr = self.corr_bound * torch.tanh(corr)
-            
-        if hasattr(self, "_last_corrs") and self._last_corrs is not None:
-            self._last_corrs.append(corr)
-            
-        # 2. SINDy physics delta on physical dims
-        zp = z[:, :self.n_sup]
-        u = action_to_control(a_onehot.argmax(dim=-1), self.action_dim, self.control_mode)
-        phi = self.library.transform(zp, u.to(zp.dtype))
-        sindy_delta = phi @ self.Xi.to(zp.dtype)
-        
-        if hasattr(self, "_last_sindys") and self._last_sindys is not None:
-            self._last_sindys.append(sindy_delta)
-            
-        # 3. Combine: z_{t+1} = z_t + corr + SINDy_delta (only on physical dims)
-        z_next = z + corr
-        z_next[:, :self.n_sup] = z_next[:, :self.n_sup] + sindy_delta
+        # Frozen SINDy increment on the physical dims
+        sindy_delta = self._sindy_delta(z[:, :self.n_sup], a_onehot)
+        # Combine without in-place ops (safe for autograd during training)
+        phys = z[:, :self.n_sup] + corr[:, :self.n_sup] + sindy_delta
+        rest = z[:, self.n_sup:] + corr[:, self.n_sup:]
+        z_next = torch.cat([phys, rest], dim=-1)
+        if self.track:
+            self._last_corrs.append(corr[:, :self.n_sup].detach())
+            self._last_sindys.append(sindy_delta.detach())
         return z_next, hidden
 
 
@@ -472,79 +468,123 @@ def load_lstm(cfg, device):
     return model
 
 
-def load_hybrid(cfg, library, Xi, device):
-    """Load the HybridPredictor by initializing SINDy and loading LSTM weights from cfg['lstm_ckpt']."""
-    model = HybridPredictor(
-        library=library,
-        Xi=Xi,
-        latent=LATENT_SIZE,
-        action_dim=N_ACTIONS,
-        hidden=HIDDEN,
-        layers=LAYERS,
-        n_sup=N_SUP,
-        control_mode=CONTROL_MODE,
-        corr_bound=CORR_BOUND
-    ).to(device)
-    
-    # Load the pretrained LSTM weights into the embedded lstm_model
-    model.lstm_model.load_state_dict(torch.load(cfg["lstm_ckpt"], map_location=device))
+def make_loader(latent_dir, mean, std, stride, batch, shuffle):
+    ds = LatentSequenceDataset(latent_dir, seq_len=SEQ_LEN, stride=stride,
+                               state_mean=mean, state_std=std)
+    return DataLoader(ds, batch_size=batch, shuffle=shuffle, drop_last=shuffle,
+                      num_workers=NUM_WORKERS, pin_memory=True)
+
+
+def _train_rollout(model, batch, p_tf, cur_len, device):
+    """Free-running rollout with scheduled sampling (per-sample teacher forcing)."""
+    z_t, action, z_tp1, state_t, state_tp1 = batch
+    L = min(cur_len, z_t.shape[1])
+    B = z_t.shape[0]
+    z_gt = z_tp1[:, :L]
+    hidden = model.init_hidden(B, device)
+    z_in = z_t[:, 0]
+    preds = []
+    for k in range(L):
+        a = F.one_hot(action[:, k].long(), N_ACTIONS).float()
+        z_pred, hidden = model.step(z_in, a, hidden)
+        preds.append(z_pred)
+        if k < L - 1:
+            use_tf = (torch.rand(B, 1, device=device) < p_tf).float()
+            z_in = use_tf * z_gt[:, k] + (1.0 - use_tf) * z_pred.detach()
+    return torch.stack(preds, dim=1), z_gt
+
+
+def train_hybrid(model, cfg, mean, std, std4, device):
+    """Train ONLY the residual LSTM (SINDy Xi is a frozen buffer -> no grad). Zero-init head means
+    the hybrid starts as pure SINDy and learns Δz - SINDy. Scheduled sampling + horizon curriculum,
+    early-stopped on val per-horizon MSE. Returns the model with its best weights loaded."""
+    train_dl = make_loader(os.path.join(cfg["latent_root"], "train"), mean, std,
+                           TRAIN_STRIDE, TRAIN_BATCH, shuffle=True)
+    val_dl = make_loader(os.path.join(cfg["latent_root"], "val"), mean, std,
+                         TRAIN_STRIDE, BATCH, shuffle=False)
+    opt = optim.Adam(model.parameters(), lr=LR)
+    sched = optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=SCHED_PATIENCE)
+
+    best, bad, best_state = float("inf"), 0, None
+    for epoch in tqdm(range(1, EPOCHS + 1), desc=f"train {cfg['label']} hybrid"):
+        p_tf = max(P_END, P_START - (P_START - P_END) * (epoch - 1) / max(P_DECAY_EPOCHS, 1))
+        cur_len = int(round(min(SEQ_LEN, L_START + (SEQ_LEN - L_START)
+                                * (epoch - 1) / max(CURRICULUM_EPOCHS, 1))))
+        model.train()
+        for batch in train_dl:
+            batch = [b.to(device, non_blocking=True) for b in batch]
+            preds, z_gt = _train_rollout(model, batch, p_tf, cur_len, device)
+            loss = (F.mse_loss(preds, z_gt)
+                    + W_PHYS * F.mse_loss(preds[..., :N_SUP], z_gt[..., :N_SUP]))
+            opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), CLIP)
+            opt.step()
+
+        mse_h = eval_per_horizon(model, val_dl, device, std4, N_ACTIONS, N_SUP)
+        val_mean = float(mse_h.mean())
+        sched.step(val_mean)
+        if val_mean < best - 1e-6:
+            best, bad, best_state = val_mean, 0, copy.deepcopy(model.state_dict())
+        else:
+            bad += 1
+            if bad >= EARLY_STOP_PATIENCE:
+                break
+    if best_state is not None:
+        model.load_state_dict(best_state)
     model.eval()
+
+    # Persist the trained hybrid (residual LSTM weights + frozen Xi buffer).
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    slug = cfg["label"].lower().replace(" ", "_")
+    save_path = os.path.join(SAVE_DIR, f"hybrid_{slug}.pth")
+    torch.save(model.state_dict(), save_path)
+    print(f"    [{cfg['label']}] hybrid trained: best val phys-MSE = {best:.4f}  -> {save_path}")
     return model
 
 
 
 @torch.no_grad()
 def eval_hybrid_residual_norm(model, loader, device):
-    """Evaluate average norm of LSTM correction and SINDy delta on the given dataset.
-    Only computes norms over the physical dimensions (0..n_sup-1).
-    """
+    """Average per-step norms of the LSTM correction vs the SINDy delta (physical dims only).
+    Small ||corr|| relative to ||sindy|| => physics explains most of the dynamics (more physical
+    latent). Tracking is enabled only for this pass, then turned back off."""
     model.eval()
-    corr_norms = []
-    sindy_norms = []
-    
-    for batch in tqdm(loader, desc="eval residual norm", leave=False):
-        batch = [b.to(device, non_blocking=True) for b in batch]
-        z_t, action, z_tp1, _, _ = batch
-        B, L, _ = z_t.shape
-        
-        z_in = z_t[:, 0]
-        hidden = model.init_hidden(B, device)
-        
+    model.track = True
+    corr_norms, sindy_norms = [], []
+    try:
+        for batch in tqdm(loader, desc="residual norm", leave=False):
+            batch = [b.to(device, non_blocking=True) for b in batch]
+            z_t, action, z_tp1, _, _ = batch
+            B, L, _ = z_t.shape
+            z_in = z_t[:, 0]
+            hidden = model.init_hidden(B, device)
+            model.reset_tracking()
+            for k in range(L):
+                a = F.one_hot(action[:, k].long(), N_ACTIONS).float()
+                z_in, hidden = model.step(z_in, a, hidden)
+            corrs, sindys = model.get_tracked()   # each (B, L, n_sup)
+            corr_norms.append(torch.linalg.norm(corrs, dim=-1).cpu().numpy())
+            sindy_norms.append(torch.linalg.norm(sindys, dim=-1).cpu().numpy())
+    finally:
+        model.track = False
         model.reset_tracking()
-        
-        for k in range(L):
-            a = F.one_hot(action[:, k].long(), N_ACTIONS).float()
-            z_in, hidden = model.step(z_in, a, hidden)
-            
-        corrs, sindys = model.get_tracked() # corrs: (B, L, D), sindys: (B, L, n_sup)
-        
-        # Calculate norms over physical dimensions (0..n_sup-1)
-        corr_phys = corrs[..., :model.n_sup]
-        c_norm = torch.linalg.norm(corr_phys, dim=-1) # (B, L)
-        s_norm = torch.linalg.norm(sindys, dim=-1)    # (B, L)
-        
-        corr_norms.append(c_norm.cpu().numpy())
-        sindy_norms.append(s_norm.cpu().numpy())
-        
-    all_corr = np.concatenate(corr_norms, axis=0)   # (N, L)
-    all_sindy = np.concatenate(sindy_norms, axis=0) # (N, L)
-    
-    mean_corr = float(all_corr.mean())
-    mean_sindy = float(all_sindy.mean())
-    
+
+    mean_corr = float(np.concatenate(corr_norms, axis=0).mean())
+    mean_sindy = float(np.concatenate(sindy_norms, axis=0).mean())
     return mean_corr, mean_sindy
 
 
 #
 #  Plot
 #
-def plot_lstm_vs_sindy(results, save_dir):
+def plot_dynamics(results, save_dir):
     """One subplot per model (Baseline, P1): per-horizon physical MSE, LSTM vs SINDy vs Hybrid."""
     os.makedirs(save_dir, exist_ok=True)
     horizons = np.arange(1, SEQ_LEN + 1)
     labels = list(results.keys())
     styles = {
-        "LSTM": ("C0", "-"), 
+        "LSTM": ("C0", "-"),
         "SINDy": ("C3", "--"),
         "Hybrid": ("C2", "-.")
     }
@@ -566,7 +606,7 @@ def plot_lstm_vs_sindy(results, save_dir):
         ax.grid(alpha=0.3, which="both")
         ax.legend()
     plt.tight_layout()
-    path = os.path.join(save_dir, "lstm_vs_sindy.png")
+    path = os.path.join(save_dir, "dynamics_comparison.png")
     plt.savefig(path, dpi=150)
     plt.show()
     print("saved figure ->", path)
@@ -599,17 +639,20 @@ if __name__ == "__main__":
         test_dl = make_test_loader(cfg, mean, std)
         sindy_model, Xi = fit_sindy(cfg, library, ctrl_names, device)
         lstm_model = load_lstm(cfg, device)
-        hybrid_model = load_hybrid(cfg, library, Xi, device)
 
+        # Build the hybrid (frozen SINDy + zero-init residual LSTM) and TRAIN the residual.
+        hybrid_model = HybridPredictor(library, Xi, latent=LATENT_SIZE, action_dim=N_ACTIONS,
+                                       hidden=HIDDEN, layers=LAYERS, n_sup=N_SUP,
+                                       control_mode=CONTROL_MODE, corr_bound=CORR_BOUND).to(device)
+        train_hybrid(hybrid_model, cfg, mean, std, std4, device)
 
-        
         # Compute test MSE
         results[cfg["label"]] = {
             "LSTM":   eval_per_horizon(lstm_model, test_dl, device, std4, N_ACTIONS, N_SUP),
             "SINDy":  eval_per_horizon(sindy_model, test_dl, device, std4, N_ACTIONS, N_SUP),
             "Hybrid": eval_per_horizon(hybrid_model, test_dl, device, std4, N_ACTIONS, N_SUP),
         }
-        
+
         # Compute and report residual norm metrics on test set
         mean_corr, mean_sindy = eval_hybrid_residual_norm(hybrid_model, test_dl, device)
         print(f"\n[{cfg['label']}] Hybrid residual norm metrics (physical dims):")
@@ -632,5 +675,5 @@ if __name__ == "__main__":
             row = f"{label:<14}{method:<8}" + "".join(f"{mse_h[h-1]:>11.4f}" for h in HS)
             print(row + f"{mse_h.mean():>11.4f}")
 
-    plot_lstm_vs_sindy(results, SAVE_DIR)
+    plot_dynamics(results, SAVE_DIR)
 

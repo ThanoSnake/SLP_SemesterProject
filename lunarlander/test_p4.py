@@ -126,6 +126,7 @@ if __name__ == "__main__":
 
     if SAVE_FIG:
         import matplotlib.pyplot as plt
+        os.makedirs(os.path.dirname(SAVE_FIG), exist_ok=True)
         img_t, img_tp1, *_ = next(iter(dl))
         img_t = img_t.to(device).float().div_(255.0)
         x = torch.cat([img_t, img_tp1.to(device).float().div_(255.0)], dim=1)
