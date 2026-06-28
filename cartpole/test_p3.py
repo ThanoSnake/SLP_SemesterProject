@@ -12,9 +12,9 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from vae import VAE, encode_fn
+from vae import VAE
 from lstm import LatentPredictor
-from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, list_npz
+from loader import LatentSequenceDataset, load_norm_stats, list_npz
 
 #
 #  Config

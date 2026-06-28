@@ -15,7 +15,6 @@ test_p4.py — Αξιολόγηση Principle 4 (compositional decoding) όπω�
   Αλλιώς κάνε import/run τα αντίστοιχα cells πρώτα.
 """
 import os
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -144,6 +143,7 @@ if __name__ == "__main__":
     # Optional: visual comparison (full reconstruction + 3 P4 components)
     if SAVE_FIG:
         import matplotlib.pyplot as plt
+        os.makedirs(os.path.dirname(SAVE_FIG), exist_ok=True)
         img_t, img_tp1, *_ = next(iter(dl))
         img_t = img_t.to(device).float().div_(255.0)
         x = torch.cat([img_t, img_tp1.to(device).float().div_(255.0)], dim=1)

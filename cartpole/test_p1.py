@@ -31,9 +31,9 @@ from torch.utils.data import DataLoader
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/input/datasets/thanosfeidakis/datasets-weights/cartpole_dataset"
+DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/cartpole_p1_σ100"
+SAVE_DIR = "/kaggle/working/cartpole_p1_out"
 
 SHIFT = 0
 LATENT_SIZE, N_SUP, N_IMG = 64, 4, 60
@@ -66,13 +66,13 @@ N_TRAJ_WINDOWS = 1
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "/kaggle/input/datasets/thanosfeidakis/datasets-weights/CartPole_ModelWeights/CartPole_ModelWeights/cartpole_baseline_vae_down.pth",
-     "lstm_ckpt": "/kaggle/input/datasets/thanosfeidakis/datasets-weights/CartPole_ModelWeights/CartPole_ModelWeights/cartpole_baseline_lstm.pth",
+     "vae_ckpt": "<cartpole-baseline-vae>",
+     "lstm_ckpt": "<cartpole-baseline-lstm>",
      "latent_root": "/kaggle/working/cartpole_p1_latents/baseline"},
     {"label": "Principle 1", "color": "C1",
      "make_vae": lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG),
-     "vae_ckpt": "/kaggle/input/datasets/thanosfeidakis/datasets-weights/CartPole_ModelWeights/CartPole_ModelWeights/cartpole_p1_vae.pth",
-     "lstm_ckpt": "/kaggle/input/datasets/thanosfeidakis/datasets-weights/CartPole_ModelWeights/CartPole_ModelWeights/cartpole_p1_lstm.pth",
+     "vae_ckpt": "<cartpole-p1-vae>",
+     "lstm_ckpt": "<cartpole-p1-lstm>",
      "latent_root": "/kaggle/working/cartpole_p1_latents/p1"},
 ]
 

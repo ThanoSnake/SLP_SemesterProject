@@ -41,7 +41,7 @@ DATA_ROOT = "<cartpole-dataset>"
 TEST_DIR = os.path.join(DATA_ROOT, "test")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
 VAE_CKPT = "<cartpole-baseline-vae>"
-SAVE_DIR = "/kaggle/working/cartpole_baseline_test"
+SAVE_DIR = "/kaggle/working/cartpole_baseline_out"
 
 LATENT_SIZE = 64
 N_SUP = 4
