@@ -52,8 +52,8 @@ LATENT_ROOT = "/kaggle/working/cartpole_sindy_latents"
 SAVE_DIR = "/kaggle/working/cartpole_sindy"
 
 # Trained hybrid checkpoints (absolute, configurable per model)
-HYBRID_BASELINE_CKPT = "<hybrid-baseline>"
-HYBRID_P1_CKPT = "<hybrid-p1>"
+HYBRID_BASELINE_CKPT = os.path.join(SAVE_DIR, "hybrid_baseline.pth")
+HYBRID_P1_CKPT = os.path.join(SAVE_DIR, "hybrid_p1.pth")
 
 LATENT_SIZE = 64
 SHIFT = 0
@@ -115,10 +115,10 @@ SCHED_PATIENCE = 3
 TRAIN_STRIDE = 5
 TRAIN_BATCH = 64
 NUM_WORKERS = 2
-CORR_BOUND = None        # None -> unbounded residual; float -> CORR_BOUND*tanh(fc) for stability
-LSTM_DELTA_BOUND = 0.4    # None -> raw LSTM; float -> clamp the LSTM's per-step delta to +/- value
-TRAIN_LSTM = True         # True -> train a fresh (bounded) LSTM here (+save); False -> load it
-TRAIN_HYBRID = False     # True -> train a fresh hybrid (+save); False -> load from cfg['hybrid_ckpt']
+CORR_BOUND = 0.4        # None -> unbounded residual; float -> CORR_BOUND*tanh(fc) for stability
+LSTM_DELTA_BOUND = None    # None -> raw LSTM; float -> clamp the LSTM's per-step delta to +/- value
+TRAIN_LSTM = False         # True -> train a fresh (bounded) LSTM here (+save); False -> load it
+TRAIN_HYBRID = True     # True -> train a fresh hybrid (+save); False -> load from cfg['hybrid_ckpt']
 SHOW_PROGRESS = False    # tqdm bars render as line-spam under Kaggle's non-TTY logs -> off by default
 
 # Visual-noise sweep on TEST images before encoding (mirrors test_p1.py). Models are fit/trained
@@ -576,11 +576,11 @@ def build_lstm(device):
 
 
 def load_lstm(cfg, device):
-    """Load the (bounded) LSTM trained by train_lstm from its checkpoint."""
-    model = build_lstm(device)
-    model.load_state_dict(torch.load(_lstm_ckpt_path(cfg), map_location=device))
+    """Load the pre-saved baseline LSTM from its checkpoint."""
+    model = LatentPredictor(LATENT_SIZE, N_ACTIONS, HIDDEN, LAYERS)
+    model.load_state_dict(torch.load(cfg["lstm_ckpt"], map_location=device))
     model.eval()
-    print(f"    [{cfg['label']}] LSTM loaded from {_lstm_ckpt_path(cfg)}")
+    print(f"    [{cfg['label']}] LSTM loaded from {cfg['lstm_ckpt']}")
     return model
 
 
