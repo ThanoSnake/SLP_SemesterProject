@@ -25,10 +25,10 @@ extension4_control_alt.py — Επέκταση 4 (ΒΕΛΤΙΩΜΕΝΗ, wind-ori
       Βελτιώνει ΚΑΙ το enc_pid ΚΑΙ τον MPC seed. (Ίδια ιδέα με το Kalman fusion του cartpole.)
 
 CONTROLLERS (ίδια seeds):
-   true_pid        : PD στο ΑΛΗΘΙΝΟ obs                         (upper bound)
    enc_pid         : PD στο ΦΙΛΤΡΑΡΙΣΜΕΝΟ encoder-estimate      (encoder ως αισθητήρας + filter)
-   latent_mpc_rand : ΠΑΛΙΟ random-shooting MPC                  (baseline «πριν», για contrast)
-   guided_mpc      : PID-guided CEM shield/corrector            (η βελτιωμένη πρόταση)
+   guided_mpc_*    : PID-guided CEM shield/corrector με grid-search πάνω στα override gates
+
+Για γρήγορο tuning, τα true_pid / latent_mpc_rand είναι προσωρινά εκτός CONTROLLERS.
 
 Imports από τα canonical modules του lunar_lander/. Απαιτεί gymnasium[box2d].
 """
@@ -70,11 +70,11 @@ MODEL_REGISTRY = {
 N_EPISODES = 20
 MAX_STEPS = 400
 SEED = 0
-ENABLE_WIND = False               # το πείραμα ΕΧΕΙ wind -> εδώ ο corrector/shield έχει νόημα
+ENABLE_WIND = False              # grid search πρώτα χωρίς wind· μετά ξανατρέχουμε το καλύτερο με wind
 WIND_POWER, TURBULENCE_POWER = 15.0, 1.5
-CONTROLLERS = ["true_pid", "enc_pid", "latent_mpc_rand", "guided_mpc"]
+CONTROLLERS = ["enc_pid", "guided_mpc"]
 
-RECORD_GIF = True
+RECORD_GIF = False               # grid search -> μην γράφουμε GIF για κάθε threshold setting
 GIF_FPS = 30
 
 # --- Complementary state filter (encoder + model, gated από το residual) ---
@@ -111,8 +111,21 @@ MPC_MARGIN = 25.0                # override μόνο αν dream-value(MPC) > dre
 RISK_TRIGGER = 10.0              # override μόνο αν το PID dream έχει ουσιαστικό predicted risk
 RISK_MARGIN = 5.0                # και ο MPC μειώνει το risk τουλάχιστον τόσο
 
+# --- Grid search πάνω στα gates που επιτρέπουν τελικά MPC override ---
+# Κάθε config τρέχει σαν ξεχωριστός "guided_mpc_<label>" controller, στα ίδια episode seeds.
+# Ξεκινάμε από ήπιο -> πιο ανοιχτό. Αν το loose χειροτερέψει, κρατάμε mild/medium.
+GUIDED_GRID = [
+    {"label": "mild",   "mpc_margin": 10.0, "risk_trigger": 4.0, "risk_margin": 2.0, "pid_bias": 0.85},
+    {"label": "medium", "mpc_margin":  5.0, "risk_trigger": 2.0, "risk_margin": 1.0, "pid_bias": 0.75},
+    {"label": "loose",  "mpc_margin":  2.0, "risk_trigger": 1.0, "risk_margin": 0.5, "pid_bias": 0.70},
+]
+
 FUEL_COST = [0.0, 0.03, 0.30, 0.03]   # ανά action {noop,left,main,right}
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
+
+
+def cfg_get(cfg, key, default):
+    return default if cfg is None else cfg.get(key, default)
 
 
 def get_device():
@@ -196,8 +209,9 @@ class StateEstimator:
        Υψηλό residual (π.χ. wind/OOD) -> w_eff->0 -> εμπιστεύσου τον encoder. Κρατά ιστορικό
        residual για adaptive scale & trust-threshold (για το shield)."""
 
-    def __init__(self, lstm, mean_t, std_t, device):
+    def __init__(self, lstm, mean_t, std_t, device, mpc_cfg=None):
         self.lstm, self.mean_t, self.std_t, self.device = lstm, mean_t, std_t, device
+        self.mpc_cfg = mpc_cfg
         self.w_model = torch.tensor(W_MODEL, device=device, dtype=torch.float32)
         self.reset()
 
@@ -211,13 +225,18 @@ class StateEstimator:
         return RESID_SCALE0 if len(self.resid_hist) < FILTER_WARMUP else max(np.median(self.resid_hist), 1e-6)
 
     def trust_threshold(self):
-        if len(self.resid_hist) < MPC_MIN_HISTORY:
+        min_history = int(cfg_get(self.mpc_cfg, "mpc_min_history", MPC_MIN_HISTORY))
+        if len(self.resid_hist) < min_history:
             return 0.0             # warmup -> όχι MPC, μόνο PID
         med = float(np.median(self.resid_hist))
-        return min(TRUST_ABS_MAX, max(TRUST_FLOOR, med * TRUST_FACTOR))
+        trust_factor = float(cfg_get(self.mpc_cfg, "trust_factor", TRUST_FACTOR))
+        trust_floor = float(cfg_get(self.mpc_cfg, "trust_floor", TRUST_FLOOR))
+        trust_abs_max = float(cfg_get(self.mpc_cfg, "trust_abs_max", TRUST_ABS_MAX))
+        return min(trust_abs_max, max(trust_floor, med * trust_factor))
 
     def model_trusted(self):
-        return len(self.resid_hist) >= MPC_MIN_HISTORY and self.resid <= self.trust_threshold()
+        min_history = int(cfg_get(self.mpc_cfg, "mpc_min_history", MPC_MIN_HISTORY))
+        return len(self.resid_hist) >= min_history and self.resid <= self.trust_threshold()
 
     @torch.no_grad()
     def update(self, mu):
@@ -337,12 +356,12 @@ def pid_nominal_dream(lstm, z0, mean_t, std_t, device):
 
 
 @torch.no_grad()
-def cem_plan(lstm, z0, nominal_macro, mean_t, std_t, device, rng):
+def cem_plan(lstm, z0, nominal_macro, mean_t, std_t, device, rng, pid_bias=PID_BIAS):
     """PID-guided Cross-Entropy Method πάνω σε per-step categorical actions.
        Warm-start γύρω από το PID-nominal -> in-distribution. -> (first_action, best_dream_value)."""
     K = MPC_HORIZON
-    probs = np.full((K, N_ACTIONS), (1.0 - PID_BIAS) / N_ACTIONS)
-    probs[np.arange(K), nominal_macro] += PID_BIAS                      # μάζα στο PID action ανά βήμα
+    probs = np.full((K, N_ACTIONS), (1.0 - pid_bias) / N_ACTIONS)
+    probs[np.arange(K), nominal_macro] += pid_bias                      # μάζα στο PID action ανά βήμα
     best_v, best_seq = -1e18, nominal_macro.copy()
 
     for _ in range(CEM_ITERS):
@@ -391,11 +410,12 @@ def mpc_plan_random(lstm, z_t, mean_t, std_t, device, rng):
 # Closed-loop episode
 # ---------------------------------------------------------------------------
 @torch.no_grad()
-def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, mpc_rng, record=False):
+def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed,
+                mpc_rng, record=False, mpc_cfg=None):
     obs, _ = env.reset(seed=ep_seed)
     f_cur = resize_frame(env.render())
     f_prev = f_cur
-    est = StateEstimator(lstm, mean_t, std_t, device)
+    est = StateEstimator(lstm, mean_t, std_t, device, mpc_cfg=mpc_cfg)
     total_r, fuel, last_r = 0.0, 0.0, 0.0
     dist_log, frames = [], []
     n_override, n_mpc, n_steps = 0, 0, 0
@@ -426,14 +446,19 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, mpc_
                 a = a_pid                                         # μοντέλο αναξιόπιστο (wind/OOD) -> PID
             else:
                 nominal_macro, v_pid, risk_pid = pid_nominal_dream(lstm, fused_mu, mean_t, std_t, device)
-                a_mpc, v_mpc, mpc_macro = cem_plan(lstm, fused_mu, nominal_macro, mean_t, std_t, device, mpc_rng)
+                pid_bias = float(cfg_get(mpc_cfg, "pid_bias", PID_BIAS))
+                a_mpc, v_mpc, mpc_macro = cem_plan(lstm, fused_mu, nominal_macro, mean_t, std_t,
+                                                   device, mpc_rng, pid_bias=pid_bias)
                 mpc_t = torch.tensor(mpc_macro, device=device).long().unsqueeze(0)
                 phys_mpc, _ = dream_rollout(lstm, fused_mu, mpc_t, mean_t, std_t, device)
                 risk_mpc = float(dream_risk(phys_mpc)[0].item())
                 n_mpc += 1
-                risky_pid = risk_pid > RISK_TRIGGER
-                safer_mpc = risk_mpc + RISK_MARGIN < risk_pid
-                better_mpc = v_mpc > v_pid + MPC_MARGIN
+                risk_trigger = float(cfg_get(mpc_cfg, "risk_trigger", RISK_TRIGGER))
+                risk_margin = float(cfg_get(mpc_cfg, "risk_margin", RISK_MARGIN))
+                mpc_margin = float(cfg_get(mpc_cfg, "mpc_margin", MPC_MARGIN))
+                risky_pid = risk_pid > risk_trigger
+                safer_mpc = risk_mpc + risk_margin < risk_pid
+                better_mpc = v_mpc > v_pid + mpc_margin
                 if a_mpc != a_pid and risky_pid and safer_mpc and better_mpc:
                     a = a_mpc
                     n_override += 1
@@ -479,47 +504,67 @@ def main():
     lstm.load_state_dict(torch.load(lstm_ckpt, map_location=device)); lstm.eval()
 
     env = make_env()
-    results = {c: [] for c in CONTROLLERS}
-    dist_example = {}
+    run_specs = []
     for c in CONTROLLERS:
+        if c == "guided_mpc":
+            for cfg in GUIDED_GRID:
+                label = f"guided_mpc_{cfg['label']}"
+                run_specs.append({"label": label, "controller": c, "mpc_cfg": cfg})
+        else:
+            run_specs.append({"label": c, "controller": c, "mpc_cfg": None})
+
+    results = {s["label"]: [] for s in run_specs}
+    dist_example = {}
+    for spec in run_specs:
+        label, c, mpc_cfg = spec["label"], spec["controller"], spec["mpc_cfg"]
         mpc_rng = np.random.default_rng(MPC_SEED)
-        print(f"\n{'='*56}\n  CONTROLLER: {c}\n{'='*56}")
+        print(f"\n{'='*72}\n  CONTROLLER: {label}\n{'='*72}")
+        if mpc_cfg:
+            print("  config:", "  ".join(f"{k}={v}" for k, v in mpc_cfg.items() if k != "label"))
         for ep in range(N_EPISODES):
             rec = RECORD_GIF and ep == 0
-            res = run_episode(c, env, vae, lstm, mean_t, std_t, device, SEED + ep, mpc_rng, record=rec)
-            results[c].append(res)
+            res = run_episode(c, env, vae, lstm, mean_t, std_t, device, SEED + ep,
+                              mpc_rng, record=rec, mpc_cfg=mpc_cfg)
+            results[label].append(res)
             if ep == 0:
-                dist_example[c] = res["dist"]
+                dist_example[label] = res["dist"]
                 if rec:
-                    save_gif(res["frames"], os.path.join(SAVE_DIR, f"ext4alt_{MODEL}_{c}.gif"))
+                    save_gif(res["frames"], os.path.join(SAVE_DIR, f"ext4alt_{MODEL}_{label}.gif"))
             res["frames"] = []
             extra = (f"  override={res['override_pct']:.0f}%  mpc_used={res['mpc_attempt_pct']:.0f}%"
-                     if c in ("guided_mpc",) else "")
+                     if c == "guided_mpc" else "")
             print(f"  ep{ep:02d}  return={res['return']:8.1f}  "
                   f"{'LAND' if res['landed'] else 'CRASH' if res['crashed'] else 'timeout':6}  "
                   f"fuel={res['fuel']:.1f}{extra}")
     env.close()
 
     # ---- summary ----
-    print(f"\n{'='*84}")
-    print(f"{'controller':<16}{'mean return':>13}{'success %':>11}{'crash %':>9}{'mean fuel':>11}{'MPC override %':>16}")
-    print("-" * 84)
+    print(f"\n{'='*104}")
+    print(f"{'controller':<22}{'mean return':>13}{'success %':>11}{'crash %':>9}"
+          f"{'mean fuel':>11}{'MPC override %':>16}{'MPC used %':>12}")
+    print("-" * 104)
     summary = {}
-    for c in CONTROLLERS:
-        R = np.array([r["return"] for r in results[c]])
-        succ = 100.0 * np.mean([r["landed"] for r in results[c]])
-        crash = 100.0 * np.mean([r["crashed"] for r in results[c]])
-        fuel = np.mean([r["fuel"] for r in results[c]])
-        ovr = np.mean([r["override_pct"] for r in results[c]])
-        summary[c] = (R.mean(), succ, crash, fuel, ovr)
-        ovr_s = f"{ovr:>15.0f}%" if c in ("guided_mpc",) else f"{'—':>16}"
-        print(f"{c:<16}{R.mean():>13.1f}{succ:>11.0f}{crash:>9.0f}{fuel:>11.1f}{ovr_s}")
-    print("=" * 84)
+    labels = [s["label"] for s in run_specs]
+    for spec in run_specs:
+        label, c = spec["label"], spec["controller"]
+        R = np.array([r["return"] for r in results[label]])
+        succ = 100.0 * np.mean([r["landed"] for r in results[label]])
+        crash = 100.0 * np.mean([r["crashed"] for r in results[label]])
+        fuel = np.mean([r["fuel"] for r in results[label]])
+        ovr = np.mean([r["override_pct"] for r in results[label]])
+        used = np.mean([r["mpc_attempt_pct"] for r in results[label]])
+        summary[label] = (R.mean(), succ, crash, fuel, ovr, used)
+        ovr_s = f"{ovr:>15.1f}%" if c == "guided_mpc" else f"{'—':>16}"
+        used_s = f"{used:>11.1f}%" if c == "guided_mpc" else f"{'—':>12}"
+        print(f"{label:<22}{R.mean():>13.1f}{succ:>11.0f}{crash:>9.0f}"
+              f"{fuel:>11.1f}{ovr_s}{used_s}")
+    print("=" * 104)
 
     # ---- plot 1: return distribution ----
-    plt.figure(figsize=(7.6, 4.6))
-    data = [[r["return"] for r in results[c]] for c in CONTROLLERS]
-    plt.boxplot(data, tick_labels=CONTROLLERS, showmeans=True)
+    plt.figure(figsize=(max(7.6, 1.8 * len(labels)), 4.8))
+    data = [[r["return"] for r in results[label]] for label in labels]
+    plt.boxplot(data, tick_labels=labels, showmeans=True)
+    plt.xticks(rotation=20, ha="right")
     plt.axhline(200, color="g", ls="--", lw=1, label="solved (≥200)")
     plt.axhline(0, color="0.6", lw=0.8)
     plt.ylabel("episode return")
@@ -532,10 +577,10 @@ def main():
 
     # ---- plot 2: disturbance signal (now ALSO the trust/gating signal) ----
     plt.figure(figsize=(7.6, 4.2))
-    for c in CONTROLLERS:
-        d = dist_example.get(c, [])
+    for label in labels:
+        d = dist_example.get(label, [])
         if d:
-            plt.plot(np.arange(1, len(d) + 1), d, lw=1.3, label=c)
+            plt.plot(np.arange(1, len(d) + 1), d, lw=1.3, label=label)
     plt.xlabel("t (step)"); plt.ylabel("‖encoder − model‖  (residual· trust gate)")
     plt.title(f"Disturbance / model-trust signal (model={MODEL}, wind={ENABLE_WIND})")
     plt.grid(alpha=0.3); plt.legend()
@@ -545,11 +590,15 @@ def main():
     print("saved:", p2)
 
     np.savez(os.path.join(SAVE_DIR, f"ext4alt_{MODEL}_results.npz"),
-             model=MODEL, controllers=np.array(CONTROLLERS),
-             returns=np.array([[r["return"] for r in results[c]] for c in CONTROLLERS]),
-             landed=np.array([[r["landed"] for r in results[c]] for c in CONTROLLERS]),
-             override_pct=np.array([[r["override_pct"] for r in results[c]] for c in CONTROLLERS]),
-             mpc_attempt_pct=np.array([[r["mpc_attempt_pct"] for r in results[c]] for c in CONTROLLERS]),
+             model=MODEL, controllers=np.array(labels),
+             returns=np.array([[r["return"] for r in results[label]] for label in labels]),
+             landed=np.array([[r["landed"] for r in results[label]] for label in labels]),
+             override_pct=np.array([[r["override_pct"] for r in results[label]] for label in labels]),
+             mpc_attempt_pct=np.array([[r["mpc_attempt_pct"] for r in results[label]] for label in labels]),
+             grid_mpc_margin=np.array([cfg_get(s["mpc_cfg"], "mpc_margin", np.nan) for s in run_specs]),
+             grid_risk_trigger=np.array([cfg_get(s["mpc_cfg"], "risk_trigger", np.nan) for s in run_specs]),
+             grid_risk_margin=np.array([cfg_get(s["mpc_cfg"], "risk_margin", np.nan) for s in run_specs]),
+             grid_pid_bias=np.array([cfg_get(s["mpc_cfg"], "pid_bias", np.nan) for s in run_specs]),
              wind=ENABLE_WIND)
     print(f"\nsaved figures + ext4alt_{MODEL}_results.npz -> {SAVE_DIR}")
 
