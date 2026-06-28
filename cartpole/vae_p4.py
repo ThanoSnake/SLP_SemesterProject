@@ -275,7 +275,7 @@ def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
 
     return {k: tot[k] / tot["n"] for k in _KEYS}
 
-
+"""
 #
 #  Main
 #
@@ -321,3 +321,4 @@ if __name__ == "__main__":
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_p4_last.pth"))
     print("Best val score:", best_val)
+"""
