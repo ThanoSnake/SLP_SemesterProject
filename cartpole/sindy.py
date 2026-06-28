@@ -32,6 +32,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -79,6 +80,7 @@ MODELS = [
 SEQ_LEN = 30
 TEST_STRIDE = 1
 BATCH = 128
+LOG_Y = True             # log-scale the MSE curves (errors grow fast over the horizon)
 
 # Library
 POLY_DEGREE = 2          # state monomials up to this degree (cross terms included)
@@ -380,6 +382,39 @@ def load_lstm(cfg, device):
 
 
 #
+#  Plot
+#
+def plot_lstm_vs_sindy(results, save_dir):
+    """One subplot per model (Baseline, P1): per-horizon physical MSE, LSTM vs SINDy."""
+    os.makedirs(save_dir, exist_ok=True)
+    horizons = np.arange(1, SEQ_LEN + 1)
+    labels = list(results.keys())
+    styles = {"LSTM": ("C0", "-"), "SINDy": ("C3", "--")}
+
+    fig, axes = plt.subplots(1, len(labels), figsize=(6.0 * len(labels), 4.6), squeeze=False)
+    for j, label in enumerate(labels):
+        ax = axes[0][j]
+        for method in ("LSTM", "SINDy"):
+            mse_h = results[label][method]
+            color, ls = styles[method]
+            ax.plot(horizons, mse_h, color=color, ls=ls, lw=2,
+                    label=f"{method} (mean={mse_h.mean():.4f})")
+        if LOG_Y:
+            ax.set_yscale("log")
+        ax.set_title(f"{label}: LSTM vs SINDy")
+        ax.set_xlabel("Prediction horizon")
+        ax.set_ylabel("State MSE (physical units)")
+        ax.set_xlim(1, SEQ_LEN)
+        ax.grid(alpha=0.3, which="both")
+        ax.legend()
+    plt.tight_layout()
+    path = os.path.join(save_dir, "lstm_vs_sindy.png")
+    plt.savefig(path, dpi=150)
+    plt.show()
+    print("saved figure ->", path)
+
+
+#
 #  Main
 #
 if __name__ == "__main__":
@@ -424,3 +459,5 @@ if __name__ == "__main__":
             mse_h = by_method[method]
             row = f"{label:<14}{method:<8}" + "".join(f"{mse_h[h-1]:>11.4f}" for h in HS)
             print(row + f"{mse_h.mean():>11.4f}")
+
+    plot_lstm_vs_sindy(results, SAVE_DIR)
