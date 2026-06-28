@@ -274,18 +274,13 @@ class HybridPredictor(nn.Module):
         # SINDy Xi is frozen
         self.register_buffer("Xi", Xi if torch.is_tensor(Xi) else torch.as_tensor(Xi))
         
-        # Residual LSTM parameters
-        self.hidden, self.layers = hidden, layers
-        self.lstm = nn.LSTM(latent + action_dim, hidden, layers, batch_first=True)
-        self.fc = nn.Linear(hidden, latent)
-        nn.init.zeros_(self.fc.weight)   # zero-init -> residual correction starts at zero
-        nn.init.zeros_(self.fc.bias)
+        # Embed the exact same LatentPredictor class from lstm.py
+        self.lstm_model = LatentPredictor(latent, action_dim, hidden, layers)
         
         self.reset_tracking()
 
     def init_hidden(self, b, device):
-        return (torch.zeros(self.layers, b, self.hidden, device=device),
-                torch.zeros(self.layers, b, self.hidden, device=device))
+        return self.lstm_model.init_hidden(b, device)
 
     def reset_tracking(self):
         self._last_corrs = []
@@ -297,10 +292,9 @@ class HybridPredictor(nn.Module):
         return corrs, sindys
 
     def step(self, z, a_onehot, hidden):
-        # 1. Residual LSTM correction
-        inp = torch.cat([z, a_onehot], dim=-1).unsqueeze(1)
-        out_lstm, hidden = self.lstm(inp, hidden)
-        corr = self.fc(out_lstm.squeeze(1))
+        # 1. Residual LSTM correction from the standard LatentPredictor
+        z_lstm_next, hidden = self.lstm_model.step(z, a_onehot, hidden)
+        corr = z_lstm_next - z
         if self.corr_bound is not None:
             corr = self.corr_bound * torch.tanh(corr)
             
@@ -478,92 +472,8 @@ def load_lstm(cfg, device):
     return model
 
 
-def hybrid_rollout(model, batch, p_tf, n_actions, free_running=False, max_len=None):
-    """Rollout with teacher-forcing or free-running.
-    Returns:
-      preds: predicted latents, shape (B, L, D)
-      z_gt: ground-truth target latents, shape (B, L, D)
-      state_tp1: ground-truth physical states, shape (B, L, n_sup)
-    """
-    z_t, action, z_tp1, state_t, state_tp1 = batch
-    L = z_t.shape[1] if max_len is None else min(max_len, z_t.shape[1])
-    B, _, D = z_t.shape
-    device = z_t.device
-
-    z_seed = z_t[:, 0]
-    z_gt = z_tp1[:, :L]
-
-    hidden = model.init_hidden(B, device)
-    z_in = z_seed
-    preds = []
-    for k in range(L):
-        a = F.one_hot(action[:, k].long(), n_actions).float()
-        z_pred, hidden = model.step(z_in, a, hidden)
-        preds.append(z_pred)
-        if k < L - 1:
-            if free_running:
-                z_in = z_pred.detach()
-            else:
-                use_tf = (torch.rand(B, 1, device=device) < p_tf).float()
-                z_in = use_tf * z_gt[:, k] + (1.0 - use_tf) * z_pred.detach()
-    return torch.stack(preds, dim=1), z_gt, state_tp1[:, :L]
-
-
-def train_hybrid_epoch(model, loader, optimizer, device, p_tf, cur_len, w_phys=1.0, desc=""):
-    model.train()
-    tot, n = 0.0, 0
-    pbar = tqdm(loader, desc=desc, leave=False)
-    for batch in pbar:
-        batch = [b.to(device, non_blocking=True) for b in batch]
-        model.reset_tracking()
-        preds, z_gt, _ = hybrid_rollout(model, batch, p_tf, N_ACTIONS,
-                                         free_running=False, max_len=cur_len)
-        loss = (F.mse_loss(preds, z_gt, reduction="mean")
-                + w_phys * F.mse_loss(preds[..., :model.n_sup], z_gt[..., :model.n_sup], reduction="mean"))
-
-        optimizer.zero_grad()
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), CLIP)
-        optimizer.step()
-
-        bs = preds.size(0)
-        tot += loss.item() * bs
-        n += bs
-        pbar.set_postfix(loss=f"{tot/n:.5f}", p_tf=f"{p_tf:.2f}", H=cur_len)
-    return tot / n
-
-
-@torch.no_grad()
-def eval_hybrid_val(model, loader, device, std4):
-    """Free-running rollout on validation set -> mean physical MSE."""
-    model.eval()
-    se, n = None, 0
-    for batch in loader:
-        batch = [b.to(device, non_blocking=True) for b in batch]
-        preds, state_tp1 = free_run(model, batch, N_ACTIONS, model.n_sup)
-        err = (preds[..., :model.n_sup] - state_tp1) * std4
-        s = (err ** 2).sum(dim=0)
-        se = s if se is None else se + s
-        n += preds.size(0)
-    return (se / n).mean().item()
-
-
-def train_hybrid(cfg, library, Xi, device, mean, std, std4):
-    """Train the HybridPredictor (frozen SINDy + trainable residual LSTM) on precomputed latents."""
-    train_ds = LatentSequenceDataset(os.path.join(cfg["latent_root"], "train"),
-                                     seq_len=SEQ_LEN, stride=TRAIN_STRIDE,
-                                     state_mean=mean, state_std=std)
-    val_ds = LatentSequenceDataset(os.path.join(cfg["latent_root"], "val"),
-                                   seq_len=SEQ_LEN, stride=TRAIN_STRIDE,
-                                   state_mean=mean, state_std=std)
-    pw = NUM_WORKERS > 0
-    train_dl = DataLoader(train_ds, batch_size=TRAIN_BATCH, shuffle=True, drop_last=True,
-                          num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
-    val_dl = DataLoader(val_ds, batch_size=TRAIN_BATCH, shuffle=False,
-                        num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
-    
-    print(f"\nTraining Hybrid for {cfg['label']} | train windows: {len(train_ds)} | val windows: {len(val_ds)}")
-    
+def load_hybrid(cfg, library, Xi, device):
+    """Load the HybridPredictor by initializing SINDy and loading LSTM weights from cfg['lstm_ckpt']."""
     model = HybridPredictor(
         library=library,
         Xi=Xi,
@@ -575,56 +485,12 @@ def train_hybrid(cfg, library, Xi, device, mean, std, std4):
         control_mode=CONTROL_MODE,
         corr_bound=CORR_BOUND
     ).to(device)
-
     
-    optimizer = optim.Adam(model.parameters(), lr=LR)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=SCHED_PATIENCE)
-    
-    best_val_loss = float("inf")
-    bad_epochs = 0
-    slug = cfg["label"].lower().replace(" ", "_")
-    best_ckpt_path = os.path.join(SAVE_DIR, f"hybrid_{slug}_best.pth")
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    
-    for epoch in range(1, EPOCHS + 1):
-        p_tf = max(P_END, P_START - (P_START - P_END) * (epoch - 1) / max(P_DECAY_EPOCHS, 1))
-        cur_len = int(round(min(SEQ_LEN, L_START + (SEQ_LEN - L_START) * (epoch - 1) / max(CURRICULUM_EPOCHS, 1))))
-        
-        tr_loss = train_hybrid_epoch(
-            model=model,
-            loader=train_dl,
-            optimizer=optimizer,
-            device=device,
-            p_tf=p_tf,
-            cur_len=cur_len,
-            w_phys=W_PHYS,
-            desc=f"E{epoch:03d} train"
-        )
-        
-        val_loss = eval_hybrid_val(model, val_dl, device, std4)
-        scheduler.step(val_loss)
-        lr_now = optimizer.param_groups[0]["lr"]
-        
-        print(f"E{epoch:03d} | p_tf={p_tf:.2f} H_train={cur_len} lr={lr_now:.1e} | "
-              f"train={tr_loss:.5f} | val phys-MSE={val_loss:.4f}")
-        
-        if val_loss < best_val_loss - 1e-6:
-            best_val_loss = val_loss
-            bad_epochs = 0
-            torch.save(model.state_dict(), best_ckpt_path)
-            print("  -> best model saved")
-        else:
-            bad_epochs += 1
-            if bad_epochs >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping at epoch {epoch}.")
-                break
-                
-    # Load the best weights before returning
-    if os.path.exists(best_ckpt_path):
-        model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
-        print(f"Loaded best hybrid model checkpoint from {best_ckpt_path}")
-        
+    # Load the pretrained LSTM weights into the embedded lstm_model
+    model.lstm_model.load_state_dict(torch.load(cfg["lstm_ckpt"], map_location=device))
+    model.eval()
     return model
+
 
 
 @torch.no_grad()
@@ -733,7 +599,8 @@ if __name__ == "__main__":
         test_dl = make_test_loader(cfg, mean, std)
         sindy_model, Xi = fit_sindy(cfg, library, ctrl_names, device)
         lstm_model = load_lstm(cfg, device)
-        hybrid_model = train_hybrid(cfg, library, Xi, device, mean, std, std4)
+        hybrid_model = load_hybrid(cfg, library, Xi, device)
+
 
         
         # Compute test MSE
