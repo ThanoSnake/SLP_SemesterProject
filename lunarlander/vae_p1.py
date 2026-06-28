@@ -238,7 +238,7 @@ def physical_rmse(model, loader, device, std_phys):
         n += st.size(0)
     return torch.sqrt(se / n).cpu().numpy()
 
-
+'''
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -308,3 +308,4 @@ if __name__ == "__main__":
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_p1_last.pth"))
     print("Best val score:", best_val)
+    '''
