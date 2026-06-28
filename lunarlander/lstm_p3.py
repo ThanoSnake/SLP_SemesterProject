@@ -162,7 +162,7 @@ def build_vae(device):
     vae.load_state_dict(torch.load(VAE_CKPT, map_location=device)); vae.eval()
     return vae
 
-
+'''
 if __name__ == "__main__":
     set_seed(SEED)
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -225,3 +225,4 @@ if __name__ == "__main__":
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "lstm_last.pth"))
     print("Best val phys-MSE:", best)
+    '''
