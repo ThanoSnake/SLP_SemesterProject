@@ -32,7 +32,7 @@ from loader import LatentSequenceDataset, load_norm_stats, list_npz
 # ---------------------------------------------------------------------------
 DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/test_p3_out"
+SAVE_DIR = "/kaggle/working/cartpole_p3_out"
 
 SHIFT = 0
 LATENT_SIZE, N_SUP, N_IMG = 64, 4, 60
@@ -67,17 +67,17 @@ MODELS = [
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
      "vae_ckpt": "<cartpole-baseline-vae>",
      "lstm_ckpt": "<cartpole-baseline-lstm>",
-     "latent_root": "/kaggle/working/test_p3_latents/baseline"},
+     "latent_root": "/kaggle/working/cartpole_p3_latents/baseline"},
     {"label": "P3 semi", "color": "C1",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
      "vae_ckpt": "<cartpole-p3-semi-vae>",
      "lstm_ckpt": "<cartpole-p3-semi-lstm>",
-     "latent_root": "/kaggle/working/test_p3_latents/p3_semi"},
+     "latent_root": "/kaggle/working/cartpole_p3_latents/p3_semi"},
     {"label": "P3 weak", "color": "C3",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
      "vae_ckpt": "<cartpole-p3-weak-vae>",
      "lstm_ckpt": "<cartpole-p3-weak-lstm>",
-     "latent_root": "/kaggle/working/test_p3_latents/p3_weak"},
+     "latent_root": "/kaggle/working/cartpole_p3_latents/p3_weak"},
 ]
 
 
