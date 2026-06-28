@@ -38,57 +38,59 @@ from tqdm.auto import tqdm
 
 from loader import VaePairDataset, load_norm_stats
 
-# ---------------------------------------------------------------------------
-# CONFIG  (ΙΔΙΑ paths/hyper με baseline -> τίμια σύγκριση)
-# ---------------------------------------------------------------------------
+#
+#  Config  (same paths/hyper as baseline -> fair comparison)
+#
 DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
 
 LATENT_SIZE = 64
-N_SUP = 4                  # [x, x_dot, theta, theta_dot]
-SHIFT = 0                  # 0=clean· 2/5/10 -> noisy (weak supervision στις θέσεις)
+N_SUP = 4    # [x, x_dot, theta, theta_dot]
+SHIFT = 0    # 0=clean, 2/5/10=noisy (weak supervision on the positions)
 
-# --- ΑΡΧΗ 3: ρύθμιση εποπτείας ---
-SUPERVISION = "weak"       # "semi" (μόνο static) | "weak" (+ εκτιμώμενη ταχύτητα)
+# Principle 3: supervision setting
+SUPERVISION = "weak"       # "semi" (static only) | "weak" (+ estimated velocity)
 SAVE_DIR = f"/kaggle/working/cartpole_p3_{SUPERVISION}_vae"
 STATIC_DIMS = (0, 2)       # x, theta
 VEL_DIMS = (1, 3)          # x_dot, theta_dot
-DT = 0.02                  # gym CartPole tau -> για την εκτίμηση ταχύτητας
+DT = 0.02                  # gym CartPole tau -> used for the velocity estimate
 
 BATCH = 128
 EPOCHS = 40
 LR = 1e-3
 
-# --- SPLIT-β KL (ΤΑΥΤΟΣΗΜΟ με baseline) ---
-BETA_PHYS = 0.01           # σταθερό, ΜΙΚΡΟ: ελάχιστη πίεση στις φυσικές dims
-BETA_STYLE_MAX = 1.0       # τελικό βάρος KL στις style dims
-KL_ANNEAL_EPOCHS = 20      # beta_style: 0 -> BETA_STYLE_MAX
+# Split-beta KL (identical to baseline)
+BETA_PHYS = 0.01
+BETA_STYLE_MAX = 1.0
+KL_ANNEAL_EPOCHS = 20
 
-LAMBDA_SUP = 1.0           # per-element mean -> O(1) knob
+LAMBDA_SUP = 1.0   # per-element mean keeps this an O(1) knob
 
 EARLY_STOP_PATIENCE = 5
-SCHED_PATIENCE = 3         # < EARLY_STOP -> προλαβαίνει να πέσει το LR πρώτα
+SCHED_PATIENCE = 3  # below early-stop so the LR drops before we give up
 
 NUM_WORKERS = 2
 SEED = 0
 
 
 def set_seed(s):
-    np.random.seed(s); torch.manual_seed(s); torch.cuda.manual_seed_all(s)
+    np.random.seed(s)
+    torch.manual_seed(s)
+    torch.cuda.manual_seed_all(s)
 
 
 def _to_img(t, device):
-    """ uint8 (B,3,H,W) -> float [0,1] στη GPU (η μεταφορά γίνεται σε uint8). """
+    # Move as uint8 (cheaper transfer), then convert to float [0,1] on device
     return t.to(device, non_blocking=True).float().div_(255.0)
 
 
-# ---------------------------------------------------------------------------
-# Model — ΑΚΡΙΒΩΣ το baseline VAE (single monolithic encoder)· αλλάζει ΜΟΝΟ το sup target.
-# ---------------------------------------------------------------------------
+#
+#  Model — exactly the baseline VAE (single monolithic encoder); only the sup target changes.
+#
 class VAE(nn.Module):
-    """ Είσοδος (B,6,80,120)=stack(frame_t,frame_t+1)· ανακατασκευή (B,3,80,120)=frame_t. """
+    """Input (B,6,80,120)=stack(frame_t,frame_t+1). Reconstructs frame_t (B,3,80,120)."""
 
     def __init__(self, latent_size=64, in_channels=6, out_channels=3):
         super().__init__()
@@ -128,7 +130,7 @@ class VAE(nn.Module):
 
 
 def encode_fn(model, device):
-    """ Callable για loader.precompute_latents — δέχεται float [0,1] εικόνες. """
+    """Callable for loader.precompute_latents. Expects float [0,1] images."""
     @torch.no_grad()
     def _fn(img_t, img_tp1):
         model.eval()
@@ -138,11 +140,11 @@ def encode_fn(model, device):
     return _fn
 
 
-# ---------------------------------------------------------------------------
-# ΑΡΧΗ 3 — στόχος & μάσκα εποπτείας ανάλογα με SUPERVISION
-# ---------------------------------------------------------------------------
+#
+#  Principle 3 — supervision target & mask depending on SUPERVISION
+#
 def _sup_mask(device):
-    """ Ποιες state dims εποπτεύονται: semi -> static· weak -> static + velocity. """
+    """Which state dims are supervised: semi -> static; weak -> static + velocity."""
     m = torch.zeros(N_SUP, device=device)
     for d in STATIC_DIMS:
         m[d] = 1.0
@@ -153,12 +155,12 @@ def _sup_mask(device):
 
 
 def _sup_target(state_t, state_tp1, mean_t, std_t):
-    """ Στόχος (standardized) για τις φυσικές dims:
-        static = ΑΛΗΘΙΝΟ state_t· velocity (μόνο weak) = ΕΚΤΙΜΗΣΗ finite-diff.
-    Το finite diff γίνεται σε RAW μονάδες και ξανα-standardize-άρεται στη velocity-dim:
-        Δx_raw = (x_{t+1}-x_t)_std * std[x]      (το mean ακυρώνεται στη διαφορά)
+    """Target (standardized) for the physical dims:
+        static = TRUE state_t; velocity (weak only) = finite-diff ESTIMATE.
+    The finite diff is computed in RAW units and re-standardized to the velocity-dim:
+        Δx_raw = (x_{t+1}-x_t)_std * std[x]      (the mean cancels in the difference)
         ẋ_est_raw = Δx_raw / dt
-        ẋ_est_std = (ẋ_est_raw - mean[ẋ]) / std[ẋ] """
+        ẋ_est_std = (ẋ_est_raw - mean[ẋ]) / std[ẋ]"""
     target = state_t.clone()
     if SUPERVISION == "weak":
         dx_raw = (state_tp1[:, 0] - state_t[:, 0]) * std_t[0]
@@ -168,26 +170,26 @@ def _sup_target(state_t, state_tp1, mean_t, std_t):
     return target
 
 
-# ---------------------------------------------------------------------------
-# Loss — per-element means· SPLIT-β KL (phys vs style)· masked supervision (Αρχή 3)
-# ---------------------------------------------------------------------------
+#
+#  Loss — per-element means; split-beta KL (phys vs style); masked supervision (Principle 3)
+#
 def vae_losses(recon, img_target, mu, logvar, sup_target, sup_mask, n_sup):
     B, D = mu.size(0), mu.size(1)
-    recon_l = F.mse_loss(recon, img_target, reduction="mean")           # ανά pixel
+    recon_l = F.mse_loss(recon, img_target, reduction="mean")           # per pixel
 
-    # Masked supervision: mean ΜΟΝΟ πάνω στις εποπτευόμενες dims (full -> /4 == baseline)
+    # Masked supervision: mean over the supervised dims ONLY (full -> /4 == baseline)
     diff = (mu[:, :n_sup] - sup_target) * sup_mask
     sup = (diff ** 2).sum() / (B * sup_mask.sum())
 
-    kl_per = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())             # (B, D) ανά διάσταση
+    kl_per = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())             # (B, D) per dimension
     kld_phys = kl_per[:, :n_sup].sum() / B / n_sup
     kld_style = kl_per[:, n_sup:].sum() / B / (D - n_sup)
     return recon_l, kld_phys, kld_style, sup
 
 
-# ---------------------------------------------------------------------------
-# Train / Eval
-# ---------------------------------------------------------------------------
+#
+#  Train / Eval
+#
 def run_epoch(model, loader, device, beta_style, mean_t, std_t, optimizer=None, desc=""):
     train = optimizer is not None
     model.train() if train else model.eval()
@@ -196,10 +198,10 @@ def run_epoch(model, loader, device, beta_style, mean_t, std_t, optimizer=None, 
 
     pbar = tqdm(loader, desc=desc, leave=False)
     for img_t, img_tp1, action, state_t, state_tp1 in pbar:
-        img_t = _to_img(img_t, device)                       # uint8 -> float/255 ΣΤΗ GPU
+        img_t = _to_img(img_t, device)        # uint8 -> float/255 on device
         img_tp1 = _to_img(img_tp1, device)
-        x = torch.cat([img_t, img_tp1], dim=1)               # (B,6,H,W)
-        img_target = img_t                                   # ανακατασκευή του frame_t
+        x = torch.cat([img_t, img_tp1], dim=1)  # (B,6,H,W)
+        img_target = img_t                      # reconstruct frame_t
         st = state_t.to(device, non_blocking=True)
         stp = state_tp1.to(device, non_blocking=True)
         sup_target = _sup_target(st, stp, mean_t, std_t)
@@ -231,8 +233,8 @@ def run_epoch(model, loader, device, beta_style, mean_t, std_t, optimizer=None, 
 
 @torch.no_grad()
 def physical_rmse(model, loader, device, std4):
-    """ RMSE των 4 dims σε ΦΥΣΙΚΕΣ μονάδες vs ΑΛΗΘΙΝΟ state (διαγνωστικό): δείχνει το
-    velocity error ακόμη και στο semi/weak -> γιατί βοηθάει η εκτιμώμενη εποπτεία. """
+    """RMSE of all 4 dims in PHYSICAL units vs TRUE state (diagnostic): shows the
+    velocity error even under semi/weak -> why the estimated supervision helps."""
     model.eval()
     se = torch.zeros(N_SUP, device=device)
     n = 0
@@ -245,16 +247,16 @@ def physical_rmse(model, loader, device, std4):
     return torch.sqrt(se / n).cpu().numpy()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+#
+#  Main
+#
 if __name__ == "__main__":
-    assert SUPERVISION in ("semi", "weak"), "SUPERVISION ∈ {'semi','weak'} (full == baseline)"
+    assert SUPERVISION in ("semi", "weak"), "SUPERVISION in {'semi','weak'} (full == baseline)"
     set_seed(SEED)
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("device:", device, " | supervision:", SUPERVISION,
-          "  (αν 'cpu' -> ενεργοποίησε GPU στην Kaggle!)")
+          "  (if 'cpu' -> enable GPU on Kaggle!)")
 
     mean, std = load_norm_stats(NORM_STATS)
     std4 = torch.tensor(std[:N_SUP], device=device)
@@ -306,7 +308,7 @@ if __name__ == "__main__":
             bad_epochs += 1
             print(f"  (no improvement: {bad_epochs}/{EARLY_STOP_PATIENCE})")
             if bad_epochs >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}.")
+                print(f"Early stopping at epoch {epoch}.")
                 break
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_last.pth"))

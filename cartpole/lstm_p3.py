@@ -24,9 +24,9 @@ from tqdm.auto import tqdm
 from vae_p3 import VAE, encode_fn
 from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
+#
+#  Config
+#
 SUPERVISION = "weak"
 DATA_ROOT = "<cartpole-dataset>"
 LATENT_ROOT = f"/kaggle/working/cartpole_p3_{SUPERVISION}_latents"
@@ -41,7 +41,7 @@ LATENT_SIZE = 64
 N_SUP = 4
 N_IMG = LATENT_SIZE - N_SUP
 N_ACTIONS = 2
-SHIFT = 0
+SHIFT = 0   # encoded mode does NOT use x (the latent is already weak-sup)
 
 # Principle 3 supervision regime (controls W_PHYS emphasis dims in loss)
 STATIC_DIMS = (0, 2)       # x, theta
@@ -77,19 +77,22 @@ DO_PRECOMPUTE = True
 
 
 def set_seed(s):
-    np.random.seed(s); torch.manual_seed(s); torch.cuda.manual_seed_all(s)
+    np.random.seed(s)
+    torch.manual_seed(s)
+    torch.cuda.manual_seed_all(s)
 
 
-# ---------------------------------------------------------------------------
-# Model — residual latent predictor
-# ---------------------------------------------------------------------------
+#
+#  Model — residual latent predictor
+#
 class LatentPredictor(nn.Module):
     def __init__(self, latent=64, action_dim=2, hidden=64, layers=2):
         super().__init__()
         self.hidden, self.layers = hidden, layers
         self.lstm = nn.LSTM(latent + action_dim, hidden, layers, batch_first=True)
         self.fc = nn.Linear(hidden, latent)
-        nn.init.zeros_(self.fc.weight); nn.init.zeros_(self.fc.bias)
+        nn.init.zeros_(self.fc.weight)   # zero-init -> network starts as identity (residual)
+        nn.init.zeros_(self.fc.bias)
 
     def init_hidden(self, b, device):
         return (torch.zeros(self.layers, b, self.hidden, device=device),
@@ -98,12 +101,12 @@ class LatentPredictor(nn.Module):
     def step(self, z, a_onehot, hidden):
         inp = torch.cat([z, a_onehot], dim=-1).unsqueeze(1)
         out, hidden = self.lstm(inp, hidden)
-        return z + self.fc(out.squeeze(1)), hidden
+        return z + self.fc(out.squeeze(1)), hidden   # residual: predict the delta from z
 
 
-# ---------------------------------------------------------------------------
-# Rollout — ENCODED mode: NO hybrid-gt injection, NO velocity estimation
-# ---------------------------------------------------------------------------
+#
+#  Rollout — ENCODED mode: NO hybrid-gt injection, NO velocity estimation
+#
 def rollout(model, batch, p_tf, n_actions, free_running=False, max_len=None):
     """Rollout without _hybrid: seed & teacher-forcing targets = pure VAE latents."""
     z_t, action, z_tp1, state_t, state_tp1 = batch
@@ -127,14 +130,15 @@ def rollout(model, batch, p_tf, n_actions, free_running=False, max_len=None):
             if free_running:
                 z_in = z_pred.detach()
             else:
+                # Per-sample coin flip: feed the truth with prob p_tf, else own prediction
                 use_tf = (torch.rand(B, 1, device=device) < p_tf).float()
                 z_in = use_tf * z_gt[:, k] + (1.0 - use_tf) * z_pred.detach()
     return torch.stack(preds, dim=1), z_gt, state_tp1
 
 
-# ---------------------------------------------------------------------------
-# Train / Eval
-# ---------------------------------------------------------------------------
+#
+#  Train / Eval
+#
 def train_epoch(model, loader, optimizer, device, p_tf, cur_len, desc=""):
     model.train()
     tot, n = 0.0, 0
@@ -142,7 +146,7 @@ def train_epoch(model, loader, optimizer, device, p_tf, cur_len, desc=""):
     for batch in pbar:
         batch = [b.to(device, non_blocking=True) for b in batch]
         preds, z_gt, _ = rollout(model, batch, p_tf, N_ACTIONS,
-                                  free_running=False, max_len=cur_len)
+                                 free_running=False, max_len=cur_len)
         # W_PHYS emphasis on supervised dims (same regime as hybrid version)
         loss = (F.mse_loss(preds, z_gt, reduction="mean")
                 + W_PHYS * F.mse_loss(preds[..., SUP_DIMS], z_gt[..., SUP_DIMS], reduction="mean"))
@@ -153,7 +157,8 @@ def train_epoch(model, loader, optimizer, device, p_tf, cur_len, desc=""):
         optimizer.step()
 
         bs = preds.size(0)
-        tot += loss.item() * bs; n += bs
+        tot += loss.item() * bs
+        n += bs
         pbar.set_postfix(loss=f"{tot/n:.5f}", p_tf=f"{p_tf:.2f}", H=cur_len)
     return tot / n
 
@@ -166,7 +171,7 @@ def eval_epoch(model, loader, device, std4, desc=""):
     for batch in tqdm(loader, desc=desc, leave=False):
         batch = [b.to(device, non_blocking=True) for b in batch]
         preds, _, state_tp1 = rollout(model, batch, 0.0, N_ACTIONS,
-                                       free_running=True, max_len=None)
+                                      free_running=True, max_len=None)
         err = (preds[..., :N_SUP] - state_tp1) * std4
         s = (err ** 2).sum(dim=0)
         se = s if se is None else se + s
@@ -174,11 +179,11 @@ def eval_epoch(model, loader, device, std4, desc=""):
     return (se / n).mean(dim=1).cpu().numpy()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+#
+#  Main
+#
 if __name__ == "__main__":
-    assert SUPERVISION in ("semi", "weak"), "SUPERVISION ∈ {'semi','weak'} (full == baseline)"
+    assert SUPERVISION in ("semi", "weak"), "SUPERVISION in {'semi','weak'} (full == baseline)"
     set_seed(SEED)
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -216,7 +221,7 @@ if __name__ == "__main__":
     model = LatentPredictor(LATENT_SIZE, N_ACTIONS, HIDDEN, LAYERS).to(device)
     optimizer = optim.Adam(model.parameters(), lr=LR)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5,
-                                                      patience=SCHED_PATIENCE)
+                                                     patience=SCHED_PATIENCE)
 
     best, bad = float("inf"), 0
     for epoch in range(1, EPOCHS + 1):

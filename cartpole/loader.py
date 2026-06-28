@@ -23,9 +23,9 @@ import torch.utils.data
 from tqdm.auto import tqdm
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+#
+#  Helpers
+#
 def list_npz(root):
     files = []
     for sd in sorted(listdir(root)):
@@ -46,13 +46,13 @@ def _standardize(s, mean, std):
     return s if mean is None else ((s - mean) / std).astype(np.float32)
 
 
-# ---------------------------------------------------------------------------
-# Κοινή βάση: EAGER load όλων των επεισοδίων στη RAM + flat index
-# ---------------------------------------------------------------------------
+#
+#  Shared base: eager-load every episode into RAM + build a flat index
+#
 class _BaseRollout(torch.utils.data.Dataset):
     def __init__(self, root, window, stride=1, shift=0,
                  state_mean=None, state_std=None, cache_size=None):
-        # cache_size: αγνοείται (κρατιέται για συμβατότητα με παλιές κλήσεις)
+        # cache_size is ignored (kept only for backward-compatible call sites)
         self.window = window
         self.shift = shift
         self.mean = None if state_mean is None else np.asarray(state_mean, np.float32)
@@ -60,43 +60,43 @@ class _BaseRollout(torch.utils.data.Dataset):
 
         files = list_npz(root)
         if not files:
-            raise RuntimeError(f"Κανένα .npz στο: {root}")
+            raise RuntimeError(f"No .npz files in: {root}")
 
         self.eps, self.index, angles = [], [], []
         tag = basename(root.rstrip("/")) or root
         for fi, f in enumerate(tqdm(files, desc=f"loading '{tag}' -> RAM")):
             with np.load(f) as d:
                 ep = {
-                    "imgs": d["imgs"],                                  # uint8 (T,H,W,3) — μένει uint8
-                    "acts": d["acts"].astype(np.float32),               # (T,)
-                    "states": d["states"].astype(np.float32),           # (T,4) clean
+                    "imgs": d["imgs"],                        # uint8 (T,H,W,3), kept as uint8
+                    "acts": d["acts"].astype(np.float32),     # (T,)
+                    "states": d["states"].astype(np.float32), # (T,4) clean
                     "x": (d[f"noisy_states_{shift}"] if shift in (2, 5, 10)
-                          else d["states"]).astype(np.float32),         # (T,4) input
+                          else d["states"]).astype(np.float32),  # (T,4) input (noisy if shift)
                 }
             self.eps.append(ep)
             T = ep["states"].shape[0]
             for s in range(0, max(T - window + 1, 0), stride):
                 self.index.append((fi, s))
-                angles.append(ep["states"][s, 2])
+                angles.append(ep["states"][s, 2])   # pole angle, for optional rebalancing
         self.angles = np.asarray(angles, np.float32)
 
     def __len__(self):
         return len(self.index)
 
 
-# ---------------------------------------------------------------------------
-# VAE: 1 δείγμα = ζεύγος (t, t+1)
-# ---------------------------------------------------------------------------
+#
+#  VAE dataset: one sample = pair (t, t+1)
+#
 class VaePairDataset(_BaseRollout):
-    """ Επιστρέφει: img_t, img_tp1 (3,H,W), action_t, state_t (4), state_tp1 (4). """
+    """Returns: img_t, img_tp1 (3,H,W), action_t, state_t (4), state_tp1 (4)."""
     def __init__(self, root, **kw):
         super().__init__(root, window=2, **kw)
 
     def __getitem__(self, i):
         fi, t = self.index[i]
         ep = self.eps[fi]
-        # Επιστρέφουμε uint8 (C,H,W)· το .float()/255 γίνεται στη GPU (run_epoch),
-        # ώστε να μη φορτώνεται η CPU και να μεταφέρονται 4× λιγότερα bytes στο PCIe.
+        # Return uint8 (C,H,W); .float()/255 happens on the GPU in run_epoch, so the
+        # CPU stays idle and 4x fewer bytes cross the PCIe bus.
         img_t = torch.from_numpy(ep["imgs"][t]).permute(2, 0, 1)        # uint8
         img_tp1 = torch.from_numpy(ep["imgs"][t + 1]).permute(2, 0, 1)  # uint8
         action = torch.tensor(ep["acts"][t])
@@ -105,13 +105,13 @@ class VaePairDataset(_BaseRollout):
         return img_t, img_tp1, action, state_t, state_tp1
 
 
-# ---------------------------------------------------------------------------
-# LSTM (image-based εναλλακτική): παράθυρο seq_len ζευγών
-# ---------------------------------------------------------------------------
+#
+#  LSTM (image-based alternative): window of seq_len pairs
+#
 class SequenceDataset(_BaseRollout):
-    """ seq_len διαδοχικά ζεύγη (t,t+1). Για 30 βήματα -> seq_len=31.
-    Επιστρέφει: img_t (L,3,H,W), img_tp1 (L,3,H,W), actions (L,), states (L,4),
-                states_clean (L,4).  Ανακάτεψε τα ΠΑΡΑΘΥΡΑ (shuffle=True), όχι μέσα τους. """
+    """seq_len consecutive (t, t+1) pairs. For 30 steps use seq_len=31.
+    Returns: img_t (L,3,H,W), img_tp1 (L,3,H,W), actions (L,), states (L,4),
+             states_clean (L,4). Shuffle the WINDOWS (shuffle=True), not within them."""
     def __init__(self, root, seq_len=31, stride=1, **kw):
         self.seq_len = seq_len
         super().__init__(root, window=seq_len + 1, stride=stride, **kw)
@@ -130,12 +130,12 @@ class SequenceDataset(_BaseRollout):
         return img_t, img_tp1, actions, states, states_clean
 
 
-# ---------------------------------------------------------------------------
-# Pre-encoding: τρέξε τον (παγωμένο) VAE μία φορά -> z-ακολουθίες
-# ---------------------------------------------------------------------------
+#
+#  Pre-encoding: run the (frozen) VAE once -> z sequences
+#
 @torch.no_grad()
 def precompute_latents(encode_fn, root, out_root, shift=0, batch=256, device="cuda"):
-    """ encode_fn(img_t, img_tp1) -> z. Ανά επεισόδιο σώζει .npz με z,acts,states,x (N=T-1). """
+    """encode_fn(img_t, img_tp1) -> z. Saves one .npz per episode with z,acts,states,x (N=T-1)."""
     makedirs(out_root, exist_ok=True)
     for f in tqdm(list_npz(root), desc="encoding"):
         with np.load(f) as d:
@@ -155,14 +155,14 @@ def precompute_latents(encode_fn, root, out_root, shift=0, batch=256, device="cu
                             z=z, acts=acts[:-1], states=states[:-1], x=x[:-1])
 
 
-# ---------------------------------------------------------------------------
-# LSTM (συνιστώμενο): παράθυρα latents (ήδη all-in-RAM)
-# ---------------------------------------------------------------------------
+#
+#  LSTM (recommended): windows of latents (already all-in-RAM)
+#
 class LatentSequenceDataset(torch.utils.data.Dataset):
-    """ seq_len ΜΕΤΑΒΑΣΕΙΣ latents. Για 30 βήματα -> seq_len=30.
-    Επιστρέφει: z_t (L,latent), action (L,), z_tp1 (L,latent), state_t (L,4), state_tp1 (L,4).
-      - state_t   : input state στο t  (x -> noisy αν shift), standardized
-      - state_tp1 : CLEAN state στο t+1, standardized (στόχος για physical MSE / hybrid gt) """
+    """seq_len latent TRANSITIONS. For 30 steps use seq_len=30.
+    Returns: z_t (L,latent), action (L,), z_tp1 (L,latent), state_t (L,4), state_tp1 (L,4).
+      - state_t   : input state at t  (x -> noisy if shift), standardized
+      - state_tp1 : CLEAN state at t+1, standardized (target for physical MSE / hybrid gt)"""
     def __init__(self, root, seq_len=30, stride=1, state_mean=None, state_std=None):
         self.seq_len = seq_len
         self.mean = None if state_mean is None else np.asarray(state_mean, np.float32)
@@ -177,7 +177,7 @@ class LatentSequenceDataset(torch.utils.data.Dataset):
             for s in range(0, max(n, 0), stride):
                 self.index.append((fi, s))
         if not self.index:
-            raise RuntimeError(f"Δεν βγήκαν παράθυρα από: {root} (seq_len πολύ μεγάλο;)")
+            raise RuntimeError(f"No windows produced from: {root} (seq_len too large?)")
 
     def __len__(self):
         return len(self.index)
@@ -195,9 +195,9 @@ class LatentSequenceDataset(torch.utils.data.Dataset):
         return z_t, action, z_tp1, state_t, state_tp1
 
 
-# ---------------------------------------------------------------------------
-# Προαιρετικό: ισορρόπηση ουρών (σπάνιες γωνίες)
-# ---------------------------------------------------------------------------
+#
+#  Optional: rebalance the tails (rare angles)
+#
 def angle_balanced_weights(dataset, bins=40):
     ang = dataset.angles
     hist, edges = np.histogram(ang, bins=bins)

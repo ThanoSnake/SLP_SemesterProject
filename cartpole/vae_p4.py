@@ -28,7 +28,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
@@ -36,9 +35,9 @@ from tqdm.auto import tqdm
 from loader import VaePairDataset, load_norm_stats
 
 
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
+#
+#  Config
+#
 DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
@@ -49,19 +48,19 @@ LATENT_SIZE = 64
 N_SUP = 4
 SHIFT = 0
 
-# --- Color-segmentation thresholds (σε [0,1]· gym CartPole: bg=λευκό, cart/track=μαύρο, pole=tan) ---
-SEG_WHITE_THR = 0.78       # pixel είναι background αν ΟΛΑ τα κανάλια > αυτό
-SEG_DARK_THR = 0.59        # pixel είναι cart αν ΟΛΑ τα κανάλια < αυτό (το track λαμβάνεται ως cart)
+# Color-segmentation thresholds (in [0,1]; gym CartPole: bg=white, cart/track=black, pole=tan)
+SEG_WHITE_THR = 0.78   # pixel is background if ALL channels > this
+SEG_DARK_THR = 0.59    # pixel is cart if ALL channels < this (the track is treated as cart)
 
-# --- P4: ποια dims παίρνει κάθε object decoder (τα bg παίρνει ΟΛΑ τα style dims) ---
-CART_DIMS = [0, 1]         # x, x_dot
-POLE_DIMS = [0, 2]         # x (βάση) + theta — το pole ΧΡΕΙΑΖΕΤΑΙ το x· για αυστηρό split βάλε [2,3]
-# bg_dims = list(range(N_SUP, LATENT_SIZE))  (αυτόματα)
-DEC_BASE = 8               # base channels των ΜΙΚΡΩΝ object decoders (μικρό = λιγότερες παράμετροι)
-DEC_BASE_BG = 16           # bg λίγο μεγαλύτερο (περισσότερα style dims)
+# P4: which dims each object decoder gets (bg gets ALL style dims)
+CART_DIMS = [0, 1]     # x, x_dot
+POLE_DIMS = [0, 2]     # x (base) + theta — pole NEEDS x; for a strict split use [2,3]
+# bg_dims = list(range(N_SUP, LATENT_SIZE))  (automatic)
+DEC_BASE = 8           # base channels of the SMALL object decoders (small = fewer params)
+DEC_BASE_BG = 16       # bg slightly larger (more style dims)
 
-W_OBJ = 1.0                # βάρος object-recon
-W_FULL = 1.0               # βάρος full-recon
+W_OBJ = 1.0            # object-recon weight
+W_FULL = 1.0           # full-recon weight
 
 BATCH = 128
 EPOCHS = 40
@@ -77,23 +76,25 @@ SEED = 0
 
 
 def set_seed(s):
-    np.random.seed(s); torch.manual_seed(s); torch.cuda.manual_seed_all(s)
+    np.random.seed(s)
+    torch.manual_seed(s)
+    torch.cuda.manual_seed_all(s)
 
 
 def _to_img(t, device):
     return t.to(device, non_blocking=True).float().div_(255.0)
 
 
-# ---------------------------------------------------------------------------
-# COLOR SEGMENTATION (on-the-fly, vectorized) — ο "απλός αλγόριθμος" της P4
-# ---------------------------------------------------------------------------
+#
+#  Color segmentation (on-the-fly, vectorized) — the "simple algorithm" of P4
+#
 def color_segment_cartpole(img, white_thr=SEG_WHITE_THR, dark_thr=SEG_DARK_THR):
-    """ img: (B,3,H,W) σε [0,1].  Επιστρέφει (mask_cart, mask_pole, mask_bg), καθένα (B,1,H,W) float {0,1},
-    ΑΥΣΤΗΡΟ PARTITION (κάθε pixel ακριβώς σε μία κλάση).
-        bg   = ~λευκό  (όλα τα κανάλια > white_thr)
-        cart = ~μαύρο  (όλα τα κανάλια < dark_thr)  -> περιλαμβάνει cart + τη μαύρη γραμμή του track
-        pole = ό,τι απομένει (το tan κοντάρι + ο μπλε άξονας + edges)
-    Καθαρά color-based· δεν χρειάζεται γεωμετρία ή προ-αποθηκευμένα masks. """
+    """img: (B,3,H,W) in [0,1]. Returns (mask_cart, mask_pole, mask_bg), each (B,1,H,W) float {0,1},
+    a STRICT PARTITION (each pixel in exactly one class).
+        bg   = ~white  (all channels > white_thr)
+        cart = ~black  (all channels < dark_thr)  -> includes cart + the black track line
+        pole = whatever remains (the tan pole + the blue axle + edges)
+    Purely color-based; no geometry or pre-stored masks needed."""
     r, g, b = img[:, 0:1], img[:, 1:2], img[:, 2:3]
     is_bg = (r > white_thr) & (g > white_thr) & (b > white_thr)
     is_cart = (r < dark_thr) & (g < dark_thr) & (b < dark_thr) & (~is_bg)
@@ -103,7 +104,7 @@ def color_segment_cartpole(img, white_thr=SEG_WHITE_THR, dark_thr=SEG_DARK_THR):
 
 @torch.no_grad()
 def visualize_segmentation(npz_path, idx=0, save_path=None):
-    """ Sanity-check: δείχνει ένα frame + τις 3 μάσκες + τα 3 component GT. Τρέξε ΠΡΙΝ την εκπαίδευση. """
+    """Sanity-check: shows one frame + the 3 masks + the 3 component GTs. Run BEFORE training."""
     import matplotlib.pyplot as plt
     with np.load(npz_path) as d:
         frame = d["imgs"][idx]
@@ -116,27 +117,27 @@ def visualize_segmentation(npz_path, idx=0, save_path=None):
     fig, ax = plt.subplots(1, 7, figsize=(16, 2.6))
     for a, t, im in zip(ax, titles, ims):
         a.imshow(im, cmap=("gray" if im.ndim == 2 else None), vmin=0, vmax=1)
-        a.set_title(t, fontsize=9); a.axis("off")
-    cover = float((mc + mp + mb).max())   # πρέπει να είναι 1.0 (partition)
-    fig.suptitle(f"partition check: max overlap = {cover:.2f} (πρέπει=1.0)", fontsize=10)
+        a.set_title(t, fontsize=9)
+        a.axis("off")
+    cover = float((mc + mp + mb).max())   # must be 1.0 (partition)
+    fig.suptitle(f"partition check: max overlap = {cover:.2f} (must be 1.0)", fontsize=10)
     plt.tight_layout()
     if save_path:
-        plt.savefig(save_path, dpi=120); print("saved:", save_path)
+        plt.savefig(save_path, dpi=120)
+        print("saved:", save_path)
     else:
         plt.show()
 
 
-# ---------------------------------------------------------------------------
-# DATASET / HELPERS: ΔΕΝ ξαναδηλώνονται εδώ. Έρχονται από το loader_final.py (τρέξε το cell πρώτα):
-#   VaePairDataset (5-item: img_t, img_tp1, action, state_t, state_tp1), load_norm_stats, list_npz,
-#   precompute_latents, LatentSequenceDataset (για το LSTM). Η P4 χρησιμοποιεί ΑΥΤΟΥΣΙΟ τον loader —
-#   οι μάσκες παράγονται on-the-fly με color_segment_cartpole (πιο πάνω), όχι από το dataset.
-# ---------------------------------------------------------------------------
+# Dataset/helpers are NOT redeclared here. They come from loader.py (imported above):
+# VaePairDataset (5-item: img_t, img_tp1, action, state_t, state_tp1), load_norm_stats,
+# precompute_latents, LatentSequenceDataset (for the LSTM). P4 uses the loader as-is —
+# the masks are produced on-the-fly with color_segment_cartpole, not from the dataset.
 
 
-# ---------------------------------------------------------------------------
-# Model — baseline encoder + 3 ΜΙΚΡΟΙ object decoders (RGB) -> overlay composite
-# ---------------------------------------------------------------------------
+#
+#  Model — baseline encoder + 3 SMALL object decoders (RGB) -> overlay composite
+#
 class _BaseEncoder(nn.Module):
     def __init__(self, latent_size=64, in_channels=6):
         super().__init__()
@@ -154,7 +155,7 @@ class _BaseEncoder(nn.Module):
 
 
 class ObjDecoder(nn.Module):
-    """ z -> RGB εικόνα (3,80,120) σε [0,1]: το αντικείμενο πάνω σε λευκό φόντο. 10x15 -> 80x120. """
+    """z -> RGB image (3,80,120) in [0,1]: the object on a white background. 10x15 -> 80x120."""
     def __init__(self, in_dim, base_channels):
         super().__init__()
         self.base = base_channels
@@ -196,11 +197,11 @@ class VAE_P4(nn.Module):
         comp_c = self.dec_cart(z[:, self.cart_dims])
         comp_p = self.dec_pole(z[:, self.pole_dims])
         comp_b = self.dec_bg(z[:, self.bg_dims])
-        composite = torch.clamp(comp_c + comp_p + comp_b - 2.0, 0.0, 1.0)   # overlay σε λευκό
+        composite = torch.clamp(comp_c + comp_p + comp_b - 2.0, 0.0, 1.0)   # overlay on white
         return composite, (comp_c, comp_p, comp_b)
 
     def decode(self, z):
-        """ render ενός latent (π.χ. LSTM-predicted) -> (composite, (comp_cart, comp_pole, comp_bg)). """
+        """Render one latent (e.g. LSTM-predicted) -> (composite, (comp_cart, comp_pole, comp_bg))."""
         return self._compose(z)
 
     def forward(self, x):
@@ -220,9 +221,9 @@ def encode_fn(model, device):
     return _fn
 
 
-# ---------------------------------------------------------------------------
-# Loss
-# ---------------------------------------------------------------------------
+#
+#  Loss
+#
 def vae_losses(composite, full, comps, comp_gt, mu, logvar, state_t, n_sup):
     B, D = mu.size(0), mu.size(1)
     recon_full = F.mse_loss(composite, full, reduction="mean")
@@ -242,7 +243,8 @@ _KEYS = ("recon_full", "recon_obj", "sup", "kld_phys", "kld_style")
 def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
     train = optimizer is not None
     model.train() if train else model.eval()
-    tot = {k: 0.0 for k in _KEYS}; tot["n"] = 0
+    tot = {k: 0.0 for k in _KEYS}
+    tot["n"] = 0
 
     pbar = tqdm(loader, desc=desc, leave=False)
     for img_t, img_tp1, action, state_t, state_tp1 in pbar:
@@ -250,7 +252,7 @@ def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
         img_tp1 = _to_img(img_tp1, device)
         x = torch.cat([img_t, img_tp1], dim=1)
         st = state_t.to(device, non_blocking=True)
-        # ON-THE-FLY color segmentation στη GPU -> 3 μάσκες (B,1,H,W) -> component GT = αντικείμενο σε λευκό
+        # On-the-fly color segmentation on the GPU -> 3 masks (B,1,H,W) -> component GT = object on white
         masks = color_segment_cartpole(img_t)
         comp_gt = tuple(img_t * mk + (1.0 - mk) for mk in masks)
 
@@ -260,7 +262,9 @@ def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
             loss = W_FULL * rf + W_OBJ * ro + LAMBDA_SUP * s + BETA_PHYS * kp + beta_style * ks
 
         if train:
-            optimizer.zero_grad(); loss.backward(); optimizer.step()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
         bs = img_t.size(0)
         for k, v in zip(_KEYS, (rf, ro, s, kp, ks)):
@@ -272,9 +276,9 @@ def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
     return {k: tot[k] / tot["n"] for k in _KEYS}
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+#
+#  Main
+#
 if __name__ == "__main__":
     set_seed(SEED)
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -312,7 +316,8 @@ if __name__ == "__main__":
         else:
             bad_epochs += 1
             if bad_epochs >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}."); break
+                print(f"Early stopping at epoch {epoch}.")
+                break
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_p4_last.pth"))
     print("Best val score:", best_val)

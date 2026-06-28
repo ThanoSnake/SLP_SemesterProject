@@ -20,9 +20,9 @@ from tqdm.auto import tqdm
 
 from loader import VaePairDataset, load_norm_stats
 
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
+#
+#  Config
+#
 DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
@@ -30,41 +30,43 @@ NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
 SAVE_DIR = "/kaggle/working/cartpole_baseline_vae"
 
 LATENT_SIZE = 64
-N_SUP = 4                  # [x, x_dot, theta, theta_dot]
-SHIFT = 0                  # 0=clean· 2/5/10 -> noisy (weak supervision)
+N_SUP = 4          # [x, x_dot, theta, theta_dot]
+SHIFT = 0          # 0=clean, 2/5/10=noisy (weak supervision)
 
 BATCH = 128
 EPOCHS = 40
 LR = 1e-3
 
-# --- SPLIT-β KL ---
-BETA_PHYS = 0.01           # σταθερό, ΜΙΚΡΟ: ελάχιστη πίεση στις φυσικές dims
-BETA_STYLE_MAX = 1.0       # τελικό βάρος KL στις style dims
-KL_ANNEAL_EPOCHS = 20      # beta_style: 0 -> BETA_STYLE_MAX
+# Split-beta KL: tiny fixed pressure on physical dims, annealed pressure on style dims
+BETA_PHYS = 0.01
+BETA_STYLE_MAX = 1.0
+KL_ANNEAL_EPOCHS = 20
 
-LAMBDA_SUP = 1.0           # per-element mean -> O(1) knob
+LAMBDA_SUP = 1.0   # per-element mean keeps this an O(1) knob
 
 EARLY_STOP_PATIENCE = 5
-SCHED_PATIENCE = 3         # < EARLY_STOP -> προλαβαίνει να πέσει το LR πρώτα
+SCHED_PATIENCE = 3  # below early-stop so the LR drops before we give up
 
 NUM_WORKERS = 2
 SEED = 0
 
 
 def set_seed(s):
-    np.random.seed(s); torch.manual_seed(s); torch.cuda.manual_seed_all(s)
+    np.random.seed(s)
+    torch.manual_seed(s)
+    torch.cuda.manual_seed_all(s)
 
 
 def _to_img(t, device):
-    """ uint8 (B,3,H,W) -> float [0,1] στη GPU (η μεταφορά γίνεται σε uint8). """
+    # Move as uint8 (cheaper transfer), then convert to float [0,1] on device
     return t.to(device, non_blocking=True).float().div_(255.0)
 
 
-# ---------------------------------------------------------------------------
-# Model
-# ---------------------------------------------------------------------------
+#
+#  Model
+#
 class VAE(nn.Module):
-    """ Είσοδος (B,6,80,120)=stack(frame_t,frame_t+1)· ανακατασκευή (B,3,80,120)=frame_t. """
+    """Input (B,6,80,120) = stack(frame_t, frame_t+1). Reconstructs frame_t (B,3,80,120)."""
 
     def __init__(self, latent_size=64, in_channels=6, out_channels=3):
         super().__init__()
@@ -89,7 +91,7 @@ class VAE(nn.Module):
 
     def reparameterize(self, mu, logvar):
         if not self.training:
-            return mu
+            return mu  # at eval time use the mean, no sampling noise
         std = torch.exp(0.5 * logvar)
         return mu + torch.randn_like(std) * std
 
@@ -104,7 +106,7 @@ class VAE(nn.Module):
 
 
 def encode_fn(model, device):
-    """ Callable για loader.precompute_latents — δέχεται float [0,1] εικόνες. """
+    """Callable for loader.precompute_latents. Expects float [0,1] images."""
     @torch.no_grad()
     def _fn(img_t, img_tp1):
         model.eval()
@@ -114,23 +116,23 @@ def encode_fn(model, device):
     return _fn
 
 
-# ---------------------------------------------------------------------------
-# Loss — per-element means· SPLIT-β KL (phys vs style)
-# ---------------------------------------------------------------------------
+#
+#  Loss — per-element means, split-beta KL (phys vs style)
+#
 def vae_losses(recon, target, mu, logvar, state_t, n_sup):
     B, D = mu.size(0), mu.size(1)
-    recon_l = F.mse_loss(recon, target, reduction="mean")               # ανά pixel
-    sup = F.mse_loss(mu[:, :n_sup], state_t, reduction="mean")          # ανά supervised dim
+    recon_l = F.mse_loss(recon, target, reduction="mean")       # per pixel
+    sup = F.mse_loss(mu[:, :n_sup], state_t, reduction="mean")  # per supervised dim
 
-    kl_per = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())             # (B, D) ανά διάσταση
+    kl_per = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())     # (B, D) per dimension
     kld_phys = kl_per[:, :n_sup].sum() / B / n_sup
     kld_style = kl_per[:, n_sup:].sum() / B / (D - n_sup)
     return recon_l, kld_phys, kld_style, sup
 
 
-# ---------------------------------------------------------------------------
-# Train / Eval
-# ---------------------------------------------------------------------------
+#
+#  Train / Eval
+#
 def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
     train = optimizer is not None
     model.train() if train else model.eval()
@@ -138,10 +140,10 @@ def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
 
     pbar = tqdm(loader, desc=desc, leave=False)
     for img_t, img_tp1, action, state_t, state_tp1 in pbar:
-        img_t = _to_img(img_t, device)                       # uint8 -> float/255 ΣΤΗ GPU
+        img_t = _to_img(img_t, device)        # uint8 -> float/255 on device
         img_tp1 = _to_img(img_tp1, device)
-        x = torch.cat([img_t, img_tp1], dim=1)               # (B,6,H,W)
-        target = img_t                                       # ανακατασκευή του frame_t
+        x = torch.cat([img_t, img_tp1], dim=1)  # (B,6,H,W)
+        target = img_t                          # reconstruct frame_t
         st = state_t.to(device, non_blocking=True)
 
         with torch.set_grad_enabled(train):
@@ -178,19 +180,19 @@ def physical_rmse(model, loader, device, std4):
         x = torch.cat([_to_img(img_t, device), _to_img(img_tp1, device)], dim=1)
         st = state_t.to(device)
         mu, _ = model.encode(x)
-        se += (((mu[:, :N_SUP] - st) * std4) ** 2).sum(0)
+        se += (((mu[:, :N_SUP] - st) * std4) ** 2).sum(0)  # de-standardize before RMSE
         n += st.size(0)
     return torch.sqrt(se / n).cpu().numpy()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+#
+#  Main
+#
 if __name__ == "__main__":
     set_seed(SEED)
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("device:", device, "  (αν 'cpu' -> ενεργοποίησε GPU στην Kaggle!)")
+    print("device:", device, "  (if 'cpu' -> enable GPU on Kaggle!)")
 
     mean, std = load_norm_stats(NORM_STATS)
     std4 = torch.tensor(std[:N_SUP], device=device)
@@ -217,7 +219,7 @@ if __name__ == "__main__":
         def total(d):
             return d["recon"] + BETA_PHYS * d["kld_phys"] + beta_style * d["kld_style"] + LAMBDA_SUP * d["sup"]
         tr_total, va_total = total(tr), total(va)
-        val_score = va["recon"] + LAMBDA_SUP * va["sup"]
+        val_score = va["recon"] + LAMBDA_SUP * va["sup"]  # model selection ignores KL terms
         scheduler.step(val_score)
         lr_now = optimizer.param_groups[0]["lr"]
 
@@ -238,7 +240,7 @@ if __name__ == "__main__":
             bad_epochs += 1
             print(f"  (no improvement: {bad_epochs}/{EARLY_STOP_PATIENCE})")
             if bad_epochs >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}.")
+                print(f"Early stopping at epoch {epoch}.")
                 break
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_last.pth"))

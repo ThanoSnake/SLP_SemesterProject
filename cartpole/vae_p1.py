@@ -29,9 +29,9 @@ from tqdm.auto import tqdm
 
 from loader import VaePairDataset, load_norm_stats
 
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
+#
+#  Config
+#
 DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
@@ -39,26 +39,27 @@ NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
 SAVE_DIR = "/kaggle/working/cartpole_p1_vae"
 
 LATENT_SIZE = 64
-N_SUP = 4                  # [x, x_dot, theta, theta_dot] -> state_encoder
+N_SUP = 4                    # [x, x_dot, theta, theta_dot] -> state_encoder
 N_IMG = LATENT_SIZE - N_SUP  # 60 -> image_encoder
-SHIFT = 0                  # 0=clean· 2/5/10 -> noisy (weak supervision)
+SHIFT = 0                    # 0=clean, 2/5/10=noisy (weak supervision)
 
 BATCH = 128
 EPOCHS = 40
 LR = 1e-3
 
-# --- SPLIT-β KL (ΤΑΥΤΟΣΗΜΑ με baseline vae_v5) ---
-BETA_PHYS = 0.01           # σταθερό, ΜΙΚΡΟ: ελάχιστη πίεση στα φυσικά dims
-BETA_STYLE_MAX = 1.0       # τελικό βάρος KL στα image dims
-KL_ANNEAL_EPOCHS = 20      # beta_style: 0 -> BETA_STYLE_MAX
+# Split-beta KL (identical to baseline vae): tiny fixed pressure on physical dims,
+# annealed pressure on image dims
+BETA_PHYS = 0.01
+BETA_STYLE_MAX = 1.0
+KL_ANNEAL_EPOCHS = 20
 
-LAMBDA_SUP = 1.0           # per-element mean -> O(1) knob
+LAMBDA_SUP = 1.0   # per-element mean keeps this an O(1) knob
 
 EARLY_STOP_PATIENCE = 5
-SCHED_PATIENCE = 3         # < EARLY_STOP -> προλαβαίνει να πέσει το LR πρώτα
+SCHED_PATIENCE = 3  # below early-stop so the LR drops before we give up
 
-# Το dataset φορτώνεται όλο στη RAM στο __init__ (eager). num_workers>0 παραλληλίζει
-# μόνο το /255+permute· τα δεδομένα μοιράζονται μέσω fork COW (καμία διπλή RAM).
+# Dataset is fully eager-loaded in __init__. num_workers>0 only parallelizes the
+# /255+permute; data is shared via fork copy-on-write (no RAM duplication).
 NUM_WORKERS = 2
 SEED = 0
 
@@ -69,21 +70,21 @@ def set_seed(s):
     torch.cuda.manual_seed_all(s)
 
 
-# ---------------------------------------------------------------------------
-# Model — δύο ανεξάρτητοι encoders + κοινός decoder
-# ---------------------------------------------------------------------------
+#
+#  Model — two independent encoders + a shared decoder
+#
 class VAE_P1(nn.Module):
-    """ Είσοδος encode(x): x = stack(frame_t, frame_t+1) (B,6,80,120). Ανακατασκευή (B,3,80,120)=frame_t.
+    """encode(x) input: x = stack(frame_t, frame_t+1) (B,6,80,120). Reconstructs frame_t (B,3,80,120).
 
-    latent = [ z_state (N_SUP) | z_image (N_IMG) ], από ΔΥΟ ξεχωριστούς encoders:
-      * state_encoder : βλέπει ΚΑΙ τα 2 frames (6 κανάλια) -> μπορεί να βγάλει ταχύτητα.
-      * image_encoder : βλέπει ΜΟΝΟ το frame_t (3 κανάλια) -> δεν μπορεί αρχιτεκτονικά να
-        κωδικοποιήσει δυναμική/ταχύτητα στα image dims (decoupling στατικού vs δυναμικού).
+    latent = [ z_state (N_SUP) | z_image (N_IMG) ], from TWO separate encoders:
+      * state_encoder : sees BOTH frames (6 channels) -> can extract velocity.
+      * image_encoder : sees ONLY frame_t (3 channels) -> architecturally cannot encode
+        dynamics/velocity in the image dims (decouples static from dynamic).
     """
 
     @staticmethod
     def _conv_stack(in_channels):
-        """ Ίδια αρχιτεκτονική με το baseline encoder· 80x120 -> (64,10,15). """
+        """Same architecture as the baseline encoder: 80x120 -> (64,10,15)."""
         return nn.Sequential(
             nn.Conv2d(in_channels, 16, 4, 2, 1), nn.ReLU(inplace=True),   # 80x120 -> 40x60
             nn.Conv2d(16, 32, 4, 2, 1), nn.ReLU(inplace=True),           # -> 20x30
@@ -94,21 +95,21 @@ class VAE_P1(nn.Module):
         super().__init__()
         self.n_sup = n_sup
         self.n_img = n_img
-        self.frame_channels = frame_channels      # κανάλια ΕΝΟΣ frame (RGB=3)
+        self.frame_channels = frame_channels   # channels of ONE frame (RGB=3)
         self.latent_size = n_sup + n_img
         feat = 64 * 10 * 15
 
-        # --- δύο ανεξάρτητα conv stacks (διαφορετικά βάρη, διαφορετικό #καναλιών εισόδου) ---
+        # Two independent conv stacks (different weights, different input channel counts)
         self.state_encoder = self._conv_stack(2 * frame_channels)   # 6: stack(frame_t, frame_t+1)
-        self.image_encoder = self._conv_stack(frame_channels)       # 3: ΜΟΝΟ frame_t
+        self.image_encoder = self._conv_stack(frame_channels)       # 3: only frame_t
 
-        # ξεχωριστές κεφαλές mu/logvar ανά κλάδο
+        # Separate mu/logvar heads per branch
         self.fc_mu_s = nn.Linear(feat, n_sup)
         self.fc_logvar_s = nn.Linear(feat, n_sup)
         self.fc_mu_i = nn.Linear(feat, n_img)
         self.fc_logvar_i = nn.Linear(feat, n_img)
 
-        # --- κοινός decoder: ΟΛΟΚΛΗΡΟ το latent -> εικόνα ---
+        # Shared decoder: takes the FULL latent -> image
         self.fc_decode = nn.Linear(self.latent_size, feat)
         self.decoder = nn.Sequential(
             nn.ConvTranspose2d(64, 32, 4, 2, 1), nn.ReLU(inplace=True),  # 10x15 -> 20x30
@@ -117,10 +118,10 @@ class VAE_P1(nn.Module):
         )
 
     def encode(self, x):
-        """ x = stack(frame_t, frame_t+1) (B,6,H,W). Τα πρώτα N_SUP dims από τον state_encoder
-        (και τα 2 frames)· τα N_IMG από τον image_encoder ΜΟΝΟ στο frame_t (πρώτα 3 κανάλια). """
-        hs = self.state_encoder(x).flatten(1)                          # 6 κανάλια: frame_t ++ frame_t+1
-        hi = self.image_encoder(x[:, :self.frame_channels]).flatten(1) # 3 κανάλια: μόνο frame_t
+        """x = stack(frame_t, frame_t+1) (B,6,H,W). First N_SUP dims come from the state_encoder
+        (both frames); the N_IMG dims from the image_encoder on frame_t only (first 3 channels)."""
+        hs = self.state_encoder(x).flatten(1)                          # 6 channels: frame_t ++ frame_t+1
+        hi = self.image_encoder(x[:, :self.frame_channels]).flatten(1) # 3 channels: only frame_t
         mu = torch.cat([self.fc_mu_s(hs), self.fc_mu_i(hi)], dim=1)
         logvar = torch.cat([self.fc_logvar_s(hs), self.fc_logvar_i(hi)], dim=1)
         return mu, logvar
@@ -142,7 +143,7 @@ class VAE_P1(nn.Module):
 
 
 def encode_fn(model, device):
-    """ Callable για loader.precompute_latents: (img_t,img_tp1) -> mu (ντετερμινιστικό). """
+    """Callable for loader.precompute_latents: (img_t, img_tp1) -> mu (deterministic)."""
     @torch.no_grad()
     def _fn(img_t, img_tp1):
         model.eval()
@@ -152,24 +153,24 @@ def encode_fn(model, device):
     return _fn
 
 
-# ---------------------------------------------------------------------------
-# Loss — per-element means (~O(1)). KL χωρισμένο σε physical vs image dims.
-# ---------------------------------------------------------------------------
+#
+#  Loss — per-element means (~O(1)). KL split into physical vs image dims.
+#
 def vae_losses(recon, target, mu, logvar, state_t, n_sup):
-    recon_l = F.mse_loss(recon, target, reduction="mean")               # ανά pixel
-    sup = F.mse_loss(mu[:, :n_sup], state_t, reduction="mean")          # ανά supervised dim
+    recon_l = F.mse_loss(recon, target, reduction="mean")       # per pixel
+    sup = F.mse_loss(mu[:, :n_sup], state_t, reduction="mean")  # per supervised dim
 
-    kld_elem = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())           # (B, latent)
+    kld_elem = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())   # (B, latent)
     b = mu.size(0)
     n_img = mu.size(1) - n_sup
-    kld_phys = kld_elem[:, :n_sup].sum() / b / n_sup                    # ανά physical dim
-    kld_img = kld_elem[:, n_sup:].sum() / b / max(n_img, 1)            # ανά image dim
+    kld_phys = kld_elem[:, :n_sup].sum() / b / n_sup            # per physical dim
+    kld_img = kld_elem[:, n_sup:].sum() / b / max(n_img, 1)     # per image dim
     return recon_l, kld_phys, kld_img, sup
 
 
-# ---------------------------------------------------------------------------
-# Train / Eval (με progress bar)
-# ---------------------------------------------------------------------------
+#
+#  Train / Eval (with progress bar)
+#
 def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
     train = optimizer is not None
     model.train() if train else model.eval()
@@ -177,7 +178,7 @@ def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
 
     pbar = tqdm(loader, desc=desc, leave=False)
     for img_t, img_tp1, action, state_t, state_tp1 in pbar:
-        # Μεταφορά ΩΣ uint8 (μικρό payload), μετά .float()/255 ΣΤΗ GPU.
+        # Transfer AS uint8 (small payload), then .float()/255 on the GPU.
         img_t = img_t.to(device, non_blocking=True).float() / 255.0
         img_tp1 = img_tp1.to(device, non_blocking=True).float() / 255.0
         x = torch.cat([img_t, img_tp1], dim=1)
@@ -187,7 +188,7 @@ def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
         with torch.set_grad_enabled(train):
             recon, mu, logvar = model(x)
             r, kp, ki, s = vae_losses(recon, target, mu, logvar, st, N_SUP)
-            # SPLIT-β: σταθερό μικρό BETA_PHYS στα phys dims, annealed beta_style στα image dims
+            # Split-beta: fixed small BETA_PHYS on phys dims, annealed beta_style on image dims
             loss = r + BETA_PHYS * kp + beta_style * ki + LAMBDA_SUP * s
 
         if train:
@@ -214,12 +215,12 @@ def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
 
 @torch.no_grad()
 def physical_rmse(model, loader, device, std4):
-    """ RMSE των supervised dims σε ΦΥΣΙΚΕΣ μονάδες (αναιρεί το standardization). """
+    """RMSE of the supervised dims in PHYSICAL units (undoes the standardization)."""
     model.eval()
     se = torch.zeros(N_SUP, device=device)
     n = 0
     for img_t, img_tp1, action, state_t, state_tp1 in loader:
-        # ίδια μετατροπή uint8 -> float/255 στη GPU με το run_epoch (συνέπεια εισόδου!)
+        # Same uint8 -> float/255 conversion as run_epoch (keep the input consistent!)
         img_t = img_t.to(device).float() / 255.0
         img_tp1 = img_tp1.to(device).float() / 255.0
         x = torch.cat([img_t, img_tp1], dim=1)
@@ -230,19 +231,19 @@ def physical_rmse(model, loader, device, std4):
     return torch.sqrt(se / n).cpu().numpy()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+#
+#  Main
+#
 if __name__ == "__main__":
     set_seed(SEED)
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("device:", device, "  (αν είναι 'cpu' -> ενεργοποίησε GPU στην Kaggle!)")
+    print("device:", device, "  (if 'cpu' -> enable GPU on Kaggle!)")
 
     mean, std = load_norm_stats(NORM_STATS)
     std4 = torch.tensor(std[:N_SUP], device=device)
 
-    # Τα datasets φορτώνουν ΟΛΑ στη RAM στο __init__ (με δικό τους progress bar).
+    # Datasets load EVERYTHING into RAM in __init__ (with their own progress bar).
     train_ds = VaePairDataset(TRAIN_DIR, shift=SHIFT, state_mean=mean, state_std=std)
     val_ds = VaePairDataset(VAL_DIR, shift=SHIFT, state_mean=mean, state_std=std)
 
@@ -264,12 +265,12 @@ if __name__ == "__main__":
         va = run_epoch(model, val_dl, device, beta_style, optimizer=None, desc=f"E{epoch:03d} val")
         rmse = physical_rmse(model, val_dl, device, std4)
 
-        def total(m):  # σταθμισμένο loss (αυτό που γίνεται backprop)
+        def total(m):  # weighted loss (the one we backprop)
             return (m["recon"] + BETA_PHYS * m["kld_phys"] + beta_style * m["kld_img"] + LAMBDA_SUP * m["sup"])
 
         tr_total = total(tr)
         va_total = total(va)
-        val_score = va["recon"] + LAMBDA_SUP * va["sup"]   # selection (beta-independent, σταθερό)
+        val_score = va["recon"] + LAMBDA_SUP * va["sup"]   # selection (beta-independent, stable)
         scheduler.step(val_score)
         lr_now = optimizer.param_groups[0]["lr"]
 
@@ -291,7 +292,7 @@ if __name__ == "__main__":
             epochs_no_improve += 1
             print(f"  (no improvement: {epochs_no_improve}/{EARLY_STOP_PATIENCE})")
             if epochs_no_improve >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}.")
+                print(f"Early stopping at epoch {epoch}.")
                 break
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_p1_last.pth"))
