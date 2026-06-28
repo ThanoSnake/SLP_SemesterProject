@@ -70,11 +70,16 @@ CONTROLLERS = ["true_pid", "enc_pid", "latent_mpc"]
 RECORD_GIF = True                # σώσε GIF του 1ου επεισοδίου ανά controller (full-res render)
 GIF_FPS = 30
 
-# --- MPC (safety shield) ---
-MPC_HORIZON = 10                 # K βήματα "ονείρου" (κοντινός ορίζοντας -> αξιόπιστο rollout)
-MPC_SAMPLES = 512                # τυχαίες ακολουθίες ενεργειών (random shooting)
-FUEL_W = 0.30                    # ποινή καυσίμου στο MPC cost
+# --- MPC (safety shield): heuristic-guided + first-action enumeration ---
+MPC_HORIZON = 5                  # K βήματα "ονείρου" (κοντινός -> λιγότερο compounding error)
+MPC_SAMPLES_PER_ACTION = 64      # στοχαστικές "ουρές" ανά immediate action (N = 4 × αυτό)
+EPS_EXPLORE = 0.20               # εξερεύνηση στην ουρά (perturbation γύρω από τον heuristic)
+FUEL_W = 0.30                    # ποινή καυσίμου
+BOUND_W = 50.0                   # ποινή για |x| εκτός ορίων (out-of-frame)
+SMOOTH_W = 2.0                   # ποινή εναλλαγής ενέργειας (smoother control)
+X_BOUND = 1.0                    # όριο |x| πέρα από το οποίο τιμωρούμε
 MPC_SEED = 0
+RUN_DIAGNOSTIC = True            # τύπωσε action-sensitivity check πριν τα επεισόδια
 
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
 
@@ -170,32 +175,103 @@ def shaping_phys(phys):
 
 
 # ---------------------------------------------------------------------------
-# (B) Latent MPC — random shooting πάνω στο world-model
+# (B) Latent MPC — heuristic-guided, first-action enumeration (ON-distribution)
+# ---------------------------------------------------------------------------
+def heuristic_action_batch(phys):
+    """ Vectorized PD heuristic: phys (N,8) φυσικές μονάδες -> actions (N,) long.
+    ΙΔΙΑ λογική με το heuristic_control αλλά batched -> κρατάει τις "ουρές" ON-distribution. """
+    x, vx, y, vy, theta, omega = (phys[:, 0], phys[:, 2], phys[:, 1],
+                                  phys[:, 3], phys[:, 4], phys[:, 5])
+    contact = (phys[:, 6] > 0.5) | (phys[:, 7] > 0.5)
+    angle_targ = torch.clamp(x * 0.5 + vx * 1.0, -0.4, 0.4)
+    hover_targ = 0.55 * torch.abs(x)
+    angle_todo = torch.where(contact, torch.zeros_like(x), (angle_targ - theta) * 0.5 - omega * 1.0)
+    hover_todo = torch.where(contact, -vy * 0.5, (hover_targ - y) * 0.5 - vy * 0.5)
+    a = torch.zeros(phys.size(0), dtype=torch.long, device=phys.device)
+    a = torch.where(angle_todo > 0.05, torch.full_like(a, 1), a)          # left
+    a = torch.where(angle_todo < -0.05, torch.full_like(a, 3), a)         # right
+    main = (hover_todo > torch.abs(angle_todo)) & (hover_todo > 0.05)
+    a = torch.where(main, torch.full_like(a, 2), a)                       # main (προτεραιότητα)
+    return a
+
+
+@torch.no_grad()
+def mpc_plan(lstm, z_t, mean_t, std_t, device):
+    """ Heuristic-guided MPC: enumerate immediate action ∈ {0..3}, roll out την "ουρά" με τον
+    heuristic (ON-distribution) + μικρή εξερεύνηση, score = Σ(shaping − fuel − bounds − switch).
+    Επιστρέφει το immediate action με το καλύτερο ΜΕΣΟ score (robust σε model exploitation). """
+    K, M = MPC_HORIZON, MPC_SAMPLES_PER_ACTION
+    N = N_ACTIONS * M
+    first = torch.arange(N_ACTIONS, device=device).repeat_interleave(M)   # immediate action ανά candidate
+    z = z_t.expand(N, -1).contiguous()
+    hidden = lstm.init_hidden(N, device)
+    fuel_cost = torch.tensor([0.0, 0.03, 0.30, 0.03], device=device)
+    std8, mean8 = std_t[:N_SUP], mean_t[:N_SUP]
+    score = torch.zeros(N, device=device)
+    prev_a = None
+    for k in range(K):
+        if k == 0:
+            a = first                                                     # ενέργεια υπό αξιολόγηση
+        else:
+            a = heuristic_action_batch(z[:, :N_SUP] * std8 + mean8)       # ON-distribution ουρά
+            explore = torch.rand(N, device=device) < EPS_EXPLORE
+            a = torch.where(explore, torch.randint(0, N_ACTIONS, (N,), device=device), a)
+        z, hidden = lstm.step(z, F.one_hot(a, N_ACTIONS).float(), hidden)
+        phys = z[:, :N_SUP] * std8 + mean8
+        step_cost = (shaping_phys(phys)
+                     - FUEL_W * fuel_cost[a]
+                     - BOUND_W * torch.relu(torch.abs(phys[:, 0]) - X_BOUND))
+        if prev_a is not None:
+            step_cost = step_cost - SMOOTH_W * (a != prev_a).float()
+        score += step_cost
+        prev_a = a
+    score_per_action = score.view(N_ACTIONS, M).mean(dim=1)               # ΜΕΣΟ ανά immediate action
+    return int(torch.argmax(score_per_action).item())
+
+
+# ---------------------------------------------------------------------------
+# Διαγνωστικό — πόσο "ακούει" το world-model τις ενέργειες
 # ---------------------------------------------------------------------------
 @torch.no_grad()
-def mpc_plan(lstm, z_t, mean_t, std_t, device, rng):
-    """ Από z_t: δειγμάτισε MPC_SAMPLES ακολουθίες ενεργειών (K), κάνε batch rollout στο LSTM,
-    βαθμολόγησε με Σ shaping − FUEL_W·fuel, επέστρεψε την 1η ενέργεια της best ακολουθίας. """
-    N, K = MPC_SAMPLES, MPC_HORIZON
-    seqs = torch.from_numpy(rng.integers(0, N_ACTIONS, size=(N, K))).to(device)      # (N,K)
-    z = z_t.expand(N, -1).contiguous()                                               # (N,64)
-    hidden = lstm.init_hidden(N, device)
-    score = torch.zeros(N, device=device)
-    fuel_cost = torch.tensor([0.0, 0.03, 0.30, 0.03], device=device)                 # ανά action
-    for k in range(K):
-        a = seqs[:, k]
-        z, hidden = lstm.step(z, F.one_hot(a, N_ACTIONS).float(), hidden)
-        phys = z[:, :N_SUP] * std_t[:N_SUP] + mean_t[:N_SUP]
-        score += shaping_phys(phys) - FUEL_W * fuel_cost[a]
-    best = int(torch.argmax(score).item())
-    return int(seqs[best, 0].item())
+def _seed_z_from_env(vae, env, device, warmup=20):
+    """ Τρέξε λίγα βήματα heuristic -> πάρε z_t από ζεύγος frames (airborne). """
+    obs, _ = env.reset(seed=SEED)
+    frames = [resize_frame(env.render())]
+    for _ in range(warmup):
+        obs, _, term, trunc, _ = env.step(heuristic_control(obs))
+        frames.append(resize_frame(env.render()))
+        if term or trunc:
+            break
+    return encode_pair(vae, frames[-2], frames[-1], device)
+
+
+@torch.no_grad()
+def action_sensitivity(vae, lstm, env, mean_t, std_t, device, K=10):
+    """ Από z_t (airborne) -> rollout K βημάτων με ΣΤΑΘΕΡΟ action. Αν 'main' δεν δίνει αισθητά
+    μεγαλύτερο Δy/Δvy από 'noop' (ή left/right δεν αλλάζουν x/theta), το μοντέλο δεν 'ακούει'
+    τις ενέργειες -> κακό για planning. """
+    z0 = _seed_z_from_env(vae, env, device)
+    std8, mean8 = std_t[:N_SUP], mean_t[:N_SUP]
+    p0 = (z0[0, :N_SUP] * std8 + mean8).cpu().numpy()
+    print(f"\n{'='*66}\n  ACTION-SENSITIVITY DIAGNOSTIC (rollout K={K}, σταθερό action)\n{'='*66}")
+    print(f"  start: x={p0[0]:+.3f} y={p0[1]:+.3f} vx={p0[2]:+.3f} vy={p0[3]:+.3f} theta={p0[4]:+.3f}")
+    print(f"  {'action':<8}{'Δx':>9}{'Δy':>9}{'Δvx':>9}{'Δvy':>9}{'Δtheta':>9}")
+    names = {0: "noop", 1: "left", 2: "main", 3: "right"}
+    for act in (0, 2, 1, 3):
+        z = z0.clone(); hidden = lstm.init_hidden(1, device)
+        a_oh = F.one_hot(torch.tensor([act], device=device), N_ACTIONS).float()
+        for _ in range(K):
+            z, hidden = lstm.step(z, a_oh, hidden)
+        d = (z[0, :N_SUP] * std8 + mean8).cpu().numpy() - p0
+        print(f"  {names[act]:<8}{d[0]:>+9.3f}{d[1]:>+9.3f}{d[2]:>+9.3f}{d[3]:>+9.3f}{d[4]:>+9.3f}")
+    print("  -> 'main' πρέπει: Δy/Δvy αρκετά > 'noop'.  'left'/'right': να αλλάζουν x & theta.")
 
 
 # ---------------------------------------------------------------------------
 # Closed-loop episode με δοσμένο controller
 # ---------------------------------------------------------------------------
 @torch.no_grad()
-def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, mpc_rng, record=False):
+def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, record=False):
     obs, _ = env.reset(seed=ep_seed)
     f_cur = resize_frame(env.render())
     f_prev = f_cur                                    # t=0: (f0,f0) -> ταχύτητες ≈ 0 (1 βήμα)
@@ -223,7 +299,7 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, mpc_
         elif controller == "enc_pid":
             a = heuristic_control(phys_est.cpu().numpy())
         elif controller == "latent_mpc":
-            a = mpc_plan(lstm, mu, mean_t, std_t, device, mpc_rng)
+            a = mpc_plan(lstm, mu, mean_t, std_t, device)
         else:
             raise ValueError(controller)
 
@@ -260,14 +336,18 @@ def main():
     lstm.load_state_dict(torch.load(lstm_ckpt, map_location=device)); lstm.eval()
 
     env = make_env()
+    if RUN_DIAGNOSTIC:
+        torch.manual_seed(MPC_SEED)
+        action_sensitivity(vae, lstm, env, mean_t, std_t, device)
+
     results = {c: [] for c in CONTROLLERS}
     dist_example = {}                                 # ένα disturbance trace ανά controller
     for c in CONTROLLERS:
-        mpc_rng = np.random.default_rng(MPC_SEED)
+        torch.manual_seed(MPC_SEED)                   # ίδια εξερεύνηση MPC ανά controller (reproducible)
         print(f"\n{'='*56}\n  CONTROLLER: {c}\n{'='*56}")
         for ep in range(N_EPISODES):
             rec = RECORD_GIF and ep == 0
-            res = run_episode(c, env, vae, lstm, mean_t, std_t, device, SEED + ep, mpc_rng, record=rec)
+            res = run_episode(c, env, vae, lstm, mean_t, std_t, device, SEED + ep, record=rec)
             results[c].append(res)
             if ep == 0:
                 dist_example[c] = res["dist"]
