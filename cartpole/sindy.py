@@ -803,5 +803,6 @@ if __name__ == "__main__":
             print(row)
 
     plot_degradation(results, SAVE_DIR)
-    plot_horizon_at_level(results, SAVE_DIR, NOISE_LEVELS[0])
+    for nl in NOISE_LEVELS:
+        plot_horizon_at_level(results, SAVE_DIR, nl)
 
