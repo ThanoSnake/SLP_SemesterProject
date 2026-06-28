@@ -49,7 +49,7 @@ LOG_Y = True
 # NOISE CONFIG — μοναδικό setting: gaussian σ=0.1
 # ---------------------------------------------------------------------------
 NOISE_TYPE = "gaussian"           # "gaussian" | "salt_pepper"
-NOISE_SIGMA = 0.05                 # std (gaussian) πάνω σε [0,1] εικόνα
+NOISE_SIGMA = 0.025                 # std (gaussian) πάνω σε [0,1] εικόνα
 NOISE_SEED = 42
 
 # Trajectory plot (4): τυχαίο test window
