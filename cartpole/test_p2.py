@@ -1,5 +1,5 @@
 """
-cmp_baseline_p2.py — Αξιολόγηση Baseline vs Principle 2 ΜΕ BRIGHTNESS/CONTRAST jitter (CartPole).
+test_p2.py — Αξιολόγηση Baseline vs Principle 2 ΜΕ BRIGHTNESS/CONTRAST jitter (CartPole).
 
 Βασισμένο στο lunar_test_thanasis.py (robust median + IQR, paired bootstrap CI, degradation
 sweep), αλλά αντί για Gaussian θόρυβο εφαρμόζει την ΙΔΙΑ photometric διαταραχή που το P2
@@ -12,9 +12,6 @@ sweep), αλλά αντί για Gaussian θόρυβο εφαρμόζει την
     ΧΩΡΙΣ να αλλάζει το πραγματικό physical state -> ταιριάζει με τη μεθοδολογία «αλλάζω input,
     μετράω vs το αρχικό clean GT». (Equivariance transforms θα άλλαζαν το GT -> ακατάλληλα εδώ.)
   * Gaussian noise ΔΕΝ θα ανέδειχνε το P2 (διαφορετική διαταραχή από το training του).
-
-Σύγκριση ΜΟΝΟ Baseline vs P2, σε ENCODED mode (τα μοντέλα έχουν encoded-trained LSTM).
-Σε notebook τρέξε ΠΡΩΤΑ τα cells: VAE, VAE_P2, LatentPredictor, loader.
 """
 import os
 import numpy as np
@@ -34,7 +31,7 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, l
 # ---------------------------------------------------------------------------
 DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/compare_p2_bc_out"
+SAVE_DIR = "/kaggle/working/cartpole_p2_out"
 SHIFT = 0
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 4, 60
@@ -65,14 +62,14 @@ MODELS = [
      "lstm_ckpt": {
          "encoded": "<cartpole-baseline-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_p2bc/baseline"},
+     "latent_root": "/kaggle/working/cartpole_p2_latents/baseline"},
     {"label": "Principle 2", "color": "C2",
      "make_vae": lambda: VAE_P2(latent_size=LATENT_SIZE),
      "vae_ckpt": "<cartpole-p2-vae>",
      "lstm_ckpt": {
          "encoded": "<cartpole-p2-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_p2bc/p2"},
+     "latent_root": "/kaggle/working/cartpole_p2_latents/p2"},
 ]
 
 

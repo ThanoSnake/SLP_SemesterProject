@@ -1,5 +1,5 @@
 """
-LunarVaePrinciple1.py — Principle 1 (Structured latent) VAE για LunarLander (notebook-ready, Kaggle).
+vae_p1.py — Principle 1 (Structured latent) VAE για LunarLander (notebook-ready, Kaggle).
 Port του cart_pole/p1/vae_principle1.py· state 4D -> 8D.
 
 Διαφορά από το baseline LunarVaeBaseline.py:

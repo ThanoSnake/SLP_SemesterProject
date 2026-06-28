@@ -1,5 +1,5 @@
 """
-LunarLstmBaseline_alt.py — ENCODED-mode LSTM για το WEAK-SUP baseline VAE (LunarLander).
+lstm.py — ENCODED-mode LSTM για το WEAK-SUP baseline VAE (LunarLander).
 
 ΓΙΑΤΙ ENCODED (όχι hybrid): η διαφορά baseline-vs-P1 ζει στην ΑΝΑΠΑΡΑΣΤΑΣΗ του VAE. Το
 hybrid-GT injection εγχέει το physical state στα πρώτα 8 latent dims -> παρακάμπτει το VAE
@@ -30,10 +30,10 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 # CONFIG
 # ---------------------------------------------------------------------------
 DATA_ROOT = "<lunarlander-dataset>"
-LATENT_ROOT = "/kaggle/working/lunarlander_latents_baseline"
+LATENT_ROOT = "/kaggle/working/lunarlander_baseline_latents"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_DIR   = "<lunarlander-baseline-vae>"
-OUT_ROOT  = "/kaggle/working/lunarlander_baseline_lstm"
+VAE_CKPT  = "<lunarlander-baseline-vae>"   # Option A: full path to the trained baseline VAE .pth
+SAVE_DIR  = "/kaggle/working/lunarlander_baseline_lstm"
 
 LATENT_SIZE = 64
 N_SUP = 8

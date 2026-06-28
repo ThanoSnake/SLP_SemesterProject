@@ -1,5 +1,7 @@
-""" LunaDataCollect.py — συλλογή dataset για LunarLander (discrete), κατά το dataCollect.py.
-Απαιτεί: pip install "gymnasium[box2d]". State=8, actions=4. """
+"""
+dataCollect.py — συλλογή dataset για LunarLander (discrete), κατά το dataCollect.py.
+Απαιτεί: pip install "gymnasium[box2d]". State=8, actions=4.
+"""
 import os
 
 import gymnasium as gym

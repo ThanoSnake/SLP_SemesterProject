@@ -1,4 +1,5 @@
-""" LunarLoader.py — EAGER all-in-RAM loading για LunarLander (state=8D), κατά το
+"""
+loader.py — EAGER all-in-RAM loading για LunarLander (state=8D), κατά το
 loader_final.py του cartpole (καμία cache/LRU, μηδέν IO στο train).
 
 Φιλοσοφία (ίδια με cartpole):

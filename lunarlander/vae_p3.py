@@ -1,5 +1,5 @@
 """
-LunarVaePrinciple3.py — Principle 3 (Multi-level / multi-strength supervision) VAE
+vae_p3.py — Principle 3 (Multi-level / multi-strength supervision) VAE
 για LunarLander.  Port του cart_pole/vae_principle3.py· state 4D -> 8D· τρέχει σε MPS
 (Apple Silicon) ώστε να εκπαιδεύεται ΤΟΠΙΚΑ στο Mac.
 
@@ -49,13 +49,13 @@ from loader import VaePairDataset, load_norm_stats, list_npz
 # ---------------------------------------------------------------------------
 # CONFIG  (ΤΟΠΙΚΑ paths -> τρέχει στο Mac· για Kaggle άλλαξε σε /kaggle/working/...)
 # ---------------------------------------------------------------------------
-SUPERVISION = "<supervision>"
+SUPERVISION = "weak"
 
 DATA_ROOT = "<lunarlander-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_p3_vae"
+SAVE_DIR = f"/kaggle/working/lunarlander_p3_{SUPERVISION}_vae"
 
 STATE_NAMES = ("x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2")
 

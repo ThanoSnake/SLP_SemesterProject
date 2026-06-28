@@ -1,5 +1,5 @@
 """
-vae_principle3.py — Principle 3 (Multi-level / multi-strength supervision) VAE για CartPole.
+vae_p3.py — Principle 3 (Multi-level / multi-strength supervision) VAE για CartPole.
 
 ΣΧΕΔΙΑΣΤΙΚΗ ΑΠΟΦΑΣΗ — "P3 ΜΟΝΟ ΤΟΥ" (απομονωμένο, πάνω στο baseline):
   Όπως το paper (Fig. 3D) συγκρίνει ΚΑΘΕ αρχή ΞΕΧΩΡΙΣΤΑ ως ablation πάνω στο baseline,
@@ -26,9 +26,6 @@ vae_principle3.py — Principle 3 (Multi-level / multi-strength supervision) VAE
 ΣΗΜ. (2-frame): επειδή ο encoder βλέπει 2 frames, η ταχύτητα είναι ΠΑΡΑΤΗΡΗΣΙΜΗ -> η
 διαφορά semi vs weak θα είναι ΗΠΙΟΤΕΡΗ απ' ό,τι στο paper (single-frame). Συνειδητή
 επιλογή για ΚΟΙΝΟ backbone με baseline/P1/P2.
-
-Σε notebook: τρέξε ΠΡΩΤΑ το cell του loader. Ο encode_fn επιστρέφει mu -> ΙΔΙΟ LSTM
-pipeline (precompute_latents) με baseline/p1/p2.
 """
 import os
 import numpy as np
@@ -48,14 +45,14 @@ DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/cartpole_p3_vae"
 
 LATENT_SIZE = 64
 N_SUP = 4                  # [x, x_dot, theta, theta_dot]
 SHIFT = 0                  # 0=clean· 2/5/10 -> noisy (weak supervision στις θέσεις)
 
 # --- ΑΡΧΗ 3: ρύθμιση εποπτείας ---
-SUPERVISION = "<supervision>"       # "semi" (μόνο static) | "weak" (+ εκτιμώμενη ταχύτητα)
+SUPERVISION = "weak"       # "semi" (μόνο static) | "weak" (+ εκτιμώμενη ταχύτητα)
+SAVE_DIR = f"/kaggle/working/cartpole_p3_{SUPERVISION}_vae"
 STATIC_DIMS = (0, 2)       # x, theta
 VEL_DIMS = (1, 3)          # x_dot, theta_dot
 DT = 0.02                  # gym CartPole tau -> για την εκτίμηση ταχύτητας
@@ -303,7 +300,7 @@ if __name__ == "__main__":
 
         if val_score < best_val - 1e-6:
             best_val, bad_epochs = val_score, 0
-            torch.save(model.state_dict(), os.path.join(SAVE_DIR, f"vae_p3_{SUPERVISION}_best.pth"))
+            torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_best.pth"))
             print("  -> best model saved")
         else:
             bad_epochs += 1
@@ -312,5 +309,5 @@ if __name__ == "__main__":
                 print(f"Early stopping στο epoch {epoch}.")
                 break
 
-    torch.save(model.state_dict(), os.path.join(SAVE_DIR, f"vae_p3_{SUPERVISION}_last.pth"))
+    torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_last.pth"))
     print("Best val score:", best_val)

@@ -1,5 +1,5 @@
 """
-vae_principle4.py — Principle 4 (Compositional / object-centric DECODING) VAE για CartPole.
+vae_p4.py — Principle 4 (Compositional / object-centric DECODING) VAE για CartPole.
 Loaders/helpers έρχονται από το loader_final.py (τρέξε εκείνο το cell πρώτα). Στόχος (= L2P των
 ερευνητών): ΑΝΤΙ για ΕΝΑΝ μεγάλο decoder, ΤΡΕΙΣ
 ΜΙΚΡΟΥΣ object decoders (cart, pole, background)· καθένας ΑΝΑΚΑΤΑΣΚΕΥΑΖΕΙ ΤΗΝ ΕΙΚΟΝΑ ΤΟΥ
@@ -284,10 +284,8 @@ if __name__ == "__main__":
     train_ds = VaePairDataset(TRAIN_DIR, shift=SHIFT, state_mean=mean, state_std=std)
     val_ds = VaePairDataset(VAL_DIR, shift=SHIFT, state_mean=mean, state_std=std)
     pw = NUM_WORKERS > 0
-    train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True, drop_last=True,
-                          num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
-    val_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False,
-                        num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
+    train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True, drop_last=True, num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
+    val_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
 
     model = VAE_P4(latent_size=LATENT_SIZE, n_sup=N_SUP).to(device)
     dec_params = sum(p.numel() for m in (model.dec_cart, model.dec_pole, model.dec_bg) for p in m.parameters())

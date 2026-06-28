@@ -17,10 +17,6 @@ vae_p1.py — Principle 1 (Structured latent) VAE για CartPole (notebook-read
         - SPLIT-β KL (ίδιο με baseline): σταθερό μικρό BETA_PHYS στα 4 phys dims,
           annealed beta_style 0->1 στα 60 image dims (ώστε το KL να μη σπρώχνει τα
           φυσικά μεγέθη προς N(0,1)· τα image dims καταρρέουν -> καθαρά latents για LSTM).
-
-ΣΗΜ.: σε notebook τρέξε ΠΡΩΤΑ το cell του loader (VaePairDataset κ.λπ.). Ως script,
-χρειάζεται loader.py στο ίδιο path. Ο encode_fn είναι συμβατός με
-loader.precompute_latents (επιστρέφει mu) -> ίδιο LSTM pipeline με το baseline.
 """
 import os
 import numpy as np
@@ -251,10 +247,8 @@ if __name__ == "__main__":
     val_ds = VaePairDataset(VAL_DIR, shift=SHIFT, state_mean=mean, state_std=std)
 
     pw = NUM_WORKERS > 0
-    train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True, drop_last=True,
-                          num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
-    val_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False,
-                        num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
+    train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True, drop_last=True, num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
+    val_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
     print(f"train pairs: {len(train_ds)} | val pairs: {len(val_ds)}")
 
     model = VAE_P1(n_sup=N_SUP, n_img=N_IMG).to(device)
@@ -271,8 +265,7 @@ if __name__ == "__main__":
         rmse = physical_rmse(model, val_dl, device, std4)
 
         def total(m):  # σταθμισμένο loss (αυτό που γίνεται backprop)
-            return (m["recon"] + BETA_PHYS * m["kld_phys"]
-                    + beta_style * m["kld_img"] + LAMBDA_SUP * m["sup"])
+            return (m["recon"] + BETA_PHYS * m["kld_phys"] + beta_style * m["kld_img"] + LAMBDA_SUP * m["sup"])
 
         tr_total = total(tr)
         va_total = total(va)

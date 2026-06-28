@@ -1,5 +1,5 @@
 """
-lstm_principle3_alt.py — LSTM predictor trained on ENCODED mode (CartPole Principle 3).
+lstm_p3.py — LSTM predictor trained on ENCODED mode (CartPole Principle 3).
 
 Difference from lstm_principle3.py (hybrid):
   * NO hybrid-gt injection: seed & teacher-forcing targets use
@@ -27,11 +27,14 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-SUPERVISION = "<supervision>"       # "semi" or "weak"
+SUPERVISION = "weak"
 DATA_ROOT = "<cartpole-dataset>"
 LATENT_ROOT = f"/kaggle/working/cartpole_p3_{SUPERVISION}_latents"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = f"<cartpole-p3-{SUPERVISION}-vae>"
+# Literal placeholders (both present) so the notebook's textual CONFIG_PATHS patch
+# can fill them in; an f-string would not contain the literal token at patch time.
+VAE_CKPTS = {"semi": "<cartpole-p3-semi-vae>", "weak": "<cartpole-p3-weak-vae>"}
+VAE_CKPT = VAE_CKPTS[SUPERVISION]
 SAVE_DIR = f"/kaggle/working/cartpole_p3_{SUPERVISION}_lstm"
 
 LATENT_SIZE = 64

@@ -1,5 +1,5 @@
 """
-LunarVaeBaseline.py — Physically-interpretable VAE για LunarLander (baseline, notebook-ready).
+vae.py — Physically-interpretable VAE για LunarLander (baseline, notebook-ready).
 Port του cart_pole/vae_baseline.py· state 4D -> 8D.
 
 Χαρακτηριστικά:

@@ -1,5 +1,5 @@
 """
-LunarLstmBaseline_alt.py — ENCODED-mode LSTM για το WEAK-SUP baseline VAE (ΤΟΠΙΚΑ / MPS).
+lstm_p3.py — ENCODED-mode LSTM για το WEAK-SUP baseline VAE (ΤΟΠΙΚΑ / MPS).
 
 ENCODED (όχι hybrid): seed/target = VAE latent, ΚΑΜΙΑ GT injection -> η ποιότητα της
 αναπαράστασης του VAE προπαγανδίζεται στον ορίζοντα -> φαίνεται το gap baseline vs P1/P2/P3
@@ -23,11 +23,14 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-SUPERVISION = "<supervision>"
+SUPERVISION = "weak"
 DATA_ROOT = "<lunarlander-dataset>"
 LATENT_ROOT = f"/kaggle/working/lunarlander_p3_{SUPERVISION}_latents"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = f"<lunarlander-p3-{SUPERVISION}-vae>"
+# Literal placeholders (both present) so the notebook's textual CONFIG_PATHS patch
+# can fill them in; an f-string would not contain the literal token at patch time.
+VAE_CKPTS = {"semi": "<lunarlander-p3-semi-vae>", "weak": "<lunarlander-p3-weak-vae>"}
+VAE_CKPT = VAE_CKPTS[SUPERVISION]
 SAVE_DIR = f"/kaggle/working/lunarlander_p3_{SUPERVISION}_lstm"
 
 LATENT_SIZE = 64

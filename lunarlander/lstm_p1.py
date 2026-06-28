@@ -1,15 +1,15 @@
 """
-lunar_train_lstm_encoded.py — ENCODED-mode LSTM training (Baseline ή P1) για LunarLander, Kaggle/CUDA.
+lstm_p1.py — ENCODED-mode LSTM training (P1) για LunarLander, Kaggle/CUDA.
 
-ΑΥΤΟΝΟΜΟ: VAE, VAE_P1, LatentPredictor, loader είναι ΜΕΣΑ στο αρχείο -> κανένα import από
-άλλα .py. Φορτώνεις έναν ΠΑΓΩΜΕΝΟ VAE (clean, χωρίς noisy labels), κωδικοποιείς τα frames σε
+ΑΥΤΟΝΟΜΟ: VAE_P1, LatentPredictor, loader είναι ΜΕΣΑ στο αρχείο -> κανένα import από
+άλλα .py. Φορτώνεις έναν ΠΑΓΩΜΕΝΟ P1 VAE (clean, χωρίς noisy labels), κωδικοποιείς τα frames σε
 64-dim latents, και εκπαιδεύεις το LSTM:
   * ΕΙΣΟΔΟΣ  : 64 latent dims (z_t) + one-hot action.
   * GROUND TRUTH (target) : το ΕΠΟΜΕΝΟ ENCODED latent z_{t+1} (όχι physical state injection).
   * TEACHER FORCING : scheduled sampling (p_tf: 1.0 -> 0.3). Για ΚΑΘΑΡΟ teacher forcing
     βάλε P_START = P_END = 1.0.
 
-Τρέξε ΔΥΟ φορές: MODEL="baseline" και MODEL="p1".
+Το baseline LSTM εκπαιδεύεται ΞΕΧΩΡΙΣΤΑ από το lstm.py.
 """
 import os
 from os.path import join, basename, isdir
@@ -25,14 +25,10 @@ from tqdm.auto import tqdm
 # ===========================================================================
 # CONFIG  — ΑΛΛΑΞΕ ΤΑ PATHS ΣΤΑ ΔΙΚΑ ΣΟΥ KAGGLE DATASETS
 # ===========================================================================
-MODEL = "p1"                 # "baseline" | "p1"
-
 DATA_ROOT = "<lunarlander-dataset>"
-VAE_DIR   = "<lunarlander-p1-vae>"
-OUT_ROOT  = "/kaggle/working/lunarlander_p1_lstm"
-
-# όνομα VAE checkpoint ανά MODEL (όπως στον φάκελό σου VAE_without_noise/)
-VAE_CKPTS = {"baseline": "lunar_vae_best.pth", "p1": "vae_p1_best.pth"}
+VAE_CKPT  = "<lunarlander-p1-vae>"     # Option A: full path to the trained P1 VAE .pth
+LATENT_ROOT = "/kaggle/working/lunarlander_p1_latents"
+SAVE_DIR    = "/kaggle/working/lunarlander_p1_lstm"
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
 N_ACTIONS = 4
@@ -58,11 +54,7 @@ NUM_WORKERS = 2
 SEED = 0
 DO_PRECOMPUTE = True
 
-# παράγωγα paths
-VAE_CKPT = join(VAE_DIR, VAE_CKPTS[MODEL])
 NORM_STATS = join(DATA_ROOT, "norm_stats.npz")
-LATENT_ROOT = join(OUT_ROOT, f"latents_{MODEL}")
-SAVE_DIR = join(OUT_ROOT, f"lstm_{MODEL}")
 
 
 def set_seed(s):
@@ -80,32 +72,8 @@ def get_device():
 
 
 # ===========================================================================
-# === VAE ΚΛΑΣΕΙΣ (inline) ===================================================
+# === VAE_P1 (inline) =======================================================
 # ===========================================================================
-class VAE(nn.Module):
-    """ Baseline monolithic VAE: stack(frame_t,frame_t+1) (B,6,80,120) -> mu (64). """
-    def __init__(self, latent_size=64, in_channels=6, out_channels=3):
-        super().__init__()
-        self.latent_size = latent_size
-        self.encoder = nn.Sequential(
-            nn.Conv2d(in_channels, 16, 4, 2, 1), nn.ReLU(inplace=True),
-            nn.Conv2d(16, 32, 4, 2, 1), nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, 4, 2, 1), nn.ReLU(inplace=True),
-        )
-        self.fc_mu = nn.Linear(64 * 10 * 15, latent_size)
-        self.fc_logvar = nn.Linear(64 * 10 * 15, latent_size)
-        self.fc_decode = nn.Linear(latent_size, 64 * 10 * 15)
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, 4, 2, 1), nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(32, 16, 4, 2, 1), nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(16, out_channels, 4, 2, 1), nn.Sigmoid(),
-        )
-
-    def encode(self, x):
-        h = self.encoder(x).flatten(1)
-        return self.fc_mu(h), self.fc_logvar(h)
-
-
 class VAE_P1(nn.Module):
     """ Principle-1: δύο encoders (state: 6 καν.· image: 3 καν.) + κοινός decoder. """
     @staticmethod
@@ -144,8 +112,7 @@ class VAE_P1(nn.Module):
 
 
 def build_vae(device):
-    vae = (VAE(latent_size=LATENT_SIZE) if MODEL == "baseline"
-           else VAE_P1(n_sup=N_SUP, n_img=N_IMG)).to(device)
+    vae = VAE_P1(n_sup=N_SUP, n_img=N_IMG).to(device)
     vae.load_state_dict(torch.load(VAE_CKPT, map_location=device)); vae.eval()
     return vae
 
@@ -315,11 +282,10 @@ def eval_epoch(model, loader, device, std_phys, desc=""):
 
 
 if __name__ == "__main__":
-    assert MODEL in ("baseline", "p1")
     set_seed(SEED)
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = get_device()
-    print("device:", device, "| ENCODED-mode LSTM | MODEL:", MODEL, "| VAE:", VAE_CKPT)
+    print("device:", device, "| ENCODED-mode LSTM | MODEL: p1 | VAE:", VAE_CKPT)
 
     mean, std = load_norm_stats(NORM_STATS)
     std_phys = torch.tensor(std[:N_SUP], device=device)
@@ -364,12 +330,12 @@ if __name__ == "__main__":
 
         h = {hh: mse_h[hh - 1] for hh in (1, 10, 20, SEQ_LEN) if hh <= SEQ_LEN}
         h_str = "  ".join(f"h{k}={v:.4f}" for k, v in h.items())
-        print(f"E{epoch:03d} [{MODEL}] | p_tf={p_tf:.2f} H_train={cur_len} lr={lr_now:.1e} | "
+        print(f"E{epoch:03d} [p1] | p_tf={p_tf:.2f} H_train={cur_len} lr={lr_now:.1e} | "
               f"train={tr:.5f} | val phys-MSE mean={val_mean:.4f} | {h_str}")
 
         if val_mean < best - 1e-6:
             best, bad = val_mean, 0
-            torch.save(model.state_dict(), join(SAVE_DIR, f"lstm_{MODEL}_best.pth"))
+            torch.save(model.state_dict(), join(SAVE_DIR, "lstm_p1_best.pth"))
             np.save(join(SAVE_DIR, "val_mse_per_horizon.npy"), mse_h)
             print("  -> best model saved")
         else:
@@ -377,5 +343,5 @@ if __name__ == "__main__":
             if bad >= EARLY_STOP_PATIENCE:
                 print(f"Early stopping στο epoch {epoch}."); break
 
-    torch.save(model.state_dict(), join(SAVE_DIR, f"lstm_{MODEL}_last.pth"))
+    torch.save(model.state_dict(), join(SAVE_DIR, "lstm_p1_last.pth"))
     print("Best val phys-MSE:", best)

@@ -1,5 +1,5 @@
 """
-lstm_baseline_alt.py — LSTM predictor εκπαιδευμένο σε ENCODED mode (CartPole Baseline).
+lstm.py — LSTM predictor εκπαιδευμένο σε ENCODED mode (CartPole Baseline).
 
 Διαφορά από lstm_baseline.py (hybrid):
   * ΚΑΝΕΝΑ hybrid-gt injection: seed & teacher-forcing targets χρησιμοποιούν
@@ -15,10 +15,6 @@ lstm_baseline_alt.py — LSTM predictor εκπαιδευμένο σε ENCODED mo
     αφού ποτέ δεν είδε πραγματικά VAE-encoded physical dims κατά την εκπαίδευση.
   * Αυτό το script παράγει τα *_alt checkpoints που χρησιμοποιεί το
     eval_baseline_vs_p1.py στο "encoded" seed mode.
-
-Αρχιτεκτονική: ΙΔΙΑ LatentPredictor (residual LSTM).
-Τεχνικές: scheduled sampling, horizon curriculum, early stopping — ΙΔΙΑ με hybrid.
-Μόνη αλλαγή: rollout χωρίς _hybrid().
 """
 import os
 import numpy as np

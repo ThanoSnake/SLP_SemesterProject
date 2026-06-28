@@ -8,12 +8,6 @@ vae.py — Physically-interpretable VAE για CartPole (baseline, notebook-read
   * Supervised alignment των 4 πρώτων dims με standardized φυσικά states.
   * Per-element mean losses· ξεχωριστά components στο log.
   * Validation με physical RMSE ανά μέγεθος + best-model saving + EARLY STOPPING.
-
-  ΒΕΛΤΙΩΣΗ ΧΡΟΝΟΥ: ο loader επιστρέφει uint8 εικόνες· η μεταφορά στη GPU γίνεται σε
-  uint8 (4× λιγότερα bytes στο PCIe) και το .float()/255 γίνεται ΣΤΗ GPU (όχι στη CPU)
-  -> εξαφανίζει το CPU bottleneck της κανονικοποίησης.
-
-Σε notebook: τρέξε ΠΡΩΤΑ το cell του loader.
 """
 import os
 import numpy as np
@@ -204,10 +198,8 @@ if __name__ == "__main__":
     train_ds = VaePairDataset(TRAIN_DIR, shift=SHIFT, state_mean=mean, state_std=std)
     val_ds = VaePairDataset(VAL_DIR, shift=SHIFT, state_mean=mean, state_std=std)
     pw = NUM_WORKERS > 0
-    train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True, drop_last=True,
-                          num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
-    val_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False,
-                        num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
+    train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True, drop_last=True, num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
+    val_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
     print(f"train pairs: {len(train_ds)} | val pairs: {len(val_ds)}")
 
     model = VAE(latent_size=LATENT_SIZE).to(device)

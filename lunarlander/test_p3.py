@@ -1,5 +1,5 @@
 """
-eval_p3_noise.py — Noisy evaluation comparing Baseline, P3-semi, and P3-weak (LunarLander).
+test_p3.py — Noisy evaluation comparing Baseline, P3-semi, and P3-weak (LunarLander).
 
 Evaluates robustness of the three pipelines under visual noise (Gaussian or Salt & Pepper).
 P3 uses the same monolithic VAE architecture as Baseline — only supervision differs.
@@ -23,7 +23,7 @@ from loader import LatentSequenceDataset, load_norm_stats, list_npz
 # ---------------------------------------------------------------------------
 DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/compare_p3_noise_out"
+SAVE_DIR = "/kaggle/working/lunarlander_p3_out"
 SHIFT = 0
 
 LATENT_SIZE, N_SUP = 64, 8
@@ -50,25 +50,25 @@ MODELS = [
      "vae_ckpt": "<lunarlander-baseline-vae>",
      "lstm_ckpt": {
          "hybrid":  "<lunarlander-baseline-lstm>",
-         "encoded": "/kaggle/working/lstm_baseline_alt_out/lstm_baseline_alt_best.pth",
+         "encoded": "<lunarlander-baseline-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_p3_noise/baseline"},
+     "latent_root": "/kaggle/working/lunarlander_p3_latents/baseline"},
     {"label": "P3 semi", "color": "C1",
      "make_vae": lambda: VAE_P3(latent_size=LATENT_SIZE),
-     "vae_ckpt": "/kaggle/working/vae_p3_out/vae_p3_semi_best.pth",
+     "vae_ckpt": "<lunarlander-p3-semi-vae>",
      "lstm_ckpt": {
-         "hybrid":  "/kaggle/working/lstm_p3_semi_out/lstm_p3_semi_best.pth",
-         "encoded": "/kaggle/working/lstm_p3_semi_alt_out/lstm_p3_semi_alt_best.pth",
+         "hybrid":  "<lunarlander-p3-semi-lstm>",
+         "encoded": "<lunarlander-p3-semi-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_p3_noise/p3_semi"},
+     "latent_root": "/kaggle/working/lunarlander_p3_latents/p3_semi"},
     {"label": "P3 weak", "color": "C3",
      "make_vae": lambda: VAE_P3(latent_size=LATENT_SIZE),
-     "vae_ckpt": "/kaggle/working/vae_p3_out/vae_p3_weak_best.pth",
+     "vae_ckpt": "<lunarlander-p3-weak-vae>",
      "lstm_ckpt": {
-         "hybrid":  "/kaggle/working/lstm_p3_weak_out/lstm_p3_weak_best.pth",
-         "encoded": "/kaggle/working/lstm_p3_weak_alt_out/lstm_p3_weak_alt_best.pth",
+         "hybrid":  "<lunarlander-p3-weak-lstm>",
+         "encoded": "<lunarlander-p3-weak-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_p3_noise/p3_weak"},
+     "latent_root": "/kaggle/working/lunarlander_p3_latents/p3_weak"},
 ]
 
 

@@ -1,5 +1,5 @@
 """
-eval_principle4.py — Αξιολόγηση Principle 4 (compositional decoding) για LunarLander, όπως στο paper.
+test_p4.py — Αξιολόγηση Principle 4 (compositional decoding) για LunarLander, όπως στο paper.
 
 Συγκρίνει baseline VAE (1 μονολιθικός decoder)  vs  VAE_P4 (3 object decoders: lander/flags/bg):
     1) full-image reconstruction MSE   (↓)
@@ -25,16 +25,16 @@ from vae_p4 import VAE_P4
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/input/datasets/<username>/<lunarlander-dataset>"
+DATA_ROOT = "<lunarlander-dataset>"
 EVAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-BASELINE_CKPT = "<lunarlander_baseline_vae>"
-P4_CKPT = "/kaggle/working/vae_p4_out/vae_p4_best.pth"
+BASELINE_CKPT = "<lunarlander-baseline-vae>"
+P4_CKPT = "<lunarlander-p4-vae>"
 LATENT_SIZE = 64
 N_SUP = 8
 BATCH = 128
 NUM_WORKERS = 4
-SAVE_FIG = "/kaggle/working/vae_p4_out/p4_recon_compare.png"   # None για παράλειψη
+SAVE_FIG = "/kaggle/working/lunarlander_p4_out/p4_compare.png"   # None για παράλειψη
 
 
 # ---------------------------------------------------------------------------

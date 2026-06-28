@@ -1,13 +1,13 @@
 """
-lstm_principle2_alt.py — LSTM predictor trained on ENCODED mode (CartPole Principle 2).
+lstm_p2.py — LSTM predictor trained on ENCODED mode (CartPole Principle 2).
 
 Difference from lstm_baseline.py:
   * Uses VAE_P2 from vae_principle2.py.
   * NO hybrid-gt injection: seed & teacher-forcing targets use
     EXCLUSIVELY VAE-encoded latents (z), NOT GT physical states.
   * Rollout is fully end-to-end using pure VAE-encoded latents.
-  * Saves latents under /kaggle/working/cartpole_latents_p2 and the checkpoints
-    under /kaggle/working/lstm_p2_alt_out.
+  * Saves latents under /kaggle/working/cartpole_p2_latents and the checkpoints
+    under /kaggle/working/cartpole_p2_lstm.
 """
 import os
 import numpy as np

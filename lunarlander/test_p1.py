@@ -1,5 +1,5 @@
 """
-lunar_test_thanasis.py — Αξιολόγηση Baseline vs Principle 1 ΜΕ ΘΟΡΥΒΩΔΕΙΣ εικόνες (LunarLander).
+test_p1.py — Αξιολόγηση Baseline vs Principle 1 ΜΕ ΘΟΡΥΒΩΔΕΙΣ εικόνες (LunarLander).
 
 Κληρονομεί τη στατιστική μεθοδολογία του lunar_eval_baseline_vs_p1.py (robust median + IQR,
 paired bootstrap CI), αλλά τροποποιεί τη VAE-encoding φάση ώστε να ΠΡΟΣΘΕΤΕΙ
@@ -40,7 +40,7 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, l
 # ---------------------------------------------------------------------------
 DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/compare_noise_out"
+SAVE_DIR = "/kaggle/working/lunarlander_p1_out"
 SHIFT = 0
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
@@ -72,17 +72,17 @@ MODELS = [
      "vae_ckpt": "<lunarlander-baseline-vae>",
      "lstm_ckpt": {
          "hybrid":  "<lunarlander-baseline-lstm>",
-         "encoded": "/kaggle/working/lstm_baseline_alt_out/lstm_baseline_alt_best.pth",
+         "encoded": "<lunarlander-baseline-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_noise/baseline"},
+     "latent_root": "/kaggle/working/lunarlander_p1_latents/baseline"},
     {"label": "Principle 1", "color": "C1",
      "make_vae": lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG),
      "vae_ckpt": "<lunarlander-p1-vae>",
      "lstm_ckpt": {
          "hybrid":  "<lunarlander-p1-lstm>",
-         "encoded": "/kaggle/working/lstm_p1_alt_out/lstm_p1_alt_best.pth",
+         "encoded": "<lunarlander-p1-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_noise/p1"},
+     "latent_root": "/kaggle/working/lunarlander_p1_latents/p1"},
 ]
 
 

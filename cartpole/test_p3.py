@@ -1,5 +1,5 @@
 """
-eval_p3_noise.py — Noisy evaluation comparing Baseline, P3-semi, and P3-weak (CartPole).
+test_p3.py — Noisy evaluation comparing Baseline, P3-semi, and P3-weak (CartPole).
 
 Evaluates robustness of the three pipelines under visual noise (Gaussian or Salt & Pepper).
 P3 uses the same monolithic VAE architecture as Baseline — only supervision differs.
@@ -22,7 +22,7 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, l
 # ---------------------------------------------------------------------------
 DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/compare_p3_noise_out"
+SAVE_DIR = "/kaggle/working/cartpole_p3_out"
 SHIFT = 0
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 4, 60
@@ -51,7 +51,7 @@ MODELS = [
          "hybrid":  "<cartpole-baseline-lstm>",
          "encoded": "<cartpole-baseline-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_p3_noise/baseline"},
+     "latent_root": "/kaggle/working/cartpole_p3_latents/baseline"},
     {"label": "P3 semi", "color": "C1",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
      "vae_ckpt": "<cartpole-p3-semi-vae>",
@@ -59,7 +59,7 @@ MODELS = [
          "hybrid":  "<cartpole-p3-semi-lstm>",
          "encoded": "<cartpole-p3-semi-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_p3_noise/p3_semi"},
+     "latent_root": "/kaggle/working/cartpole_p3_latents/p3_semi"},
     {"label": "P3 weak", "color": "C3",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
      "vae_ckpt": "<cartpole-p3-weak-vae>",
@@ -67,7 +67,7 @@ MODELS = [
          "hybrid":  "<cartpole-p3-weak-lstm>",
          "encoded": "<cartpole-p3-weak-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_p3_noise/p3_weak"},
+     "latent_root": "/kaggle/working/cartpole_p3_latents/p3_weak"},
 ]
 
 

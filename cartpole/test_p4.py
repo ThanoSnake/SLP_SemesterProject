@@ -1,5 +1,5 @@
 """
-eval_principle4.py — Αξιολόγηση Principle 4 (compositional decoding) όπως στο paper.
+test_p4.py — Αξιολόγηση Principle 4 (compositional decoding) όπως στο paper.
 
 Μετράει & συγκρίνει baseline VAE (1 μονολιθικός decoder)  vs  VAE_P4 (3 μικροί object decoders):
     1) full-image reconstruction MSE   (όσο χαμηλότερο τόσο καλύτερα)
@@ -13,8 +13,6 @@ eval_principle4.py — Αξιολόγηση Principle 4 (compositional decoding)
     - VAE_P4             (από το vae_principle4.py, με .decode -> (composite, comps))
     - VaePairDataset, load_norm_stats   (από το vae_principle4.py — 5-item loader, χωρίς masks)
   Αλλιώς κάνε import/run τα αντίστοιχα cells πρώτα.
-
-ΕΚΤΕΛΕΣΗ: ρύθμισε τα paths στο CFG και τρέξε. Παράγει πίνακα σύγκρισης + (προαιρετικά) εικόνες.
 """
 import os
 import numpy as np
@@ -41,11 +39,11 @@ LATENT_SIZE = 64
 N_SUP = 4
 BATCH = 128
 NUM_WORKERS = 4
-SAVE_FIG = "/kaggle/working/cartpole_p4_out/p4_compare.png"   # None για παράλειψη
+SAVE_FIG = "/kaggle/working/cartpole_p4_out/p4_compare.png"
 
 
 # ---------------------------------------------------------------------------
-# SSIM (self-contained, gaussian-windowed, channel-averaged) — δεν χρειάζεται skimage
+# SSIM (self-contained, gaussian-windowed, channel-averaged)
 # ---------------------------------------------------------------------------
 def _gaussian_window(ch, ksize=11, sigma=1.5, device="cpu"):
     coords = torch.arange(ksize, dtype=torch.float32, device=device) - (ksize - 1) / 2.0

@@ -1,5 +1,5 @@
 """
-vae_principle4.py — Principle 4 (Compositional / object-centric DECODING) VAE για LunarLander.
+vae_p4.py — Principle 4 (Compositional / object-centric DECODING) VAE για LunarLander.
 Loaders/helpers από το LunarLoader.py (τρέξε εκείνο το cell πρώτα). Ανάλογο του cart_pole/principles4.
 
 ΣΚΗΝΗ (χρώματα): μωβ διαστημόπλοιο, κίτρινες σημαίες, γκρι κοντάρια, μαύρος ουρανός, άσπρο έδαφος.

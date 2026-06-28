@@ -1,4 +1,5 @@
-""" loader.py — EAGER all-in-RAM loading (καμία cache/LRU, μηδέν IO στο train).
+"""
+loader.py — EAGER all-in-RAM loading (καμία cache/LRU, μηδέν IO στο train).
 
 Φιλοσοφία:
   * Όλο το dataset φορτώνεται ΜΙΑ φορά στο __init__ (με progress bar). Μετά κάθε

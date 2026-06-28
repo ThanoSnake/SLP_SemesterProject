@@ -1,5 +1,5 @@
 """
-lstm_principle1_alt.py — LSTM predictor trained on ENCODED mode (CartPole Principle 1).
+lstm_p1.py — LSTM predictor trained on ENCODED mode (CartPole Principle 1).
 
 Difference from lstm_principle1.py (hybrid):
   * NO hybrid-gt injection: seed & teacher-forcing targets use

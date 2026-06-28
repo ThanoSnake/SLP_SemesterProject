@@ -1,5 +1,5 @@
 """
-eval_p1_noise.py — Αξιολόγηση Baseline vs Principle 1 ΜΕ ΘΟΡΥΒΩΔΕΙΣ εικόνες (CartPole).
+test_p1.py — Αξιολόγηση Baseline vs Principle 1 ΜΕ ΘΟΡΥΒΩΔΕΙΣ εικόνες (CartPole).
 
 Κληρονομεί τη στατιστική μεθοδολογία του eval_baseline_vs_p1.py (robust median + IQR,
 paired bootstrap CI), αλλά τροποποιεί τη VAE-encoding φάση ώστε να ΠΡΟΣΘΕΤΕΙ
@@ -20,7 +20,6 @@ NOISE TYPES (επιλογή μέσω NOISE_TYPE):
 
 ΣΗΜ.: Ο θόρυβος εφαρμόζεται ΑΠΟΚΛΕΙΣΤΙΚΑ κατά τη φάση encoding (precompute_latents).
 Δεν επηρεάζει τα ground-truth states ούτε τα LSTM checkpoints.
-Σε notebook τρέξε ΠΡΩΤΑ τα cells: VAE, VAE_P1, LatentPredictor, loader.
 """
 import os
 import numpy as np
@@ -40,7 +39,7 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, l
 # ---------------------------------------------------------------------------
 DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/compare_p1_out"
+SAVE_DIR = "/kaggle/working/cartpole_p1_out"
 
 SHIFT = 0
 LATENT_SIZE, N_SUP, N_IMG = 64, 4, 60
@@ -74,7 +73,7 @@ MODELS = [
          "hybrid":  "<cartpole-baseline-lstm>",
          "encoded": "<cartpole-baseline-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_noise/baseline"},
+     "latent_root": "/kaggle/working/cartpole_p1_latents/baseline"},
     {"label": "Principle 1", "color": "C1",
      "make_vae": lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG),
      "vae_ckpt": "<cartpole-p1-vae>",
@@ -82,7 +81,7 @@ MODELS = [
          "hybrid":  "<cartpole-p1-lstm>",
          "encoded": "<cartpole-p1-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_noise/p1"},
+     "latent_root": "/kaggle/working/cartpole_p1_latents/p1"},
 ]
 
 

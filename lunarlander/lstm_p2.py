@@ -1,5 +1,5 @@
 """
-lunar_train_lstm_encoded_p2.py — ENCODED-mode LSTM training (Principle 2) για LunarLander, Kaggle/CUDA.
+lstm_p2.py — ENCODED-mode LSTM training (Principle 2) για LunarLander, Kaggle/CUDA.
 
 ΑΥΤΟΝΟΜΟ: VAE_P2, LatentPredictor, loader είναι ΜΕΣΑ στο αρχείο -> κανένα import. Φορτώνεις τον
 ΠΑΓΩΜΕΝΟ P2 VAE (clean, χωρίς noisy labels), κωδικοποιείς τα frames σε 64-dim latents, και
@@ -28,10 +28,9 @@ from tqdm.auto import tqdm
 MODEL = "p2"
 
 DATA_ROOT = "<lunarlander-dataset>"
-VAE_DIR   = "<lunarlander-p2-vae>"
-OUT_ROOT  = "/kaggle/working/lunarlander_p2_lstm"
-
-VAE_CKPT_NAME = "lunar_vae_p2_best.pth"
+VAE_CKPT  = "<lunarlander-p2-vae>"     # Option A: full path to the trained P2 VAE .pth
+LATENT_ROOT = "/kaggle/working/lunarlander_p2_latents"
+SAVE_DIR    = "/kaggle/working/lunarlander_p2_lstm"
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
 N_ACTIONS = 4
@@ -57,10 +56,7 @@ NUM_WORKERS = 2
 SEED = 0
 DO_PRECOMPUTE = True
 
-VAE_CKPT = join(VAE_DIR, VAE_CKPT_NAME)
 NORM_STATS = join(DATA_ROOT, "norm_stats.npz")
-LATENT_ROOT = join(OUT_ROOT, f"latents_{MODEL}")
-SAVE_DIR = join(OUT_ROOT, f"lstm_{MODEL}")
 
 
 def set_seed(s):

@@ -1,5 +1,5 @@
 """
-vae_principle2.py — Principle 2 (Aligned in/equivariance) VAE για CartPole.
+vae_p2.py — Principle 2 (Aligned in/equivariance) VAE για CartPole.
 
 ΣΧΕΔΙΑΣΤΙΚΗ ΑΠΟΦΑΣΗ — "P2 ΜΟΝΟ ΤΟΥ" (απομονωμένο, πάνω στο baseline):
   Το paper (Fig. 3C/D) συγκρίνει ΚΑΘΕ αρχή ΞΕΧΩΡΙΣΤΑ ως ablation πάνω στο baseline
@@ -7,10 +7,6 @@ vae_principle2.py — Principle 2 (Aligned in/equivariance) VAE για CartPole.
   κρατάμε ΑΚΡΙΒΩΣ την αρχιτεκτονική του baseline (ένας encoder, 6-κάναλη είσοδος
   stack(frame_t,frame_t+1), 64 latent, supervised τα 4 πρώτα dims) και προσθέτουμε
   ΜΟΝΟ το in/equivariance loss -> κάθε διαφορά οφείλεται καθαρά στην Αρχή 2.
-
-ΑΡΧΗ 2 (paper, Def. 3): enc είναι equivariant αν enc(g_Θ(x)) =d h_Φ(enc(x)),
-με invariance την ειδική περίπτωση h=identity. Loss:
-        L_wm(x) ∝ E_{Θ,Φ}[ || enc(g_Θ(x)) − h_Φ(enc(x)) ||² ].
 
 ΕΝΕΡΓΟΙ ΜΕΤΑΣΧΗΜΑΤΙΣΜΟΙ (πάνω στα ερμηνεύσιμα φυσικά dims mu[:, :4]):
 
@@ -42,9 +38,6 @@ vae_principle2.py — Principle 2 (Aligned in/equivariance) VAE για CartPole.
   (D) REAL-PAIR difference-consistency (η προσέγγιση του original repo)  -> όλα τα dims
       Για ζεύγη ΠΡΑΓΜΑΤΙΚΩΝ frames: latent_diff ≈ true_state_diff. Δίνει equivariance
       σήμα ΚΑΙ στη γωνία/ταχύτητες μέσω φυσικών μεταβάσεων (όχι synthetic transform).
-
-ΣΗΜ.: σε notebook τρέξε ΠΡΩΤΑ το cell του loader (VaePairDataset, load_norm_stats).
-Ο encode_fn επιστρέφει mu -> ΙΔΙΟ LSTM pipeline (precompute_latents) με baseline/p1.
 """
 import os
 import numpy as np

@@ -1,5 +1,5 @@
 """
-cmp_baseline_p2.py — Αξιολόγηση Baseline vs Principle 2 ΜΕ BRIGHTNESS/CONTRAST jitter (LunarLander).
+test_p2.py — Αξιολόγηση Baseline vs Principle 2 ΜΕ BRIGHTNESS/CONTRAST jitter (LunarLander).
 
 Βασισμένο στο lunar_test_thanasis.py (robust median + IQR, paired bootstrap CI, degradation
 sweep), αλλά αντί για Gaussian θόρυβο εφαρμόζει την ΙΔΙΑ photometric διαταραχή που το P2
@@ -34,7 +34,7 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, l
 # ---------------------------------------------------------------------------
 DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/compare_p2_bc_out"
+SAVE_DIR = "/kaggle/working/lunarlander_p2_out"
 SHIFT = 0
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
@@ -61,18 +61,18 @@ TRANSFORM_SIGN = +1.0                       # +1 -> πιο φωτεινό/αντ
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "/kaggle/working/vae_out/vae_best.pth",
+     "vae_ckpt": "<lunarlander-baseline-vae>",
      "lstm_ckpt": {
-         "encoded": "/kaggle/working/lstm_baseline_alt_out/lstm_baseline_alt_best.pth",
+         "encoded": "<lunarlander-baseline-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_p2bc/baseline"},
+     "latent_root": "/kaggle/working/lunarlander_p2_latents/baseline"},
     {"label": "Principle 2", "color": "C2",
      "make_vae": lambda: VAE_P2(latent_size=LATENT_SIZE),
-     "vae_ckpt": "/kaggle/working/vae_p2_out/vae_p2_best.pth",
+     "vae_ckpt": "<lunarlander-p2-vae>",
      "lstm_ckpt": {
-         "encoded": "/kaggle/working/lstm_p2_alt_out/lstm_p2_alt_best.pth",
+         "encoded": "<lunarlander-p2-lstm>",
      },
-     "latent_root": "/kaggle/working/cmp_latents_p2bc/p2"},
+     "latent_root": "/kaggle/working/lunarlander_p2_latents/p2"},
 ]
 
 
@@ -117,8 +117,7 @@ def make_transform_fn(transform_type, level, device):
 # αλλά εφαρμόζει το transform ΠΡΙΝ το encoding.
 # ---------------------------------------------------------------------------
 @torch.no_grad()
-def precompute_latents_transformed(encode_fn, root, out_root, transform_fn,
-                                   shift=0, batch=256, device="cuda"):
+def precompute_latents_transformed(encode_fn, root, out_root, transform_fn, shift=0, batch=256, device="cuda"):
     """Encode all episodes, applying transform_fn to each image BEFORE encoding.
     encode_fn(img_t, img_tp1) -> z.  transform_fn(img) -> transformed_img."""
     from os.path import join, basename

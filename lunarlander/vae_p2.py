@@ -1,5 +1,5 @@
 """
-LunarVaePrinciple2.py — Principle 2 (Aligned in/equivariance) VAE για LunarLander.
+vae_p2.py — Principle 2 (Aligned in/equivariance) VAE για LunarLander.
 Port του cart_pole/vae_principle2-2.py· state 4D -> 8D, ένας movable (το lander).
 
 ΣΧΕΔΙΑΣΤΙΚΗ ΑΠΟΦΑΣΗ — "P2 ΜΟΝΟ ΤΟΥ" (απομονωμένο, πάνω στο baseline):
