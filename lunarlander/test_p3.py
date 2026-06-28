@@ -47,10 +47,11 @@ BOOT_SEED = 0
 LOG_Y = True
 
 # ---------------------------------------------------------------------------
-# NOISE CONFIG — μοναδικό setting: μικρός gaussian σ=0.05
+# NOISE CONFIG — SWEEP πολλαπλών επιπέδων gaussian θορύβου
 # ---------------------------------------------------------------------------
-NOISE_TYPE = "gaussian"           # "gaussian" | "salt_pepper"
-NOISE_SIGMA = 0.05                # std (gaussian) πάνω σε [0,1] εικόνα
+NOISE_TYPE = "gaussian"                      # "gaussian" | "salt_pepper"
+NOISE_SIGMAS = [0.01, 0.02, 0.03, 0.05, 0.1]  # λίστα επιπέδων σ -> ένα run ανά επίπεδο
+NOISE_SIGMA = NOISE_SIGMAS[0]                # ΤΡΕΧΟΝ επίπεδο (αλλάζει στο loop του main)
 NOISE_SEED = 42
 
 # Trajectory plot (4): τυχαίο test window
@@ -241,7 +242,8 @@ def plot_median_iqr(err, save_dir):
     plt.xlabel("Prediction Horizon"); plt.ylabel("State MSE (median, IQR band)")
     plt.xlim(1, SEQ_LEN); plt.grid(alpha=0.3, which="both"); plt.legend()
     plt.tight_layout()
-    p = os.path.join(save_dir, "p3_median_iqr_encoded.png")
+    tag = f"{NOISE_SIGMA:.2f}".replace(".", "p")
+    p = os.path.join(save_dir, f"p3_median_iqr_encoded_s{tag}.png")
     plt.savefig(p, dpi=150, bbox_inches="tight"); plt.close()
     print("saved:", p)
 
@@ -266,7 +268,8 @@ def plot_perdim(err, save_dir):
             ax.legend()
     plt.suptitle(f"Per-dim state-MSE (encoded) | {NOISE_TYPE} σ={NOISE_SIGMA:.2f}", y=1.01)
     plt.tight_layout()
-    p = os.path.join(save_dir, "p3_perdim_encoded.png")
+    tag = f"{NOISE_SIGMA:.2f}".replace(".", "p")
+    p = os.path.join(save_dir, f"p3_perdim_encoded_s{tag}.png")
     plt.savefig(p, dpi=150, bbox_inches="tight"); plt.close(fig)
     print("saved:", p)
 
@@ -290,7 +293,8 @@ def plot_paired(err, save_dir, rng):
     plt.xlabel("Prediction Horizon"); plt.ylabel("Δ state-MSE")
     plt.xlim(1, SEQ_LEN); plt.grid(alpha=0.3); plt.legend()
     plt.tight_layout()
-    p = os.path.join(save_dir, "p3_paired_encoded.png")
+    tag = f"{NOISE_SIGMA:.2f}".replace(".", "p")
+    p = os.path.join(save_dir, f"p3_paired_encoded_s{tag}.png")
     plt.savefig(p, dpi=150, bbox_inches="tight"); plt.close()
     print("saved:", p)
     return paired
@@ -328,15 +332,45 @@ def plot_trajectory(data, mean_s, std_s, save_dir, rng):
         plt.suptitle(f"Physical trajectory — test window #{w} | "
                      f"{NOISE_TYPE} σ={NOISE_SIGMA:.2f} (physical units)")
         plt.tight_layout()
-        p = os.path.join(save_dir, f"p3_trajectory_window{w}.png")
+        tag = f"{NOISE_SIGMA:.2f}".replace(".", "p")
+        p = os.path.join(save_dir, f"p3_trajectory_s{tag}_window{w}.png")
         plt.savefig(p, dpi=150, bbox_inches="tight"); plt.close(fig)
         print("saved:", p)
 
 
 # ---------------------------------------------------------------------------
-# Main
+# (5) Degradation summary πάνω σε ΟΛΟ το σ-sweep
+# ---------------------------------------------------------------------------
+def plot_degradation(deg, save_dir):
+    """median state-MSE (mean over dims) vs σ, σε σταθερούς ορίζοντες — μία γραμμή ανά μοντέλο.
+    deg[σ][label] = median MSE curve (L,). Πιο flat καμπύλη = πιο robust στον θόρυβο."""
+    SUMMARY_HORIZONS = [h for h in (1, 10, 20, 30) if h <= SEQ_LEN]
+    sig = NOISE_SIGMAS
+    fig, axes = plt.subplots(1, len(SUMMARY_HORIZONS),
+                             figsize=(4.5 * len(SUMMARY_HORIZONS), 4.2), squeeze=False)
+    for hi, h in enumerate(SUMMARY_HORIZONS):
+        ax = axes[0][hi]
+        for m in MODELS:
+            vals = [deg[s][m["label"]][h - 1] for s in sig]
+            ax.plot(sig, vals, color=m["color"], lw=2, marker="o", markersize=5, label=m["label"])
+        if LOG_Y:
+            ax.set_yscale("log")
+        ax.set_title(f"h={h}"); ax.set_xlabel(f"noise σ ({NOISE_TYPE})")
+        if hi == 0:
+            ax.set_ylabel("median state-MSE")
+        ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8)
+    plt.suptitle(f"Degradation under {NOISE_TYPE} noise — encoded (πιο flat = πιο robust)", y=1.02)
+    plt.tight_layout()
+    p = os.path.join(save_dir, "p3_degradation_encoded.png")
+    plt.savefig(p, dpi=150, bbox_inches="tight"); plt.close(fig)
+    print("saved:", p)
+
+
+# ---------------------------------------------------------------------------
+# Main — SWEEP πάνω στα NOISE_SIGMAS
 # ---------------------------------------------------------------------------
 def main():
+    global NOISE_SIGMA
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mean_s, std_s = load_norm_stats(NORM_STATS)
@@ -346,47 +380,52 @@ def main():
     base = MODELS[0]["label"]
     variants = MODELS[1:]
 
-    print(f"\n{'='*60}\n  NOISE: {NOISE_TYPE} σ={NOISE_SIGMA:.2f} | encoded mode\n{'='*60}")
-    data = {m["label"]: evaluate_model_noisy(m, device, mean_s, std_s) for m in MODELS}
-
-    n = min(data[m["label"]]["pred"].shape[0] for m in MODELS)
-    if any(data[m["label"]]["pred"].shape[0] != n for m in MODELS):
-        counts = {m["label"]: data[m["label"]]["pred"].shape[0] for m in MODELS}
-        print(f"[WARN] #windows differ {counts}; truncating to {n}.")
-    for m in MODELS:
-        data[m["label"]]["pred"] = data[m["label"]]["pred"][:n]
-        data[m["label"]]["gt"] = data[m["label"]]["gt"][:n]
-
-    err = {m["label"]: (data[m["label"]]["pred"] - data[m["label"]]["gt"]) ** 2 for m in MODELS}
-
-    plot_median_iqr(err, SAVE_DIR)
-    plot_perdim(err, SAVE_DIR)
-    paired = plot_paired(err, SAVE_DIR, rng)
-    plot_trajectory(data, mean_s, std_s, SAVE_DIR, traj_rng)
-
     HS = [h for h in (1, 10, 20, 30) if h <= SEQ_LEN]
-    print(f"\n{'='*80}")
-    print(f"=== SUMMARY: median state-MSE (standardized) | {NOISE_TYPE} σ={NOISE_SIGMA:.2f}, encoded ===")
-    print(f"{'='*80}")
-    for m in MODELS:
-        med = np.median(err[m["label"]].mean(axis=2), axis=0)
-        print(f"  {m['label']:<12} " + "  ".join(f"h{h}={med[h-1]:.5f}" for h in HS))
-    for v in variants:
-        med_d, lo_d, hi_d = paired[v["label"]]
-        print(f"  Δ(base−{v['label']}) " +
-              "  ".join(f"h{h}={med_d[h-1]:+.5f}[{lo_d[h-1]:+.5f},{hi_d[h-1]:+.5f}]" for h in HS))
-
+    deg = {}                              # deg[σ][label] = median MSE curve (L,)
     save_dict = {"horizons": np.arange(1, SEQ_LEN + 1),
-                 "noise_type": NOISE_TYPE, "noise_sigma": NOISE_SIGMA}
-    for m in MODELS:
-        save_dict[f"{m['label']}_err_median"] = np.median(err[m["label"]].mean(axis=2), axis=0)
-    for v in variants:
-        med_d, lo_d, hi_d = paired[v["label"]]
-        save_dict[f"paired_{v['label']}_median"] = med_d
-        save_dict[f"paired_{v['label']}_lo"] = lo_d
-        save_dict[f"paired_{v['label']}_hi"] = hi_d
-    np.savez(os.path.join(SAVE_DIR, "cmp_p3_noise005_curves.npz"), **save_dict)
-    print("\nsaved figures + cmp_p3_noise005_curves.npz ->", SAVE_DIR)
+                 "noise_type": NOISE_TYPE, "noise_sigmas": np.array(NOISE_SIGMAS)}
+
+    for sigma in NOISE_SIGMAS:
+        NOISE_SIGMA = sigma               # οι plot/eval functions διαβάζουν αυτό το global
+        tag = f"{sigma:.2f}".replace(".", "p")
+        print(f"\n{'#'*64}\n#  NOISE LEVEL: {NOISE_TYPE} σ={sigma:.2f}\n{'#'*64}")
+        data = {m["label"]: evaluate_model_noisy(m, device, mean_s, std_s) for m in MODELS}
+
+        n = min(data[m["label"]]["pred"].shape[0] for m in MODELS)
+        if any(data[m["label"]]["pred"].shape[0] != n for m in MODELS):
+            counts = {m["label"]: data[m["label"]]["pred"].shape[0] for m in MODELS}
+            print(f"[WARN] #windows differ {counts}; truncating to {n}.")
+        for m in MODELS:
+            data[m["label"]]["pred"] = data[m["label"]]["pred"][:n]
+            data[m["label"]]["gt"] = data[m["label"]]["gt"][:n]
+
+        err = {m["label"]: (data[m["label"]]["pred"] - data[m["label"]]["gt"]) ** 2 for m in MODELS}
+
+        plot_median_iqr(err, SAVE_DIR)
+        plot_perdim(err, SAVE_DIR)
+        paired = plot_paired(err, SAVE_DIR, rng)
+        plot_trajectory(data, mean_s, std_s, SAVE_DIR, traj_rng)
+
+        deg[sigma] = {}
+        print(f"\n  --- SUMMARY σ={sigma:.2f} (median state-MSE, standardized) ---")
+        for m in MODELS:
+            med = np.median(err[m["label"]].mean(axis=2), axis=0)
+            deg[sigma][m["label"]] = med
+            save_dict[f"{m['label']}_s{tag}_err_median"] = med
+            print(f"  {m['label']:<12} " + "  ".join(f"h{h}={med[h-1]:.5f}" for h in HS))
+        for v in variants:
+            med_d, lo_d, hi_d = paired[v["label"]]
+            save_dict[f"paired_{v['label']}_s{tag}_median"] = med_d
+            save_dict[f"paired_{v['label']}_s{tag}_lo"] = lo_d
+            save_dict[f"paired_{v['label']}_s{tag}_hi"] = hi_d
+            print(f"  Δ(base−{v['label']}) " +
+                  "  ".join(f"h{h}={med_d[h-1]:+.5f}[{lo_d[h-1]:+.5f},{hi_d[h-1]:+.5f}]" for h in HS))
+
+    # ---- (5) degradation summary πάνω σε όλο το sweep ----
+    plot_degradation(deg, SAVE_DIR)
+
+    np.savez(os.path.join(SAVE_DIR, "cmp_p3_noise_sweep_curves.npz"), **save_dict)
+    print("\nsaved figures + cmp_p3_noise_sweep_curves.npz ->", SAVE_DIR)
 
 
 if __name__ == "__main__":
