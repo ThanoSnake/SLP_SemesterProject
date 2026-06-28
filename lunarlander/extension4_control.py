@@ -78,6 +78,7 @@ FUEL_W = 0.30                    # ποινή καυσίμου
 BOUND_W = 50.0                   # ποινή για |x| εκτός ορίων (out-of-frame)
 SMOOTH_W = 2.0                   # ποινή εναλλαγής ενέργειας (smoother control)
 X_BOUND = 1.0                    # όριο |x| πέρα από το οποίο τιμωρούμε
+LAND_W = 50.0                    # bonus για επαφή ποδιών στο τερματικό (anti-hover, υπέρ landing)
 MPC_SEED = 0
 RUN_DIAGNOSTIC = True            # τύπωσε action-sensitivity check πριν τα επεισόδια
 
@@ -198,7 +199,9 @@ def heuristic_action_batch(phys):
 @torch.no_grad()
 def mpc_plan(lstm, z_t, mean_t, std_t, device):
     """ Heuristic-guided MPC: enumerate immediate action ∈ {0..3}, roll out την "ουρά" με τον
-    heuristic (ON-distribution) + μικρή εξερεύνηση, score = Σ(shaping − fuel − bounds − switch).
+    heuristic (ON-distribution) + μικρή εξερεύνηση.
+    OBJECTIVE = ΠΡΟΟΔΟΣ (env-style reward = Δshaping): hovering -> 0, κάθοδος προς pad -> θετικό
+    (anti-hover). score = Σ Δshaping − fuel − bounds − switch + LAND_W·(legs τερματικά).
     Επιστρέφει το immediate action με το καλύτερο ΜΕΣΟ score (robust σε model exploitation). """
     K, M = MPC_HORIZON, MPC_SAMPLES_PER_ACTION
     N = N_ACTIONS * M
@@ -208,23 +211,26 @@ def mpc_plan(lstm, z_t, mean_t, std_t, device):
     fuel_cost = torch.tensor([0.0, 0.03, 0.30, 0.03], device=device)
     std8, mean8 = std_t[:N_SUP], mean_t[:N_SUP]
     score = torch.zeros(N, device=device)
-    prev_a = None
+    prev_shaping = shaping_phys(z[:, :N_SUP] * std8 + mean8)              # shaping_0 (ίδιο σε όλους)
+    prev_a, phys = None, z[:, :N_SUP] * std8 + mean8
     for k in range(K):
         if k == 0:
             a = first                                                     # ενέργεια υπό αξιολόγηση
         else:
-            a = heuristic_action_batch(z[:, :N_SUP] * std8 + mean8)       # ON-distribution ουρά
+            a = heuristic_action_batch(phys)                             # ON-distribution ουρά
             explore = torch.rand(N, device=device) < EPS_EXPLORE
             a = torch.where(explore, torch.randint(0, N_ACTIONS, (N,), device=device), a)
         z, hidden = lstm.step(z, F.one_hot(a, N_ACTIONS).float(), hidden)
         phys = z[:, :N_SUP] * std8 + mean8
-        step_cost = (shaping_phys(phys)
+        sh = shaping_phys(phys)
+        step_cost = ((sh - prev_shaping)                                  # ΠΡΟΟΔΟΣ (anti-hover)
                      - FUEL_W * fuel_cost[a]
                      - BOUND_W * torch.relu(torch.abs(phys[:, 0]) - X_BOUND))
         if prev_a is not None:
             step_cost = step_cost - SMOOTH_W * (a != prev_a).float()
         score += step_cost
-        prev_a = a
+        prev_shaping, prev_a = sh, a
+    score += LAND_W * (phys[:, 6] + phys[:, 7])                           # τερματικό landing bonus (legs)
     score_per_action = score.view(N_ACTIONS, M).mean(dim=1)               # ΜΕΣΟ ανά immediate action
     return int(torch.argmax(score_per_action).item())
 
@@ -376,7 +382,7 @@ def main():
     # ---- plot 1: return distribution ανά controller ----
     plt.figure(figsize=(7, 4.6))
     data = [[r["return"] for r in results[c]] for c in CONTROLLERS]
-    plt.boxplot(data, labels=CONTROLLERS, showmeans=True)
+    plt.boxplot(data, tick_labels=CONTROLLERS, showmeans=True)
     plt.axhline(200, color="g", ls="--", lw=1, label="solved (≥200)")
     plt.axhline(0, color="0.6", lw=0.8)
     plt.ylabel("episode return")
