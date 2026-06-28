@@ -52,8 +52,8 @@ LATENT_ROOT = "/kaggle/working/cartpole_sindy_latents"
 SAVE_DIR = "/kaggle/working/cartpole_sindy"
 
 # Trained hybrid checkpoints (absolute, configurable per model)
-HYBRID_BASELINE_CKPT = os.path.join(SAVE_DIR, "hybrid_baseline.pth")
-HYBRID_P1_CKPT = os.path.join(SAVE_DIR, "hybrid_p1.pth")
+HYBRID_BASELINE_CKPT = "<hybrid-baseline>"
+HYBRID_P1_CKPT = "<hybrid-p1>"
 
 LATENT_SIZE = 64
 SHIFT = 0
@@ -454,8 +454,9 @@ def encode_latents(cfg, device):
     """Encode CLEAN train/val latents (for SINDy fit + hybrid training) and the TEST split at
     each NOISE_LEVELS (for the robustness sweep). The VAE class (VAE / VAE_P1) + checkpoint are
     used to produce mu; output goes to cfg['latent_root']/{train,val,test_<tag>}."""
-    vae = cfg["make_vae"]().to(device)
+    vae = cfg["make_vae"]()
     vae.load_state_dict(torch.load(cfg["vae_ckpt"], map_location=device))
+    vae.to(device)
     vae.eval()
 
     @torch.no_grad()
@@ -579,8 +580,9 @@ def load_lstm(cfg, device):
     """Load the pre-saved baseline LSTM from its checkpoint."""
     model = LatentPredictor(LATENT_SIZE, N_ACTIONS, HIDDEN, LAYERS)
     model.load_state_dict(torch.load(cfg["lstm_ckpt"], map_location=device))
+    model.to(device)
     model.eval()
-    print(f"    [{cfg['label']}] LSTM loaded from {cfg['lstm_ckpt']}")
+    print(f"    [{cfg['label']}] LSTM loaded from pre-existing: {cfg['lstm_ckpt']}")
     return model
 
 
@@ -653,10 +655,12 @@ def train_hybrid(model, cfg, mean, std, std4, device):
             break
     if best_state is not None:
         model.load_state_dict(best_state)
+    model.to(device)
     model.eval()
 
     # Persist the trained hybrid (residual LSTM weights + frozen Xi buffer).
-    save_path = cfg["hybrid_ckpt"]
+    slug = cfg["label"].lower().replace(" ", "_")
+    save_path = os.path.join(SAVE_DIR, f"hybrid_{slug}.pth")
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save(model.state_dict(), save_path)
     print(f"    [{cfg['label']}] hybrid trained: best val phys-MSE = {best:.4f}  -> {save_path}")
@@ -664,14 +668,19 @@ def train_hybrid(model, cfg, mean, std, std4, device):
 
 
 def load_hybrid(cfg, library, Xi, device):
-    """Reconstruct the hybrid shell (frozen SINDy + residual LSTM) and load trained weights
-    from cfg['hybrid_ckpt'] (skips retraining)."""
+    """Reconstruct the hybrid shell (frozen SINDy + residual LSTM) and load trained weights."""
     model = HybridPredictor(library, Xi, latent=LATENT_SIZE, action_dim=N_ACTIONS,
                             hidden=HIDDEN, layers=LAYERS, n_sup=N_SUP,
-                            control_mode=CONTROL_MODE, corr_bound=CORR_BOUND).to(device)
-    model.load_state_dict(torch.load(cfg["hybrid_ckpt"], map_location=device))
+                            control_mode=CONTROL_MODE, corr_bound=CORR_BOUND)
+    if TRAIN_HYBRID:
+        slug = cfg["label"].lower().replace(" ", "_")
+        path = os.path.join(SAVE_DIR, f"hybrid_{slug}.pth")
+    else:
+        path = cfg["hybrid_ckpt"]
+    model.load_state_dict(torch.load(path, map_location=device))
+    model.to(device)
     model.eval()
-    print(f"    [{cfg['label']}] hybrid loaded from {cfg['hybrid_ckpt']}")
+    print(f"    [{cfg['label']}] hybrid loaded from {path}")
     return model
 
 
@@ -719,6 +728,7 @@ def train_lstm(cfg, mean, std, std4, device):
 
     if best_state is not None:
         model.load_state_dict(best_state)
+    model.to(device)
     model.eval()
     path = _lstm_ckpt_path(cfg)
     os.makedirs(os.path.dirname(path), exist_ok=True)
