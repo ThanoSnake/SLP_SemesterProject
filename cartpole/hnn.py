@@ -50,17 +50,19 @@ MODEL = next(m for m in MODELS if m["label"] == "Baseline")
 H_HIDDEN = 64            # width of the Hamiltonian MLP H_theta
 G_HIDDEN = 32            # width of the input-map MLP g_theta
 DT = 1.0                 # integration step (latent frame interval; the net absorbs scaling)
+HNN_PRETRAINED_CKPT = "<cartpole-baseline-hnn>"
 SAVE_DIR = "/kaggle/working/cartpole_hnn"
 STATE_NAMES = ["x", "x_dot", "theta", "theta_dot"]
 EVAL_LEVEL = 0.0         # noise level used for the trajectory/energy visuals (0.0 = clean)
-TRAIN_HNN = True         # True -> train a fresh HNN (+save to HNN_CKPT); False -> load HNN_CKPT
-HNN_CKPT = os.path.join(SAVE_DIR, "hnn_baseline.pth")
+TRAIN_HNN = False         # True -> train a fresh HNN (+save to HNN_CKPT); False -> load HNN_CKPT
+HNN_CKPT = os.path.join(SAVE_DIR, "hnn_baseline.pth") if TRAIN_HNN else HNN_PRETRAINED_CKPT
 
 
 def load_lstm(cfg, device):
     """Load the pretrained LSTM from cfg['lstm_ckpt'] (same source as the VAE's vae_ckpt)."""
-    model = LatentPredictor(LATENT_SIZE, N_ACTIONS, HIDDEN, LAYERS).to(device)
+    model = LatentPredictor(LATENT_SIZE, N_ACTIONS, HIDDEN, LAYERS)
     model.load_state_dict(torch.load(cfg["lstm_ckpt"], map_location=device))
+    model.to(device)
     model.eval()
     print(f"  LSTM loaded from {cfg['lstm_ckpt']}")
     return model
@@ -74,6 +76,7 @@ def load_hnn(device):
     """Load a previously trained HNN from HNN_CKPT (skips retraining)."""
     model = build_hnn(device)
     model.load_state_dict(torch.load(HNN_CKPT, map_location=device))
+    model.to(device)
     model.eval()
     print(f"  HNN loaded from {HNN_CKPT}")
     return model
@@ -227,6 +230,7 @@ def train_hnn(model, cfg, mean, std, std4, device):
 
     if best_state is not None:
         model.load_state_dict(best_state)
+    model.to(device)
     model.eval()
     os.makedirs(os.path.dirname(HNN_CKPT), exist_ok=True)
     torch.save(model.state_dict(), HNN_CKPT)
@@ -391,5 +395,6 @@ if __name__ == "__main__":
     for nl in NOISE_LEVELS:
         print(f"{nl:<8.2f}{results[nl]['LSTM'].mean():>12.4f}{results[nl]['HNN'].mean():>12.4f}")
 
-    plot_per_horizon(results[EVAL_LEVEL], SAVE_DIR, EVAL_LEVEL)
+    for nl in NOISE_LEVELS:
+        plot_per_horizon(results[nl], SAVE_DIR, nl)
     plot_degradation(results, SAVE_DIR)
