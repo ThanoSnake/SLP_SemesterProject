@@ -111,13 +111,20 @@ MPC_MARGIN = 25.0                # override μόνο αν dream-value(MPC) > dre
 RISK_TRIGGER = 10.0              # override μόνο αν το PID dream έχει ουσιαστικό predicted risk
 RISK_MARGIN = 5.0                # και ο MPC μειώνει το risk τουλάχιστον τόσο
 
-# --- Grid search πάνω στα gates που επιτρέπουν τελικά MPC override ---
+# --- Local search γύρω από το καλύτερο αρχικό setting: "medium" ---
 # Κάθε config τρέχει σαν ξεχωριστός "guided_mpc_<label>" controller, στα ίδια episode seeds.
-# Ξεκινάμε από ήπιο -> πιο ανοιχτό. Αν το loose χειροτερέψει, κρατάμε mild/medium.
+# Αλλάζουμε ένα-δύο knobs τη φορά για να δούμε ΤΙ επιτρέπει useful override χωρίς model exploitation.
 GUIDED_GRID = [
-    {"label": "mild",   "mpc_margin": 10.0, "risk_trigger": 4.0, "risk_margin": 2.0, "pid_bias": 0.85},
-    {"label": "medium", "mpc_margin":  5.0, "risk_trigger": 2.0, "risk_margin": 1.0, "pid_bias": 0.75},
-    {"label": "loose",  "mpc_margin":  2.0, "risk_trigger": 1.0, "risk_margin": 0.5, "pid_bias": 0.70},
+    # reference: το καλύτερο από το προηγούμενο sweep
+    {"label": "med_ref",      "mpc_margin": 5.0, "risk_trigger": 2.0, "risk_margin": 1.0,  "pid_bias": 0.75},
+    # ίδιο safety gate, περισσότερη εξερεύνηση στο CEM
+    {"label": "med_explore",  "mpc_margin": 5.0, "risk_trigger": 2.0, "risk_margin": 1.0,  "pid_bias": 0.60},
+    # ίδιο risk gate, χαμηλότερη απαίτηση σε value improvement
+    {"label": "med_value",    "mpc_margin": 3.0, "risk_trigger": 2.0, "risk_margin": 1.0,  "pid_bias": 0.75},
+    # ίδιο value gate, λίγο πιο εύκολο να θεωρηθεί risky/safer
+    {"label": "med_risk",     "mpc_margin": 5.0, "risk_trigger": 1.5, "risk_margin": 0.75, "pid_bias": 0.75},
+    # συνδυαστικά λίγο πιο ανοιχτό, αλλά όχι τόσο όσο το προηγούμενο loose
+    {"label": "med_balanced", "mpc_margin": 3.0, "risk_trigger": 1.5, "risk_margin": 0.75, "pid_bias": 0.65},
 ]
 
 FUEL_COST = [0.0, 0.03, 0.30, 0.03]   # ανά action {noop,left,main,right}
