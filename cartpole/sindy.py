@@ -116,6 +116,8 @@ TRAIN_STRIDE = 5
 TRAIN_BATCH = 64
 NUM_WORKERS = 2
 CORR_BOUND = None        # None -> unbounded residual; float -> CORR_BOUND*tanh(fc) for stability
+LSTM_DELTA_BOUND = 0.4    # None -> raw LSTM; float -> clamp the LSTM's per-step delta to +/- value
+TRAIN_LSTM = True         # True -> train a fresh (bounded) LSTM here (+save); False -> load it
 TRAIN_HYBRID = False     # True -> train a fresh hybrid (+save); False -> load from cfg['hybrid_ckpt']
 SHOW_PROGRESS = False    # tqdm bars render as line-spam under Kaggle's non-TTY logs -> off by default
 
@@ -325,6 +327,22 @@ class HybridPredictor(nn.Module):
             self._last_sindys.append(sindy_delta.detach())
         return z_next, hidden
 
+
+class BoundedPredictor(nn.Module):
+    """Wrap a predictor and clamp its per-step delta to +/- bound — a 'threshold' on the
+    prediction that caps runaway latent jumps under noise. Same step/init_hidden interface."""
+    def __init__(self, model, bound):
+        super().__init__()
+        self.model = model
+        self.bound = bound
+
+    def init_hidden(self, b, device):
+        return self.model.init_hidden(b, device)
+
+    def step(self, z, a_onehot, hidden):
+        z_next, hidden = self.model.step(z, a_onehot, hidden)
+        delta = torch.clamp(z_next - z, -self.bound, self.bound)
+        return z + delta, hidden
 
 
 #
@@ -544,11 +562,25 @@ def fit_sindy(cfg, library, ctrl_names, device):
 
 
 
+def _lstm_ckpt_path(cfg):
+    slug = cfg["label"].lower().replace(" ", "_")
+    return os.path.join(SAVE_DIR, f"lstm_bounded_{slug}.pth")
+
+
+def build_lstm(device):
+    """Residual LSTM, optionally wrapped so its per-step delta is clamped to +/- LSTM_DELTA_BOUND."""
+    m = LatentPredictor(LATENT_SIZE, N_ACTIONS, HIDDEN, LAYERS)
+    if LSTM_DELTA_BOUND is not None:
+        m = BoundedPredictor(m, LSTM_DELTA_BOUND)
+    return m.to(device)
+
+
 def load_lstm(cfg, device):
-    """Load the trained residual-LSTM predictor (same interface as SINDyPredictor)."""
-    model = LatentPredictor(LATENT_SIZE, N_ACTIONS, HIDDEN, LAYERS).to(device)
-    model.load_state_dict(torch.load(cfg["lstm_ckpt"], map_location=device))
+    """Load the (bounded) LSTM trained by train_lstm from its checkpoint."""
+    model = build_lstm(device)
+    model.load_state_dict(torch.load(_lstm_ckpt_path(cfg), map_location=device))
     model.eval()
+    print(f"    [{cfg['label']}] LSTM loaded from {_lstm_ckpt_path(cfg)}")
     return model
 
 
@@ -640,6 +672,58 @@ def load_hybrid(cfg, library, Xi, device):
     model.load_state_dict(torch.load(cfg["hybrid_ckpt"], map_location=device))
     model.eval()
     print(f"    [{cfg['label']}] hybrid loaded from {cfg['hybrid_ckpt']}")
+    return model
+
+
+def train_lstm(cfg, mean, std, std4, device):
+    """Train a fresh (delta-bounded) LSTM with the same scheduled-sampling + curriculum recipe,
+    so the bound is baked into the learned model. Saves to _lstm_ckpt_path(cfg)."""
+    model = build_lstm(device)
+    train_dl = make_loader(os.path.join(cfg["latent_root"], "train"), mean, std,
+                           TRAIN_STRIDE, TRAIN_BATCH, shuffle=True)
+    val_dl = make_loader(os.path.join(cfg["latent_root"], "val"), mean, std,
+                         TRAIN_STRIDE, BATCH, shuffle=False)
+    opt = optim.Adam(model.parameters(), lr=LR)
+    sched = optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=SCHED_PATIENCE)
+
+    best, bad, best_state = float("inf"), 0, None
+    print(f"  training {cfg['label']} LSTM (delta bound={LSTM_DELTA_BOUND}, max {EPOCHS} epochs) ...")
+    for epoch in range(1, EPOCHS + 1):
+        p_tf = max(P_END, P_START - (P_START - P_END) * (epoch - 1) / max(P_DECAY_EPOCHS, 1))
+        cur_len = int(round(min(SEQ_LEN, L_START + (SEQ_LEN - L_START)
+                                * (epoch - 1) / max(CURRICULUM_EPOCHS, 1))))
+        model.train()
+        for batch in train_dl:
+            batch = [b.to(device, non_blocking=True) for b in batch]
+            preds, z_gt = _train_rollout(model, batch, p_tf, cur_len, device)
+            loss = (F.mse_loss(preds, z_gt)
+                    + W_PHYS * F.mse_loss(preds[..., :N_SUP], z_gt[..., :N_SUP]))
+            opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), CLIP)
+            opt.step()
+
+        mse_h = eval_per_horizon(model, val_dl, device, std4, N_ACTIONS, N_SUP)
+        val_mean = float(mse_h.mean())
+        sched.step(val_mean)
+        improved = val_mean < best - 1e-6
+        if improved:
+            best, bad, best_state = val_mean, 0, copy.deepcopy(model.state_dict())
+        else:
+            bad += 1
+        print(f"  E{epoch:02d}/{EPOCHS} | p_tf={p_tf:.2f} H={cur_len:2d} | "
+              f"val phys-MSE={val_mean:.4f}{'  *best' if improved else ''}")
+        if bad >= EARLY_STOP_PATIENCE:
+            print(f"  early stop at epoch {epoch}")
+            break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    model.eval()
+    path = _lstm_ckpt_path(cfg)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save(model.state_dict(), path)
+    print(f"  [{cfg['label']}] LSTM trained: best val phys-MSE={best:.4f} -> {path}")
     return model
 
 
@@ -761,7 +845,10 @@ if __name__ == "__main__":
     for cfg in MODELS:
         encode_latents(cfg, device)
         sindy_model, Xi = fit_sindy(cfg, library, ctrl_names, device)
-        lstm_model = load_lstm(cfg, device)
+        if TRAIN_LSTM:
+            lstm_model = train_lstm(cfg, mean, std, std4, device)
+        else:
+            lstm_model = load_lstm(cfg, device)
 
         # Hybrid (frozen SINDy + residual LSTM): train fresh or load a previous run.
         if TRAIN_HYBRID:
