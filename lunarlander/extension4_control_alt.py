@@ -70,7 +70,7 @@ MODEL_REGISTRY = {
 N_EPISODES = 20
 MAX_STEPS = 400
 SEED = 0
-ENABLE_WIND = True               # το πείραμα ΕΧΕΙ wind -> εδώ ο corrector/shield έχει νόημα
+ENABLE_WIND = False               # το πείραμα ΕΧΕΙ wind -> εδώ ο corrector/shield έχει νόημα
 WIND_POWER, TURBULENCE_POWER = 15.0, 1.5
 CONTROLLERS = ["true_pid", "enc_pid", "latent_mpc_rand", "guided_mpc"]
 
