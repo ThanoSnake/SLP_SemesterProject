@@ -27,9 +27,9 @@ from tqdm.auto import tqdm
 # ===========================================================================
 MODEL = "p2"
 
-DATA_ROOT = "/kaggle/input/<lunar-data>/lunarlander_data"     # train/val/test + norm_stats.npz
-VAE_DIR   = "/kaggle/input/<vae-without-noise>"               # περιέχει lunar_vae_p2_best.pth
-OUT_ROOT  = "/kaggle/working/lstm_img_noise"
+DATA_ROOT = "<lunarlander-dataset>"
+VAE_DIR   = "<lunarlander-p2-vae>"
+OUT_ROOT  = "/kaggle/working/lunarlander_p2_lstm"
 
 VAE_CKPT_NAME = "lunar_vae_p2_best.pth"
 
@@ -51,8 +51,8 @@ W_PHYS = 1.0
 P_START, P_END, P_DECAY_EPOCHS = 1.0, 0.3, 40     # scheduled sampling (teacher forcing)
 L_START, CURRICULUM_EPOCHS = 5, 15                # horizon curriculum
 
-EARLY_STOP_PATIENCE = 5
-SCHED_PATIENCE = 4
+EARLY_STOP_PATIENCE = 6
+SCHED_PATIENCE = 3
 NUM_WORKERS = 2
 SEED = 0
 DO_PRECOMPUTE = True

@@ -36,11 +36,11 @@ from loader import VaePairDataset, load_norm_stats   # ΟΛΟΙ οι loaders ζ�
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/working/lunarlander_data"
+DATA_ROOT = "<lunarlander-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/vae_p4_out"
+SAVE_DIR = "/kaggle/working/lunarlander_p4_vae"
 
 LATENT_SIZE = 64
 N_SUP = 8                  # [x, y, vx, vy, theta, omega, leg1, leg2]
@@ -67,7 +67,7 @@ KL_ANNEAL_EPOCHS = 20
 LAMBDA_SUP = 1.0
 EARLY_STOP_PATIENCE = 5
 SCHED_PATIENCE = 3
-NUM_WORKERS = 4
+NUM_WORKERS = 2
 SEED = 0
 
 # --- Color-segmentation references (σε [0,1]). ΠΡΟΣΑΡΜΟΣΕ αν το render σου διαφέρει — δες visualize. ---

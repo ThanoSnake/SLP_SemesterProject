@@ -60,11 +60,11 @@ from loader import VaePairDataset, load_norm_stats
 # ---------------------------------------------------------------------------
 # CONFIG  (ΙΔΙΑ paths/hyper με baseline & p1 -> τίμια σύγκριση)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/working/cartpole_data"
+DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/vae_p2_out"
+SAVE_DIR = "/kaggle/working/cartpole_p2_vae"
 
 LATENT_SIZE = 64
 N_SUP = 4                  # [x, x_dot, theta, theta_dot] -> index 0=x, 2=theta
@@ -118,7 +118,7 @@ COLOR_CONTRAST = 0.3
 EARLY_STOP_PATIENCE = 5
 SCHED_PATIENCE = 3
 
-NUM_WORKERS = 4
+NUM_WORKERS = 2
 SEED = 0
 SAVE_VIZ = True            # γράφει λίγα before/after PNGs πριν το train (validation των transforms)
 

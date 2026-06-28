@@ -25,11 +25,11 @@ from tqdm.auto import tqdm
 # ===========================================================================
 # CONFIG  — ΑΛΛΑΞΕ ΤΑ PATHS ΣΤΑ ΔΙΚΑ ΣΟΥ KAGGLE DATASETS
 # ===========================================================================
-MODEL = "baseline"                 # "baseline" | "p1"
+MODEL = "p1"                 # "baseline" | "p1"
 
-DATA_ROOT = "/kaggle/input/<lunar-data>/lunarlander_data"     # train/val/test + norm_stats.npz
-VAE_DIR   = "/kaggle/input/<vae-without-noise>"               # περιέχει τα VAE .pth
-OUT_ROOT  = "/kaggle/working/lstm_img_noise"
+DATA_ROOT = "<lunarlander-dataset>"
+VAE_DIR   = "<lunarlander-p1-vae>"
+OUT_ROOT  = "/kaggle/working/lunarlander_p1_lstm"
 
 # όνομα VAE checkpoint ανά MODEL (όπως στον φάκελό σου VAE_without_noise/)
 VAE_CKPTS = {"baseline": "lunar_vae_best.pth", "p1": "vae_p1_best.pth"}
@@ -52,8 +52,8 @@ W_PHYS = 1.0
 P_START, P_END, P_DECAY_EPOCHS = 1.0, 0.3, 40     # scheduled sampling (teacher forcing)
 L_START, CURRICULUM_EPOCHS = 5, 15                # horizon curriculum
 
-EARLY_STOP_PATIENCE = 5
-SCHED_PATIENCE = 4
+EARLY_STOP_PATIENCE = 6
+SCHED_PATIENCE = 3
 NUM_WORKERS = 2
 SEED = 0
 DO_PRECOMPUTE = True

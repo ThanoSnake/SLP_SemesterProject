@@ -29,11 +29,11 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/working/lunarlander_data"
-LATENT_ROOT = "/kaggle/working/lunarlander_latents_baseline_alt"   # ΞΕΧΩΡΙΣΤΟ
+DATA_ROOT = "<lunarlander-dataset>"
+LATENT_ROOT = "/kaggle/working/lunarlander_latents_baseline"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "/kaggle/working/vae_baseline_alt_out/vae_best.pth"     # WEAK-SUP baseline VAE
-SAVE_DIR = "/kaggle/working/lstm_baseline_alt_out"
+VAE_DIR   = "<lunarlander-baseline-vae>"
+OUT_ROOT  = "/kaggle/working/lunarlander_baseline_lstm"
 
 LATENT_SIZE = 64
 N_SUP = 8

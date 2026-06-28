@@ -21,15 +21,14 @@ from vae_p3 import VAE_P3, encode_fn
 from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 
 # ---------------------------------------------------------------------------
-# CONFIG  (ΤΟΠΙΚΑ paths)
+# CONFIG
 # ---------------------------------------------------------------------------
-KEY = "p3_weak"
-DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lunarlander_data")
-RUNS = os.path.expanduser("~/lunar_local_runs")
-LATENT_ROOT = os.path.join(RUNS, f"latents_{KEY}_clean")
+SUPERVISION = "<supervision>"
+DATA_ROOT = "<lunarlander-dataset>"
+LATENT_ROOT = f"/kaggle/working/lunarlander_p3_{SUPERVISION}_latents"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = os.path.join(RUNS, f"vae_{KEY}_clean", "vae_best.pth")
-SAVE_DIR = os.path.join(RUNS, f"lstm_{KEY}_enc_tr")
+VAE_CKPT = f"<lunarlander-p3-{SUPERVISION}-vae>"
+SAVE_DIR = f"/kaggle/working/lunarlander_p3_{SUPERVISION}_lstm"
 
 LATENT_SIZE = 64
 N_SUP = 8
@@ -50,15 +49,16 @@ W_PHYS = 1.0               # επιπλέον βάρος στα N_SUP physical d
 P_START, P_END, P_DECAY_EPOCHS = 1.0, 0.3, 40     # scheduled sampling
 L_START, CURRICULUM_EPOCHS = 5, 15                # horizon curriculum
 
-EARLY_STOP_PATIENCE = 5
-SCHED_PATIENCE = 4
-NUM_WORKERS = 0            # Mac/MPS
+EARLY_STOP_PATIENCE = 6
+SCHED_PATIENCE = 3
+NUM_WORKERS = 2
 SEED = 0
 DO_PRECOMPUTE = True
 
 
 def set_seed(s):
-    np.random.seed(s); torch.manual_seed(s)
+    np.random.seed(s)
+    torch.manual_seed(s)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(s)
 

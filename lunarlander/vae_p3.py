@@ -49,11 +49,13 @@ from loader import VaePairDataset, load_norm_stats, list_npz
 # ---------------------------------------------------------------------------
 # CONFIG  (ΤΟΠΙΚΑ paths -> τρέχει στο Mac· για Kaggle άλλαξε σε /kaggle/working/...)
 # ---------------------------------------------------------------------------
-DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lunarlander_data")
+SUPERVISION = "<supervision>"
+
+DATA_ROOT = "<lunarlander-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = os.path.join(os.path.expanduser("~/lunar_local_runs"), "vae_p3_weak_clean")
+SAVE_DIR = "/kaggle/working/lunarlander_p3_vae"
 
 STATE_NAMES = ("x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2")
 
@@ -62,13 +64,12 @@ N_SUP = 8                  # [x, y, vx, vy, theta, omega, leg1, leg2]
 SHIFT = 0                  # CLEAN ground truth (no label noise)
 
 # --- ΑΡΧΗ 3: ρύθμιση εποπτείας ---
-SUPERVISION = "weak"
 STATIC_DIMS = (0, 1, 4, 6, 7)    # x, y, theta, leg1, leg2 -> ΠΑΝΤΑ εποπτευόμενα
 VEL_DIMS = (2, 3, 5)             # vx, vy, omega
 VEL_SRC = {2: 0, 3: 1, 5: 4}     # vel-dim <- pos-dim για το finite-diff (vx<-x, vy<-y, omega<-theta)
 
 BATCH = 128
-EPOCHS = 50
+EPOCHS = 40
 LR = 1e-3
 
 # --- SPLIT-β KL (ΤΑΥΤΟΣΗΜΟ με baseline) ---
@@ -81,7 +82,7 @@ LAMBDA_SUP = 1.0
 EARLY_STOP_PATIENCE = 5
 SCHED_PATIENCE = 3
 
-NUM_WORKERS = 0            # Mac/MPS: 0 (αποφυγή pickling του all-in-RAM dataset σε spawn)
+NUM_WORKERS = 2
 SEED = 0
 
 

@@ -32,7 +32,7 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, l
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/input/datasets/iliasbakos/lunarlander-dataset/lunarlander_data"
+DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
 SAVE_DIR = "/kaggle/working/compare_p2_bc_out"
 SHIFT = 0

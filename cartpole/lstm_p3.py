@@ -27,13 +27,12 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-SUPERVISION = "weak"       # "semi" | "weak" (MUST match the VAE checkpoint)
-
-DATA_ROOT = "/kaggle/working/cartpole_data"
-LATENT_ROOT = f"/kaggle/working/cartpole_latents_p3_{SUPERVISION}"
+SUPERVISION = "<supervision>"       # "semi" or "weak"
+DATA_ROOT = "<cartpole-dataset>"
+LATENT_ROOT = f"/kaggle/working/cartpole_p3_{SUPERVISION}_latents"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = f"/kaggle/working/vae_p3_out/vae_p3_{SUPERVISION}_best.pth"
-SAVE_DIR = f"/kaggle/working/lstm_p3_{SUPERVISION}_alt_out"
+VAE_CKPT = f"<cartpole-p3-{SUPERVISION}-vae>"
+SAVE_DIR = f"/kaggle/working/cartpole_p3_{SUPERVISION}_lstm"
 
 LATENT_SIZE = 64
 N_SUP = 4
@@ -68,7 +67,7 @@ L_START = 5
 CURRICULUM_EPOCHS = 15
 
 EARLY_STOP_PATIENCE = 6
-SCHED_PATIENCE = 4
+SCHED_PATIENCE = 3
 NUM_WORKERS = 2
 SEED = 0
 DO_PRECOMPUTE = True

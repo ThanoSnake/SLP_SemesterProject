@@ -31,16 +31,17 @@ from vae_p4 import VAE_P4
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/working/cartpole_data"
+DATA_ROOT = "<cartpole-dataset>"
 EVAL_DIR = os.path.join(DATA_ROOT, "val")          # ή ένα ξεχωριστό test split
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-BASELINE_CKPT = "/kaggle/working/vae_baseline_out/vae_best.pth"
-P4_CKPT = "/kaggle/working/vae_p4_out/vae_p4_best.pth"
+BASELINE_CKPT = "<cartpole-baseline-vae>"
+P4_CKPT = "<cartpole-p4-vae>"
+
 LATENT_SIZE = 64
 N_SUP = 4
 BATCH = 128
 NUM_WORKERS = 4
-SAVE_FIG = "/kaggle/working/vae_p4_out/p4_recon_compare.png"   # None για παράλειψη
+SAVE_FIG = "/kaggle/working/cartpole_p4_out/p4_compare.png"   # None για παράλειψη
 
 
 # ---------------------------------------------------------------------------

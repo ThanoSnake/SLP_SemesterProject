@@ -44,18 +44,18 @@ from loader import VaePairDataset, load_norm_stats
 # ---------------------------------------------------------------------------
 # CONFIG  (ΙΔΙΑ paths/hyper με baseline -> τίμια σύγκριση)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/working/cartpole_data"
+DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/vae_p3_out"
+SAVE_DIR = "/kaggle/working/cartpole_p3_vae"
 
 LATENT_SIZE = 64
 N_SUP = 4                  # [x, x_dot, theta, theta_dot]
 SHIFT = 0                  # 0=clean· 2/5/10 -> noisy (weak supervision στις θέσεις)
 
 # --- ΑΡΧΗ 3: ρύθμιση εποπτείας ---
-SUPERVISION = "weak"       # "semi" (μόνο static) | "weak" (+ εκτιμώμενη ταχύτητα)
+SUPERVISION = "<supervision>"       # "semi" (μόνο static) | "weak" (+ εκτιμώμενη ταχύτητα)
 STATIC_DIMS = (0, 2)       # x, theta
 VEL_DIMS = (1, 3)          # x_dot, theta_dot
 DT = 0.02                  # gym CartPole tau -> για την εκτίμηση ταχύτητας
@@ -74,7 +74,7 @@ LAMBDA_SUP = 1.0           # per-element mean -> O(1) knob
 EARLY_STOP_PATIENCE = 5
 SCHED_PATIENCE = 3         # < EARLY_STOP -> προλαβαίνει να πέσει το LR πρώτα
 
-NUM_WORKERS = 4
+NUM_WORKERS = 2
 SEED = 0
 
 

@@ -29,11 +29,11 @@ from loader import VaePairDataset, load_norm_stats
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/working/cartpole_data"
+DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/vae_out"
+SAVE_DIR = "/kaggle/working/cartpole_baseline_vae"
 
 LATENT_SIZE = 64
 N_SUP = 4                  # [x, x_dot, theta, theta_dot]
@@ -53,7 +53,7 @@ LAMBDA_SUP = 1.0           # per-element mean -> O(1) knob
 EARLY_STOP_PATIENCE = 5
 SCHED_PATIENCE = 3         # < EARLY_STOP -> προλαβαίνει να πέσει το LR πρώτα
 
-NUM_WORKERS = 4
+NUM_WORKERS = 2
 SEED = 0
 
 

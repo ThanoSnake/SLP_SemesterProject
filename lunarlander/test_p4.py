@@ -25,10 +25,10 @@ from vae_p4 import VAE_P4
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/working/lunarlander_data"
+DATA_ROOT = "/kaggle/input/datasets/<username>/<lunarlander-dataset>"
 EVAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-BASELINE_CKPT = "/kaggle/working/vae_out/vae_best.pth"
+BASELINE_CKPT = "<lunarlander_baseline_vae>"
 P4_CKPT = "/kaggle/working/vae_p4_out/vae_p4_best.pth"
 LATENT_SIZE = 64
 N_SUP = 8

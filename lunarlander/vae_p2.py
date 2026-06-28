@@ -61,11 +61,11 @@ from loader import VaePairDataset, load_norm_stats
 # ---------------------------------------------------------------------------
 # CONFIG  (ΙΔΙΑ paths/hyper με baseline & P1 -> τίμια σύγκριση)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/working/lunarlander_data"
+DATA_ROOT = "<lunarlander-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/vae_p2_out"
+SAVE_DIR = "/kaggle/working/lunarlander_p2_vae"
 
 STATE_NAMES = ("x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2")
 X_DIM, Y_DIM, THETA_DIM = 0, 1, 4          # index στα supervised dims
@@ -120,7 +120,7 @@ COLOR_CONTRAST = 0.3
 EARLY_STOP_PATIENCE = 5
 SCHED_PATIENCE = 3
 
-NUM_WORKERS = 4
+NUM_WORKERS = 2
 SEED = 0
 SAVE_VIZ = True            # γράφει λίγα before/after PNGs πριν το train (validation transforms)
 

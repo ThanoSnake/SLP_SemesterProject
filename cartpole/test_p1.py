@@ -38,11 +38,11 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, l
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/input/datasets/iliasbakos/cartpole-dataset/cartpole_dataset"
+DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/compare_noise_out"
-SHIFT = 0
+SAVE_DIR = "/kaggle/working/compare_p1_out"
 
+SHIFT = 0
 LATENT_SIZE, N_SUP, N_IMG = 64, 4, 60
 N_ACTIONS, HIDDEN, LAYERS = 2, 64, 2
 SEQ_LEN, TEST_STRIDE, BATCH = 30, 1, 128
@@ -69,18 +69,18 @@ NOISE_SEED = 42                   # Reproducible noise
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "/kaggle/input/datasets/iliasbakos/vae-baseline-down/vae_best.pth",
+     "vae_ckpt": "<cartpole-baseline-vae>",
      "lstm_ckpt": {
-         "hybrid":  "/kaggle/input/datasets/iliasbakos/lstm-baseline-down/lstm_p1_best-2.pth",
-         "encoded": "/kaggle/working/lstm_baseline_alt_out/lstm_baseline_alt_best.pth",
+         "hybrid":  "<cartpole-baseline-lstm>",
+         "encoded": "<cartpole-baseline-lstm>",
      },
      "latent_root": "/kaggle/working/cmp_latents_noise/baseline"},
     {"label": "Principle 1", "color": "C1",
      "make_vae": lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG),
-     "vae_ckpt": "/kaggle/input/datasets/iliasbakos/vae-p1-thanasis/vae_p1_thanasis_best.pth",
+     "vae_ckpt": "<cartpole-p1-vae>",
      "lstm_ckpt": {
-         "hybrid":  "/kaggle/input/datasets/iliasbakos/lstm-p1-thanasis/lstm_p1_best.pth",
-         "encoded": "/kaggle/working/lstm_p1_alt_out/lstm_p1_alt_best.pth",
+         "hybrid":  "<cartpole-p1-lstm>",
+         "encoded": "<cartpole-p1-lstm>",
      },
      "latent_root": "/kaggle/working/cmp_latents_noise/p1"},
 ]

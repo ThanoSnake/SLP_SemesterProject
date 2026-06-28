@@ -21,7 +21,7 @@ from loader import LatentSequenceDataset, load_norm_stats, list_npz
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/input/datasets/iliasbakos/lunarlander-dataset/lunarlander_data"
+DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
 SAVE_DIR = "/kaggle/working/compare_p3_noise_out"
 SHIFT = 0
@@ -47,9 +47,9 @@ NOISE_SEED = 42
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "/kaggle/input/datasets/iliasbakos/lunar-vae-baseline/vae_best.pth",
+     "vae_ckpt": "<lunarlander-baseline-vae>",
      "lstm_ckpt": {
-         "hybrid":  "/kaggle/input/datasets/iliasbakos/lunar-lstm-baseline/lstm_baseline_best.pth",
+         "hybrid":  "<lunarlander-baseline-lstm>",
          "encoded": "/kaggle/working/lstm_baseline_alt_out/lstm_baseline_alt_best.pth",
      },
      "latent_root": "/kaggle/working/cmp_latents_p3_noise/baseline"},

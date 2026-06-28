@@ -35,11 +35,11 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/input/datasets/iliasbakos/cartpole-dataset/cartpole_dataset"
-LATENT_ROOT = "/kaggle/working/cartpole_latents_baseline"
+DATA_ROOT = "<cartpole-dataset>"
+LATENT_ROOT = "/kaggle/working/cartpole_baseline_latents"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "/kaggle/input/datasets/iliasbakos/extracted-features/baseline_vae/baseline_vae/vae_best.pth"
-SAVE_DIR = "/kaggle/working/lstm_baseline_alt_out"
+VAE_CKPT = "<cartpole-baseline-vae>"
+SAVE_DIR = "/kaggle/working/cartpole_baseline_lstm"
 
 LATENT_SIZE = 64
 N_SUP = 4
@@ -69,7 +69,7 @@ L_START = 5
 CURRICULUM_EPOCHS = 15
 
 EARLY_STOP_PATIENCE = 6
-SCHED_PATIENCE = 4
+SCHED_PATIENCE = 3
 NUM_WORKERS = 2
 SEED = 0
 DO_PRECOMPUTE = True

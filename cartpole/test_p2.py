@@ -32,7 +32,7 @@ from loader import precompute_latents, LatentSequenceDataset, load_norm_stats, l
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "/kaggle/input/datasets/iliasbakos/cartpole-dataset/cartpole_dataset"
+DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
 SAVE_DIR = "/kaggle/working/compare_p2_bc_out"
 SHIFT = 0
@@ -61,16 +61,16 @@ TRANSFORM_SIGN = +1.0                       # +1 -> πιο φωτεινό/αντ
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "/kaggle/working/vae_out/vae_best.pth",
+     "vae_ckpt": "<cartpole-baseline-vae>",
      "lstm_ckpt": {
-         "encoded": "/kaggle/working/lstm_baseline_alt_out/lstm_baseline_alt_best.pth",
+         "encoded": "<cartpole-baseline-lstm>",
      },
      "latent_root": "/kaggle/working/cmp_latents_p2bc/baseline"},
     {"label": "Principle 2", "color": "C2",
      "make_vae": lambda: VAE_P2(latent_size=LATENT_SIZE),
-     "vae_ckpt": "/kaggle/working/vae_p2_out/vae_p2_best.pth",
+     "vae_ckpt": "<cartpole-p2-vae>",
      "lstm_ckpt": {
-         "encoded": "/kaggle/working/lstm_p2_alt_out/lstm_p2_alt_best.pth",
+         "encoded": "<cartpole-p2-lstm>",
      },
      "latent_root": "/kaggle/working/cmp_latents_p2bc/p2"},
 ]
