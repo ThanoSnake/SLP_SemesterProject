@@ -280,7 +280,7 @@ def eval_epoch(model, loader, device, std_phys, desc=""):
         n += preds.size(0)
     return (se / n).mean(dim=1).cpu().numpy()
 
-
+'''
 if __name__ == "__main__":
     set_seed(SEED)
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -345,3 +345,4 @@ if __name__ == "__main__":
 
     torch.save(model.state_dict(), join(SAVE_DIR, "lstm_p1_last.pth"))
     print("Best val phys-MSE:", best)
+    '''
