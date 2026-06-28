@@ -52,7 +52,7 @@ IMG_H, IMG_W = 80, 120
 #   p2: brightness/contrast invariance
 #   p3_semi/p3_weak: μειωμένη εποπτεία ταχυτήτων
 # Τρέξε με διαφορετικά MODEL για να συγκρίνεις ποια αρχή ελέγχει καλύτερα (ειδικά υπό wind).
-MODEL = "baseline"
+MODEL = "p1"
 MODEL_REGISTRY = {
     "baseline": (lambda: VAE(latent_size=LATENT_SIZE),       "<lunarlander-baseline-vae>", "<lunarlander-baseline-lstm>"),
     "p1":       (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG),    "<lunarlander-p1-vae>",       "<lunarlander-p1-lstm>"),
