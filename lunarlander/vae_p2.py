@@ -458,7 +458,7 @@ def save_transform_samples(loader, device, out_dir, n=6):
         Image.fromarray(row).save(os.path.join(out_dir, f"transform_sample_{i}.png"))
     print(f"[viz] saved {a.shape[0]} samples (orig|shift|rot) -> {out_dir}")
 
-
+'''
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -529,3 +529,4 @@ if __name__ == "__main__":
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_p2_last.pth"))
     print("Best val score:", best_val)
+    '''
