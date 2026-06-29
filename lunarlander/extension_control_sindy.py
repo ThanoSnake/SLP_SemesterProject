@@ -42,7 +42,7 @@ N_ACTIONS = 4
 IMG_H, IMG_W = 80, 120
 
 # P1 was better as an encoder-as-sensor; SINDy only replaces the dynamics model.
-MODEL = "p1"
+MODEL = "baseline"
 MODEL_REGISTRY = {
     "baseline": (lambda: VAE(latent_size=LATENT_SIZE), "<lunarlander-baseline-vae>"),
     "p1": (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG), "<lunarlander-p1-vae>"),
