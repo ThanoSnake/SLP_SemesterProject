@@ -58,7 +58,7 @@ LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
 N_ACTIONS, HIDDEN, LAYERS = 4, 64, 2
 IMG_H, IMG_W = 80, 120
 
-MODEL = "baseline"
+MODEL = "p1"
 MODEL_REGISTRY = {
     "baseline": (lambda: VAE(latent_size=LATENT_SIZE),       "<lunarlander-baseline-vae>", "<lunarlander-baseline-lstm>"),
     "p1":       (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG),    "<lunarlander-p1-vae>",       "<lunarlander-p1-lstm>"),
@@ -70,7 +70,7 @@ MODEL_REGISTRY = {
 N_EPISODES = 20
 MAX_STEPS = 400
 SEED = 0
-ENABLE_WIND = True               # το πείραμα ΕΧΕΙ wind -> εδώ ο corrector/shield έχει νόημα
+ENABLE_WIND = False               # το πείραμα ΕΧΕΙ wind -> εδώ ο corrector/shield έχει νόημα
 WIND_POWER, TURBULENCE_POWER = 15.0, 1.5
 CONTROLLERS = ["true_pid", "enc_pid", "latent_mpc_rand", "guided_mpc"]
 
