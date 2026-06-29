@@ -85,8 +85,8 @@ RESID_SCALE0 = 1.0               # αρχικό scale του gate πριν μα�
 FILTER_WARMUP = 5                # βήματα πριν ενεργοποιηθεί το adaptive scaling/threshold
 
 # --- Guided MPC (CEM shield/corrector) ---
-MPC_HORIZON = 8                  # K macro-βήματα απόφασης
-MPC_REPEAT = 3                   # action-repeat -> effective horizon = K*REPEAT (=24)
+MPC_HORIZON = 5                  # K macro-βήματα απόφασης
+MPC_REPEAT = 2                   # action-repeat -> effective horizon = K*REPEAT (=24)
 MPC_SAMPLES = 256                # ακολουθίες ανά CEM iteration
 CEM_ITERS = 3                    # iterations του Cross-Entropy Method
 CEM_ELITE = 32                   # πλήθος elites
