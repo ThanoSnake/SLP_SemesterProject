@@ -10,7 +10,7 @@ extension_main_shield_emergency.py — Επέκταση 4: world-model ως ΠΡ
 Έλεγχος main = additive crash shield: ο enc_pid παραμένει ο default ελεγκτής. Αν ο PID ζητά main,
 το κρατάμε πάντα. Αν ΔΕΝ ζητά main, τότε το world-model δοκιμάζει «ξεκίνα main από βήμα j»
 (j=0..K), κάνει vertical dream στο LSTM, και μπορεί ΜΟΝΟ να προσθέσει emergency main σε
-πολύ συγκεκριμένες καταστάσεις: PID noop, χαμηλά, γρήγορη κάθοδος, περίπου upright.
+πολύ συγκεκριμένες καταστάσεις: PID noop, χαμηλά, γρήγορη κάθοδος.
 
 Arbitration: το MPC δεν καταστέλλει ποτέ main του PID και δεν αντικαθιστά ποτέ side engines.
 
@@ -61,13 +61,11 @@ GIF_FPS = 30
 
 # --- Vertical MPC (main-only additive shield) ---
 VERT_HORIZON = 10                 # ≤ train window (το μοντέλο είναι αξιόπιστο ~10 βήματα)
-Y_GROUND_SCALE = 0.40             # βάρος vy² ~ exp(-y/scale): μεγάλο κοντά στο έδαφος
-VERT_FUEL_W = 0.05                # ήπια ποινή καυσίμου (να μη μπλοκάρει αναγκαίο braking)
-EMERGENCY_Y_MAX = 0.85       # από 0.60
-EMERGENCY_VY_MAX = -0.25     # από -0.35
-EMERGENCY_THETA_MAX = 0.20   # από 0.15
-EMERGENCY_OMEGA_MAX = 0.40   # από 0.30
-EMERGENCY_COST_MARGIN = 0.02 # από 0.05
+Y_GROUND_SCALE = 0.60             # πιο proactive από 0.40, αλλά ακόμα near-ground focused
+VERT_FUEL_W = 0.02                # χαμηλότερη ποινή fuel ώστε να μη μπλοκάρει emergency braking
+EMERGENCY_Y_MAX = 1.00            # χαλαρότερο: δώσε χρόνο στο main πριν το έδαφος
+EMERGENCY_VY_MAX = -0.20          # χαλαρότερο: πιάσε νωρίτερα την επικίνδυνη κάθοδο
+EMERGENCY_COST_MARGIN = 0.01      # μικρότερο required gain, αφού ήδη έχουμε hard gates
 
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
 
@@ -168,12 +166,9 @@ def vertical_main_decision(lstm, z0, mean_t, std_t, device):
 
 def emergency_gate(phys):
     y, vy = float(phys[1]), float(phys[3])
-    theta, omega = abs(float(phys[4])), abs(float(phys[5]))
     return (
         y < EMERGENCY_Y_MAX
         and vy < EMERGENCY_VY_MAX
-        and theta < EMERGENCY_THETA_MAX
-        and omega < EMERGENCY_OMEGA_MAX
     )
 
 
@@ -303,4 +298,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
