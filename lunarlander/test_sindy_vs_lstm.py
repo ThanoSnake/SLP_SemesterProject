@@ -146,9 +146,17 @@ def plot_paired(err, tag, label, save_dir, rng):
 def plot_trajectory(raw, tag, label, save_dir, rng):
     gt = raw["gt"]; N, L, _ = gt.shape
     horizons = np.arange(1, L + 1)
+    
+    # 1. Υπολογισμός δυναμικού αριθμού γραμμών ώστε να χωράνε όλα τα N_SUP
+    num_rows = (N_SUP + 1) // 2
+    
     for _ in range(N_TRAJ_WINDOWS):
         w = TRAJ_WINDOW if TRAJ_WINDOW is not None else int(rng.integers(0, N))
-        fig, axes = plt.subplots(2, 2, figsize=(12, 6))
+        
+        # 2. Αλλαγή του subplots για να παίρνει το num_rows 
+        #    και προσθήκη squeeze=False για να λειτουργεί πάντα το διπλό indexing (axes[x][y])
+        fig, axes = plt.subplots(num_rows, 2, figsize=(12, 3 * num_rows), squeeze=False)
+        
         for d in range(N_SUP):
             ax = axes[d // 2][d % 2]
             ax.plot(horizons, gt[w, :, d], color="k", lw=2.0, label="GT")
@@ -158,6 +166,7 @@ def plot_trajectory(raw, tag, label, save_dir, rng):
             ax.set_xlabel("Prediction Horizon"); ax.set_xlim(1, L); ax.grid(alpha=0.3)
             if d == 0:
                 ax.legend(fontsize=8)
+                
         plt.suptitle(f"Trajectory — window #{w} | {label} (physical units)")
         plt.tight_layout()
         p = os.path.join(save_dir, f"vs_traj_{tag}_w{w}.png")
