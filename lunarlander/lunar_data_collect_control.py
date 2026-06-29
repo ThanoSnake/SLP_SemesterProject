@@ -36,10 +36,10 @@ from PIL import Image
 # CONFIG
 # ---------------------------------------------------------------------------
 BASE_DIR = os.environ.get("LUNARLANDER_DATA_DIR", os.path.expanduser("~/lunarlander_control_data"))
-NUM_EPISODES = 4000
-NUM_WORKERS = min(12, os.cpu_count() or 1)
-CHUNKSIZE = 4
-MAX_STEPS = 400
+NUM_EPISODES = int(os.environ.get("NUM_EPISODES", "8000"))
+NUM_WORKERS = int(os.environ.get("NUM_WORKERS", str(min(12, os.cpu_count() or 1))))
+CHUNKSIZE = int(os.environ.get("CHUNKSIZE", "4"))
+MAX_STEPS = int(os.environ.get("MAX_STEPS", "400"))
 IMG_H, IMG_W = 80, 120
 SEED = 0
 
@@ -51,23 +51,20 @@ N_ACTIONS = 4
 BURST_LEN = 5                 # Same horizon length as the current MPC.
 BURST_START_PROB = 0.08       # Per-step probability when not already inside a burst.
 
-# Wind-heavy mixture. If you want the earlier 25% wind setting, change wind_mixed
-# to 0.25 and heuristic_eps020 to 0.35.
-MODE_SPECS = [
-    ("heuristic_eps020", 0.30),
-    ("heuristic_eps050", 0.15),
-    ("random_bursts", 0.15),
-    ("perturbed_pid", 0.10),
-    ("wind_mixed", 0.30),
+# One-shot MPC-oriented dataset:
+#   50% clean dynamics, 50% wind dynamics.
+# Within each domain we use the same subpolicy mix, so wind is not a separate
+# "only PID" category; it is domain randomization over the same control coverage.
+DOMAIN_SPECS = [
+    ("clean", 0.50),
+    ("wind", 0.50),
 ]
 
-# Inside wind episodes we still want mostly reasonable control, plus some
-# counterfactual coverage.
-WIND_SUBPOLICY_SPECS = [
-    ("heuristic_eps020", 0.55),
-    ("heuristic_eps050", 0.20),
-    ("random_bursts", 0.15),
-    ("perturbed_pid", 0.10),
+SUBPOLICY_SPECS = [
+    ("heuristic_eps020", 0.40),  # stable on-policy backbone
+    ("heuristic_eps050", 0.20),  # more single-step counterfactual coverage
+    ("random_bursts", 0.20),     # 5-step action sequences, matching MPC_HORIZON
+    ("perturbed_pid", 0.20),     # reasonable but diverse recovery trajectories
 ]
 
 WIND_POWER_RANGE = (5.0, 20.0)
@@ -170,26 +167,25 @@ def heuristic_action(obs, rng, epsilon=0.20, gains=None):
 
 def make_episode_config(i):
     rng = np.random.default_rng(SEED + i)
-    top_mode = choose_from_specs(rng, MODE_SPECS)
+    domain = choose_from_specs(rng, DOMAIN_SPECS)
+    subpolicy = choose_from_specs(rng, SUBPOLICY_SPECS)
 
-    enable_wind = top_mode == "wind_mixed"
+    enable_wind = domain == "wind"
     if enable_wind:
-        subpolicy = choose_from_specs(rng, WIND_SUBPOLICY_SPECS)
         wind_power = rng.uniform(*WIND_POWER_RANGE)
         turbulence_power = rng.uniform(*TURBULENCE_POWER_RANGE)
         policy_mode = f"wind_{subpolicy}"
     else:
-        subpolicy = top_mode
         wind_power = 0.0
         turbulence_power = 0.0
-        policy_mode = top_mode
+        policy_mode = f"clean_{subpolicy}"
 
     epsilon = 0.50 if subpolicy == "heuristic_eps050" else 0.20
     use_bursts = subpolicy == "random_bursts"
     gains = sample_gains(rng, perturbed=(subpolicy == "perturbed_pid"))
 
     return {
-        "top_mode": top_mode,
+        "top_mode": domain,
         "policy_mode": policy_mode,
         "subpolicy": subpolicy,
         "enable_wind": enable_wind,
@@ -328,8 +324,8 @@ def print_counts(title, values):
 
 
 if __name__ == "__main__":
-    _assert_probs(MODE_SPECS, "MODE_SPECS")
-    _assert_probs(WIND_SUBPOLICY_SPECS, "WIND_SUBPOLICY_SPECS")
+    _assert_probs(DOMAIN_SPECS, "DOMAIN_SPECS")
+    _assert_probs(SUBPOLICY_SPECS, "SUBPOLICY_SPECS")
     assert abs(TRAIN_FRACTION + VAL_FRACTION + TEST_FRACTION - 1.0) < 1e-6
     for d in DIRS.values():
         os.makedirs(d, exist_ok=True)
@@ -337,8 +333,11 @@ if __name__ == "__main__":
     print(f"Collecting {NUM_EPISODES} control-aware LunarLander episodes")
     print(f"Output: {BASE_DIR}")
     print(f"Workers: {NUM_WORKERS}")
-    print("Mode mixture:")
-    for name, p in MODE_SPECS:
+    print("Domain mixture:")
+    for name, p in DOMAIN_SPECS:
+        print(f"  {name:<22} {100.0 * p:5.1f}%")
+    print("Subpolicy mixture inside each domain:")
+    for name, p in SUBPOLICY_SPECS:
         print(f"  {name:<22} {100.0 * p:5.1f}%")
 
     results = []
