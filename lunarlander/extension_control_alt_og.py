@@ -95,11 +95,17 @@ PID_BIAS = 0.5                   # warm-start: μάζα πιθανότητας �
 MPC_SEED = 0
 
 # --- Cost weights (tunable· οι τιμές είναι σε «φυσικές μονάδες» του LunarLander shaping) ---
+GAMMA = 0.93                     # discount στο dream rollout: γ^10≈0.48 -> ο αξιόπιστος (≤SEQ_LEN)
+                                 # ορίζοντας κυριαρχεί· down-weights τον αναξιόπιστο μακρινό ορίζοντα
+                                 # (το LSTM εκπαιδεύεται free-running ~10 βήματα· το MPC ονειρεύεται 24)
 FUEL_W = 0.30                    # ποινή καυσίμου
 TERM_W = 1.0                     # βάρος terminal value
-LAND_LEG = 20.0                  # bonus ανά leg-contact στο τέλος (proxy του +100 landing)
 LAND_CRASH = 100.0               # ποινή για υψηλή ταχύτητα στο τέλος (proxy του −100 crash)
 SAFE_SPEED = 0.5                 # «ασφαλής» ταχύτητα προσγείωσης (πάνω από αυτή -> crash risk)
+# Landing-funnel terminal σε ΚΑΛΑ προβλέψιμα dims (x,y,θ,speed) — ΟΧΙ predicted legs (το μοντέλο
+# δεν τα προβλέπει: W_MODEL[legs]=0 και τα leg-flags είναι ~0 μέχρι την επαφή). Peak + widths^2.
+FUNNEL_BONUS = 40.0              # peak terminal bonus (over-pad, upright, αργό) — proxy του +100 landing
+FUNNEL_X2, FUNNEL_Y2, FUNNEL_TH2 = 0.25, 0.25, 0.04
 
 # --- Shield / corrector ---
 USE_SHIELD = True
@@ -276,18 +282,28 @@ def dream_rollout(lstm, z0, macro_actions, mean_t, std_t, device):
 
 
 def dream_value(phys_traj, prim_acts, device):
-    """ -> (N,) score. ΣΩΣΤΟ objective:
-         telescoping shaping-gain  −  FUEL_W·fuel  +  TERM_W·(leg-bonus − crash-penalty).
-       (Το άθροισμα ABSOLUTE shaping του αρχικού ευνοούσε hover· εδώ μετράμε ΚΕΡΔΟΣ potential.)"""
+    """ -> (N,) score. DISCOUNTED gym-faithful objective:
+         Σ_t γ^t (Δshaping_t − FUEL_W·fuel_t)  +  γ^T·TERM_W·(landing-funnel − crash).
+       Δshaping_t = potential difference per step == gym's shaping reward (telescopes to the
+       gym return when γ=1). Discount: το μοντέλο είναι αξιόπιστο ~SEQ_LEN(10) βήματα αλλά το MPC
+       ονειρεύεται K·REPEAT(=24) -> down-weight τον αναξιόπιστο μακρινό ορίζοντα (συμβατό με το
+       uncertainty work: το σφάλμα συσσωρεύεται με τον ορίζοντα). Terminal σε ΚΑΛΑ προβλέψιμα dims
+       (x,y,θ,speed)· ΟΧΙ predicted legs (το αρχικό leg-bonus σχεδόν ποτέ δεν ενεργοποιούνταν στο όνειρο)."""
     sh = shaping_phys(phys_traj)                                # (N, T+1)
-    prog = sh[:, -1] - sh[:, 0]                                 # potential gain (telescoping)
+    dsh = sh[:, 1:] - sh[:, :-1]                                # (N, T) per-step potential gain (gym shaping reward)
     fc = torch.tensor(FUEL_COST, device=device)
-    fuel = fc[prim_acts].sum(dim=1)                             # (N,)
+    fuel = fc[prim_acts]                                        # (N, T)
+    T = dsh.shape[1]
+    disc = (GAMMA ** torch.arange(T, device=device, dtype=dsh.dtype)).unsqueeze(0)   # (1, T)
+    step_r = ((dsh - FUEL_W * fuel) * disc).sum(dim=1)          # (N,) discounted per-step return
     last = phys_traj[:, -1]
-    legs = last[:, 6:8].clamp(0.0, 1.0).sum(dim=1)
+    x, y = last[:, 0], last[:, 1]
     speed = torch.sqrt(last[:, 2] ** 2 + last[:, 3] ** 2 + 1e-8)
-    term = LAND_LEG * legs - LAND_CRASH * torch.relu(speed - SAFE_SPEED)
-    return prog - FUEL_W * fuel + TERM_W * term
+    tilt = last[:, 4].abs()
+    funnel = FUNNEL_BONUS * torch.exp(-(x * x / FUNNEL_X2 + y * y / FUNNEL_Y2 + tilt * tilt / FUNNEL_TH2))
+    crash = LAND_CRASH * torch.relu(speed - SAFE_SPEED)
+    term = (GAMMA ** T) * (funnel - crash)
+    return step_r + TERM_W * term
 
 
 @torch.no_grad()
