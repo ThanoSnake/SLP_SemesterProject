@@ -7,18 +7,18 @@ control.py — Λύνει το LunarLander ΑΠΟ PIXELS και αναδεικν
 η μόνη διαφορά να είναι αν αξιοποιούν τη ΔΥΝΑΜΙΚΗ ΓΝΩΣΗ του LSTM:
 
   true_pid    : PD πάνω στο ΑΛΗΘΙΝΟ obs                         (upper bound του ίδιου του heuristic)
-  enc_pid     : PD πάνω στην ΕΚΤΙΜΗΣΗ του encoder              (κλασικός έλεγχος, ΙΔΙΑ αντίληψη)
-  mpc_cem     : ΕΛΕΥΘΕΡΟ MPC (PID-guided CEM)                  (NAIVE — αποτυγχάνει, βλ. κάτω)
-  rollout     : PID base policy + model 1-step lookahead       (Η ΔΙΟΡΘΩΣΗ — αξιοποιεί σωστά το μοντέλο)
+  enc_pid     : PD πάνω στο ΩΜΟ encoder-estimate                (κλασικός έλεγχος, χωρίς μοντέλο)
+  est_pid     : PD πάνω στο model-FILTERED estimate             (μοντέλο ως αισθητήρας: lag-removal+denoise)
+  shield      : est_pid + safety SHIELD                         (μοντέλο veto-άρει προβλεπόμενα crashes)
 
-ΕΥΡΗΜΑ (control_diag.py): το μοντέλο/encoder είναι ΚΑΛΑ (dream RMSE@h10≈0.35, encoder R²>0.97 στις
-ταχύτητες), αλλά το ΕΛΕΥΘΕΡΟ MPC αποτυγχάνει λόγω OPTIMIZER'S CURSE: το argmax πάνω σε εκατοντάδες
-ακολουθίες επιλέγει συστηματικά αυτές που το μοντέλο ΥΠΕΡ-εκτιμά (corr dream-vs-real μόλις +0.45) ->
-σε closed-loop συσσωρεύεται σε καταστροφή. ΛΥΣΗ: rollout/policy-improvement — μόνο 4 candidates με
-PID-continuation (in-distribution) -> αποδεδειγμένα ≥ PID όταν το μοντέλο είναι ακριβές.
+ΕΥΡΗΜΑΤΑ (control_diag + control_diag2): το μοντέλο είναι ΑΚΡΙΒΕΣ στην ΠΡΟΒΛΕΨΗ (dream RMSE@h10≈0.35,
+encoder R²>0.97), ΑΛΛΑ το model-value είναι ΑΧΡΗΣΤΟ για policy-RANKING (corr(model-gap, real-improve)
+= −0.08): οι διαφορές αξίας κοντινών πολιτικών πνίγονται από τον θόρυβο πρόβλεψης -> ΚΑΘΕ MPC/rollout
+αποτυγχάνει (objective/value mismatch). ΣΩΣΤΗ ΧΡΗΣΗ: το μοντέλο ως ΑΙΣΘΗΤΗΡΑΣ (καλύτερη κατάσταση
+για τον PID) + SHIELD (ανίχνευση catastrophe = μεγάλο/αξιόπιστο σήμα), ΟΧΙ ως optimizer.
 
-COST: telescoping potential-DIFFERENCE shaping + terminal landing/crash − fuel (gym-faithful βάρη·
-D4 έδειξε ότι οι ταχύτητες κωδικοποιούνται εξαιρετικά, οπότε ΧΩΡΙΣ down-weighting).
+ΣΤΟΧΟΣ: no-wind ο PID είναι σχεδόν βέλτιστος (ceiling)· το όφελος φαίνεται στο WIND, όπου enc_pid≈72
+ενώ true_pid≈214 -> ο ΕΝΟΧΟΣ είναι η ΑΝΤΙΛΗΨΗ -> est_pid/shield κλείνουν το χάσμα.
 
 Αξιολόγηση: ίδια seeds, ΜΕ & ΧΩΡΙΣ άνεμο. Imports από τα canonical modules· cwd: lunarlander/.
 Run:  !python3 lunarlander/control.py   (απαιτεί gymnasium[box2d])
@@ -50,7 +50,8 @@ IMG_H, IMG_W = 80, 120
 N_EPISODES = 20                  # επεισόδια ανά (controller, wind) — ίδια seeds
 MAX_STEPS = 400
 SEED = 0
-CONTROLLERS = ["true_pid", "enc_pid", "mpc_cem", "rollout"]   # mpc_cem = naive (αποτυγχάνει)· rollout = η διόρθωση
+CONTROLLERS = ["true_pid", "enc_pid", "est_pid", "shield"]    # est_pid = model-estimator· shield = +safety
+# (πρόσθεσε "mpc_cem" αν θες την cautionary σύγκριση «naive model-as-controller αποτυγχάνει»)
 WIND_CONDITIONS = [("no_wind", False), ("wind", True)]
 WIND_POWER, TURBULENCE_POWER = 10.0, 1.0         # μέτριος άνεμος (PID παλεύει αλλά λειτουργεί)
 
@@ -81,6 +82,13 @@ TERM_W, LAND_LEG, LAND_CRASH, SAFE_SPEED = 1.0, 20.0, 100.0, 0.5   # terminal la
 # ΑΚΟΛΟΥΘΗΣΕ τον PID» -> μόνο 4 candidates, in-distribution συνέχεια, ≥ PID αν το μοντέλο είναι ακριβές.
 ROLLOUT_HORIZON = 30             # βήματα PID-continuation στο όνειρο (το μοντέλο αξιόπιστο ως ~h24)
 ROLLOUT_MARGIN = 2.0             # override τον PID μόνο αν σαφώς καλύτερο (αποφυγή θορυβωδών flips)
+
+# --- Model-as-ESTIMATOR + safety SHIELD (η ΣΩΣΤΗ χρήση) ---
+# control_diag2: το model-value είναι ΑΧΡΗΣΤΟ για policy-ranking (corr −0.08). Αλλά το μοντέλο είναι
+# ΑΚΡΙΒΕΣ στην ΠΡΟΒΛΕΨΗ (D1) -> το χρησιμοποιούμε για (α) καλύτερη ΚΑΤΑΣΤΑΣΗ, (β) ανίχνευση crash.
+ALPHA_FILTER = 0.3               # βάρος model-prediction στο complementary filter (0 = μόνο encoder)
+SHIELD_HORIZON = 20              # βήματα PID-dream για ανίχνευση επικείμενου crash
+Y_LOW, S_DANGER = 0.4, 0.6       # «κοντά στο έδαφος» & «επικίνδυνη ταχύτητα» -> predictive braking (main)
 
 FUEL_COST = [0.0, 0.03, 0.30, 0.03]
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
@@ -279,6 +287,57 @@ def mpc_rollout(lstm, z0, mean_t, std_t, device):
 
 
 # ---------------------------------------------------------------------------
+# Model-as-ESTIMATOR — 1-step lag removal + complementary filter (μοντέλο ως αισθητήρας)
+# ---------------------------------------------------------------------------
+def _model_step(lstm, z, a, device):
+    a_oh = F.one_hot(torch.tensor([a], device=device), N_ACTIONS).float()
+    z_next, _ = lstm.step(z, a_oh, lstm.init_hidden(1, device))
+    return z_next
+
+
+class StateEstimator:
+    """Ο encoder δίνει mu ≈ state_{t-1} (1-step lag). Χρησιμοποιούμε το μοντέλο:
+       (1) FILTER: fuse(mu, model_pred(state_{t-1})) -> denoise.
+       (2) LAG REMOVAL: predict-forward με την τελευταία action -> εκτίμηση state_t (τωρινό).
+    Ο PID ελέγχει πάνω σε αυτή την καθαρότερη/συγχρονισμένη κατάσταση."""
+    def __init__(self, lstm, mean_t, std_t, device):
+        self.lstm, self.mean_t, self.std_t, self.device = lstm, mean_t, std_t, device
+        self.z_filt, self.a_prev, self.a_prev2 = None, None, None
+
+    @torch.no_grad()
+    def estimate(self, mu):
+        if self.z_filt is not None and self.a_prev2 is not None:
+            pred = _model_step(self.lstm, self.z_filt, self.a_prev2, self.device)   # model ≈ state_{t-1}
+            z_meas = (1.0 - ALPHA_FILTER) * mu + ALPHA_FILTER * pred                # fuse -> denoise
+        else:
+            z_meas = mu
+        self.z_filt = z_meas
+        z_cur = _model_step(self.lstm, z_meas, self.a_prev, self.device) if self.a_prev is not None else z_meas
+        return z_cur                                                                # lag-removed ≈ state_t
+
+    def set_action(self, a):
+        self.a_prev2, self.a_prev = self.a_prev, int(a)
+
+
+# ---------------------------------------------------------------------------
+# Safety SHIELD — dream PID forward· αν προβλέπει επικείμενο crash -> predictive braking
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def shield_predicts_crash(lstm, z0, mean_t, std_t, device):
+    """Ονειρέψου τον PID από z0· True αν κάποιο βήμα φτάνει «κοντά στο έδαφος με επικίνδυνη ταχύτητα».
+    Μεγάλο, αξιόπιστο σήμα (catastrophe), όχι fine-ranking -> δεν πέφτει στο optimizer's curse."""
+    z = z0.clone()
+    hidden = lstm.init_hidden(1, device)
+    for _ in range(SHIELD_HORIZON):
+        a = heuristic_control(to_phys(z[0, :N_SUP], mean_t, std_t).cpu().numpy())
+        z, hidden = lstm.step(z, F.one_hot(torch.tensor([a], device=device), N_ACTIONS).float(), hidden)
+        p = to_phys(z[0, :N_SUP], mean_t, std_t).cpu().numpy()
+        if p[1] < Y_LOW and (p[2] ** 2 + p[3] ** 2) ** 0.5 > S_DANGER:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Closed-loop episode
 # ---------------------------------------------------------------------------
 @torch.no_grad()
@@ -286,48 +345,46 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, mpc_
     obs, _ = env.reset(seed=ep_seed)
     f_cur = resize_frame(env.render())
     f_prev = f_cur
+    est = StateEstimator(lstm, mean_t, std_t, device)
     frames = []
     total_r, fuel, last_r = 0.0, 0.0, 0.0
-    n_override, n_mpc = 0, 0
+    n_override, n_model = 0, 0
 
     for _ in range(MAX_STEPS):
         raw = env.render()
         f_cur = resize_frame(raw)
         if record:
             frames.append(raw)
-        mu = encode_pair(vae, f_prev, f_cur, device)                  # (1,64)
-        phys = to_phys(mu[0, :N_SUP], mean_t, std_t).cpu().numpy()
+        mu = encode_pair(vae, f_prev, f_cur, device)                  # (1,64) ≈ state_{t-1} (lagged)
 
         if controller == "true_pid":
             a = heuristic_control(obs)
         elif controller == "enc_pid":
-            a = heuristic_control(phys)
-        elif controller == "mpc_random":
-            a, _ = mpc_random(lstm, mu, mean_t, std_t, device, mpc_rng)
+            a = heuristic_control(to_phys(mu[0, :N_SUP], mean_t, std_t).cpu().numpy())
+        elif controller in ("est_pid", "shield"):
+            z_cur = est.estimate(mu)                                  # lag-removed + filtered ≈ state_t
+            a = heuristic_control(to_phys(z_cur[0, :N_SUP], mean_t, std_t).cpu().numpy())
+            if controller == "shield":
+                n_model += 1
+                if shield_predicts_crash(lstm, z_cur, mean_t, std_t, device):
+                    n_override += int(a != 2)
+                    a = 2                                             # predictive braking (main engine)
         elif controller == "mpc_cem":
             nominal, _ = pid_nominal_dream(lstm, mu, mean_t, std_t, device)
             a, _ = mpc_cem(lstm, mu, nominal, mean_t, std_t, device, mpc_rng)
-        elif controller == "rollout":
-            a_pid = heuristic_control(phys)
-            best_a, v_best, v_pid = mpc_rollout(lstm, mu, mean_t, std_t, device)
-            n_mpc += 1
-            if v_best > v_pid + ROLLOUT_MARGIN:
-                a = best_a
-                n_override += int(best_a != a_pid)
-            else:
-                a = a_pid
         else:
             raise ValueError(controller)
 
         obs, r, terminated, truncated, _ = env.step(a)
         total_r += r; last_r = r
         fuel += (0.30 if a == 2 else 0.03 if a in (1, 3) else 0.0)
+        est.set_action(a)
         f_prev = f_cur
         if terminated or truncated:
             break
 
     return {"return": total_r, "landed": last_r >= 100.0, "crashed": last_r <= -100.0,
-            "fuel": fuel, "override_pct": (100.0 * n_override / n_mpc) if n_mpc else 0.0,
+            "fuel": fuel, "override_pct": (100.0 * n_override / n_model) if n_model else 0.0,
             "frames": frames}
 
 
@@ -364,14 +421,14 @@ def main():
                 res["frames"] = []
                 eps.append(res)
                 tag = "LAND" if res["landed"] else "CRASH" if res["crashed"] else "timeout"
-                extra = f" override={res['override_pct']:.0f}%" if c == "rollout" else ""
+                extra = f" brake={res['override_pct']:.0f}%" if c == "shield" else ""
                 print(f"  ep{ep:02d} return={res['return']:8.1f}  {tag:7}{extra}")
             results[(wind_tag, c)] = eps
         env.close()
 
     # ---- summary ----
     print(f"\n{'='*86}")
-    print(f"{'wind':<9}{'controller':<13}{'mean return':>13}{'success %':>11}{'crash %':>9}{'mean fuel':>11}{'override%':>11}")
+    print(f"{'wind':<9}{'controller':<13}{'mean return':>13}{'success %':>11}{'crash %':>9}{'mean fuel':>11}{'brake%':>11}")
     print("-" * 86)
     summ = {}
     for wind_tag, _ in WIND_CONDITIONS:
@@ -383,7 +440,7 @@ def main():
             fu = np.mean([e["fuel"] for e in eps])
             ov = np.mean([e["override_pct"] for e in eps])
             summ[(wind_tag, c)] = (R.mean(), succ, crash, fu, ov)
-            ov_s = f"{ov:>10.0f}%" if c == "rollout" else f"{'—':>11}"
+            ov_s = f"{ov:>10.0f}%" if c == "shield" else f"{'—':>11}"
             print(f"{wind_tag:<9}{c:<13}{R.mean():>13.1f}{succ:>11.0f}{crash:>9.0f}{fu:>11.1f}{ov_s}")
     print("=" * 86)
 
@@ -392,7 +449,7 @@ def main():
     for j, (wind_tag, _) in enumerate(WIND_CONDITIONS):
         ax = axes[0][j]
         data = [[e["return"] for e in results[(wind_tag, c)]] for c in CONTROLLERS]
-        ax.boxplot(data, labels=CONTROLLERS, showmeans=True)
+        ax.boxplot(data, tick_labels=CONTROLLERS, showmeans=True)
         ax.axhline(200, color="g", ls="--", lw=1, label="solved (≥200)")
         ax.axhline(0, color="0.6", lw=0.8)
         ax.set_title(f"returns | {wind_tag}"); ax.set_ylabel("episode return")
