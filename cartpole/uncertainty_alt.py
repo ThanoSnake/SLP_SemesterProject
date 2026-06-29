@@ -68,7 +68,7 @@ RUN_DYNAMICS = True
 
 # --- dropout training (mirror uncertainty.py recipe) ---
 TRAIN_DROPOUT_LSTM = True
-TRAIN_DROPOUT_VAE = True
+TRAIN_DROPOUT_VAE = False
 P_DROP = 0.1                 # LSTM dropout (locked, per-rollout)
 P_DROP_VAE = 0.1
 TRAIN_STRIDE, TRAIN_BATCH = 5, 64
