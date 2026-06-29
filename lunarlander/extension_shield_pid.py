@@ -1,19 +1,15 @@
 """
-extension_main_shield.py — Επέκταση 4: world-model ως ΚΑΘΕΤΗ ασπίδα (main-only MPC).
+extension_shield_pid.py — Επέκταση 4: world-model ως ΣΥΝΤΗΡΗΤΙΚΗ κάθετη ασπίδα (ΕΠΙΛΟΓΗ Α).
 
-ΓΙΑΤΙ: το διαγνωστικό (mpc_model_sanity.py) έδειξε ότι το world-model προβλέπει ΑΞΙΟΠΙΣΤΑ τη
-σχέση main→vy (κάθετα), αλλά έχει ~ΝΕΚΡΟ action-conditioning στα πλευρικά engines (left/right→vx).
-Άρα ΔΕΝ κάνουμε full MPC. Αντ' αυτού:
-  * PID  -> οριζόντιος/γωνιακός έλεγχος (left/right/noop) — δουλεύει (enc_pid ~80% landing).
-  * MPC  -> ΜΟΝΟ το main (κάθετο), στο 1-D υποπρόβλημα όπου το μοντέλο είναι έμπιστο.
+Default ελεγκτής = enc_pid (PID στην encoder-εκτίμηση). Το world-model ΕΠΕΜΒΑΙΝΕΙ ΜΟΝΟ στα
+βήματα όπου ο PID ΗΔΗ θέλει κατακόρυφο (main, a_pid==2), και εκεί αποφασίζει αν θα κρατήσει
+το main ή θα το ΚΑΘΥΣΤΕΡΗΣΕΙ (noop) — "delay-the-burn" για μαλακότερη προσγείωση. ΠΟΤΕ δεν
+εισάγει main σε horizontal/noop βήματα -> καμία πλάγια ώθηση, καμία διαταραχή του οριζόντιου
+ελέγχου. Εγγύηση: σχεδόν ≥ enc_pid (το MPC μόνο καθυστερεί/επιβεβαιώνει το main του PID).
 
-Έλεγχος main = "delay-the-burn": σε κάθε βήμα δοκιμάζει «ξεκίνα main από βήμα j» (j=0..K), κάνει
-vertical dream στο LSTM, και διαλέγει το profile με τη μικρότερη ΚΑΘΕΤΗ ποινή
-(vy² σταθμισμένο με εγγύτητα στο έδαφος + fuel). Εκτελεί την 1η ενέργεια (main ή noop).
-
-Arbitration: αν το lander είναι ΓΕΡΜΕΝΟ (|theta|/|omega| μεγάλα) και ο PID θέλει πλευρικό engine
--> προτεραιότητα στη διόρθωση γωνίας (το main σε κλίση σπρώχνει πλαγίως). Αλλιώς το MPC ελέγχει
-πλήρως το main (on ΚΑΙ off — μπορεί να καταστείλει το main του PID).
+ΓΙΑΤΙ ΜΟΝΟ main: το διαγνωστικό (mpc_model_sanity.py) έδειξε ότι το μοντέλο προβλέπει αξιόπιστα
+τη σχέση main→vy, αλλά έχει ~νεκρό action-conditioning στα πλευρικά engines (left/right→vx).
+Άρα το αξιοποιούμε ΜΟΝΟ στο κάθετο, όπου είναι έμπιστο.
 
 Imports από canonical modules· cwd: lunarlander/. Απαιτεί gymnasium[box2d].
 """
@@ -37,7 +33,7 @@ from loader import load_norm_stats
 # ---------------------------------------------------------------------------
 DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_ext4_main_shield"
+SAVE_DIR = "/kaggle/working/lunarlander_ext4_shield_pid"
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
 N_ACTIONS, HIDDEN, LAYERS = 4, 64, 2
@@ -56,16 +52,14 @@ MAX_STEPS = 400
 SEED = 0
 ENABLE_WIND = False
 WIND_POWER, TURBULENCE_POWER = 15.0, 1.5
-CONTROLLERS = ["true_pid", "enc_pid", "main_shield"]
+CONTROLLERS = ["true_pid", "enc_pid", "shield_pid"]
 RECORD_GIF = True
 GIF_FPS = 30
 
-# --- Vertical MPC (main-only) ---
+# --- Vertical shield (main-only, suppress/delay) ---
 VERT_HORIZON = 10                 # ≤ train window (το μοντέλο είναι αξιόπιστο ~10 βήματα)
 Y_GROUND_SCALE = 0.40             # βάρος vy² ~ exp(-y/scale): μεγάλο κοντά στο έδαφος
 VERT_FUEL_W = 0.05                # ήπια ποινή καυσίμου (να μη μπλοκάρει αναγκαίο braking)
-THETA_SAFE = 0.20                 # rad: πάνω από αυτό -> "γερμένο" -> PID-γωνία προτεραιότητα
-OMEGA_SAFE = 0.40                 # rad/s
 
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
 
@@ -135,14 +129,14 @@ def save_gif(frames, path, fps=GIF_FPS):
 
 
 # ---------------------------------------------------------------------------
-# Vertical MPC (main-only) — "delay-the-burn" enumeration στο αξιόπιστο main→vy
+# Vertical decision (main-only) — "delay-the-burn" στο αξιόπιστο main→vy
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def vertical_main_decision(lstm, z0, mean_t, std_t, device):
     """ Δοκιμάζει 'ξεκίνα main από βήμα j' (j=0..K· j=K -> ποτέ). Vertical dream -> ποινή
     Σ w_ground(y)·vy² + fuel. Επιστρέφει 1η ενέργεια του best profile: 2 (main) ή 0 (noop). """
     K = VERT_HORIZON
-    seqs = torch.zeros(K + 1, K, dtype=torch.long, device=device)        # (K+1, K)
+    seqs = torch.zeros(K + 1, K, dtype=torch.long, device=device)
     for j in range(K + 1):
         seqs[j, j:] = 2                                                  # main από j και μετά
     N = K + 1
@@ -171,7 +165,7 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, reco
     f_cur = resize_frame(env.render()); f_prev = f_cur
     total_r, fuel, last_r = 0.0, 0.0, 0.0
     frames = []
-    n_main_mpc, n_steps = 0, 0
+    n_vert, n_keep = 0, 0
     for _ in range(MAX_STEPS):
         raw = env.render(); f_cur = resize_frame(raw)
         if record:
@@ -183,18 +177,15 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, reco
             a = heuristic_control(obs)
         elif controller == "enc_pid":
             a = heuristic_control(phys)
-        elif controller == "main_shield":
+        elif controller == "shield_pid":
             a_pid = heuristic_control(phys)
-            tilted = abs(phys[4]) > THETA_SAFE or abs(phys[5]) > OMEGA_SAFE
-            if tilted and a_pid in (1, 3):
-                a = a_pid                                                # γωνία προτεραιότητα
+            if a_pid == 2:                          # ΜΟΝΟ όταν ο PID θέλει κατακόρυφο (main)
+                a_vert = vertical_main_decision(lstm, mu, mean_t, std_t, device)  # 2 (κράτα) ή 0 (καθυστέρησε)
+                n_vert += 1
+                a = a_vert
+                n_keep += int(a_vert == 2)
             else:
-                a_vert = vertical_main_decision(lstm, mu, mean_t, std_t, device)  # 2 ή 0
-                n_steps += 1
-                if a_vert == 2:
-                    a = 2; n_main_mpc += 1
-                else:
-                    a = a_pid if a_pid in (1, 3) else 0                  # κράτα μικρή διόρθωση γωνίας, αλλιώς noop
+                a = a_pid                           # side/noop -> ΑΝΕΓΓΙΧΤΟ (καμία οριζόντια διαταραχή)
         else:
             raise ValueError(controller)
 
@@ -206,9 +197,9 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, reco
             break
 
     landed = last_r >= 100.0; crashed = last_r <= -100.0
-    main_pct = (100.0 * n_main_mpc / n_steps) if n_steps else 0.0
+    keep_pct = (100.0 * n_keep / n_vert) if n_vert else 0.0              # % των PID-main βημάτων που κράτησε main
     return {"return": total_r, "landed": landed, "crashed": crashed, "fuel": fuel,
-            "frames": frames, "main_pct": main_pct}
+            "frames": frames, "keep_pct": keep_pct}
 
 
 # ---------------------------------------------------------------------------
@@ -238,34 +229,34 @@ def main():
             res = run_episode(c, env, vae, lstm, mean_t, std_t, device, SEED + ep, record=rec)
             results[c].append(res)
             if rec:
-                save_gif(res["frames"], os.path.join(SAVE_DIR, f"ms_{MODEL}_{c}.gif"))
+                save_gif(res["frames"], os.path.join(SAVE_DIR, f"sp_{MODEL}_{c}.gif"))
             res["frames"] = []
-            extra = f"  main_mpc={res['main_pct']:.0f}%" if c == "main_shield" else ""
+            extra = f"  keep_main={res['keep_pct']:.0f}%" if c == "shield_pid" else ""
             print(f"  ep{ep:02d}  return={res['return']:8.1f}  "
                   f"{'LAND' if res['landed'] else 'CRASH' if res['crashed'] else 'timeout':6}  fuel={res['fuel']:.1f}{extra}")
     env.close()
 
-    print(f"\n{'='*76}")
-    print(f"{'controller':<14}{'mean return':>13}{'success %':>11}{'crash %':>10}{'mean fuel':>11}{'main-mpc %':>12}")
-    print("-" * 76)
+    print(f"\n{'='*78}")
+    print(f"{'controller':<14}{'mean return':>13}{'success %':>11}{'crash %':>10}{'mean fuel':>11}{'keep-main %':>13}")
+    print("-" * 78)
     for c in CONTROLLERS:
         R = np.array([r["return"] for r in results[c]])
         succ = 100.0 * np.mean([r["landed"] for r in results[c]])
         crash = 100.0 * np.mean([r["crashed"] for r in results[c]])
         fuelm = np.mean([r["fuel"] for r in results[c]])
-        mpc = np.mean([r["main_pct"] for r in results[c]]) if c == "main_shield" else 0.0
-        print(f"{c:<14}{R.mean():>13.1f}{succ:>11.0f}{crash:>10.0f}{fuelm:>11.1f}{mpc:>12.0f}")
-    print("=" * 76)
+        keep = np.mean([r["keep_pct"] for r in results[c]]) if c == "shield_pid" else 0.0
+        print(f"{c:<14}{R.mean():>13.1f}{succ:>11.0f}{crash:>10.0f}{fuelm:>11.1f}{keep:>13.0f}")
+    print("=" * 78)
 
     plt.figure(figsize=(7, 4.6))
     plt.boxplot([[r["return"] for r in results[c]] for c in CONTROLLERS], tick_labels=CONTROLLERS, showmeans=True)
     plt.axhline(200, color="g", ls="--", lw=1, label="solved (≥200)"); plt.axhline(0, color="0.6", lw=0.8)
-    plt.ylabel("episode return"); plt.title(f"Main-shield MPC — return (model={MODEL}, wind={ENABLE_WIND})")
+    plt.ylabel("episode return"); plt.title(f"Conservative shield-PID — return (model={MODEL}, wind={ENABLE_WIND})")
     plt.grid(alpha=0.3, axis="y"); plt.legend(); plt.tight_layout()
-    p = os.path.join(SAVE_DIR, f"ms_{MODEL}_returns.png")
+    p = os.path.join(SAVE_DIR, f"sp_{MODEL}_returns.png")
     plt.savefig(p, dpi=150, bbox_inches="tight"); plt.close(); print("saved:", p)
 
-    np.savez(os.path.join(SAVE_DIR, f"ms_{MODEL}_results.npz"),
+    np.savez(os.path.join(SAVE_DIR, f"sp_{MODEL}_results.npz"),
              controllers=np.array(CONTROLLERS),
              returns=np.array([[r["return"] for r in results[c]] for c in CONTROLLERS]),
              landed=np.array([[r["landed"] for r in results[c]] for c in CONTROLLERS]))
