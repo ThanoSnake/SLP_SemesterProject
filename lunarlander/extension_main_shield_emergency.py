@@ -9,11 +9,10 @@ extension_main_shield_emergency.py — Επέκταση 4: world-model ως ΠΡ
 
 Έλεγχος main = additive crash shield: ο enc_pid παραμένει ο default ελεγκτής. Αν ο PID ζητά main,
 το κρατάμε πάντα. Αν ΔΕΝ ζητά main, τότε το world-model δοκιμάζει «ξεκίνα main από βήμα j»
-(j=0..K), κάνει vertical dream στο LSTM, και μπορεί ΜΟΝΟ να προσθέσει emergency main.
+(j=0..K), κάνει vertical dream στο LSTM, και μπορεί ΜΟΝΟ να προσθέσει emergency main σε
+πολύ συγκεκριμένες καταστάσεις: PID noop, χαμηλά, γρήγορη κάθοδος, περίπου upright.
 
-Arbitration: αν το lander είναι ΓΕΡΜΕΝΟ (|theta|/|omega| μεγάλα) και ο PID θέλει πλευρικό engine
--> προτεραιότητα στη διόρθωση γωνίας (το main σε κλίση σπρώχνει πλαγίως). Το MPC δεν καταστέλλει
-ποτέ main του PID.
+Arbitration: το MPC δεν καταστέλλει ποτέ main του PID και δεν αντικαθιστά ποτέ side engines.
 
 Imports από canonical modules· cwd: lunarlander/. Απαιτεί gymnasium[box2d].
 """
@@ -64,8 +63,11 @@ GIF_FPS = 30
 VERT_HORIZON = 10                 # ≤ train window (το μοντέλο είναι αξιόπιστο ~10 βήματα)
 Y_GROUND_SCALE = 0.40             # βάρος vy² ~ exp(-y/scale): μεγάλο κοντά στο έδαφος
 VERT_FUEL_W = 0.05                # ήπια ποινή καυσίμου (να μη μπλοκάρει αναγκαίο braking)
-THETA_SAFE = 0.20                 # rad: πάνω από αυτό -> "γερμένο" -> PID-γωνία προτεραιότητα
-OMEGA_SAFE = 0.40                 # rad/s
+EMERGENCY_Y_MAX = 0.60            # μόνο κοντά στο έδαφος
+EMERGENCY_VY_MAX = -0.35          # μόνο αν κατεβαίνει αρκετά γρήγορα
+EMERGENCY_THETA_MAX = 0.15        # rad: main μόνο όταν είναι σχεδόν upright
+EMERGENCY_OMEGA_MAX = 0.30        # rad/s
+EMERGENCY_COST_MARGIN = 0.05      # χρειάζεται καθαρό predicted gain έναντι no-main
 
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
 
@@ -140,7 +142,7 @@ def save_gif(frames, path, fps=GIF_FPS):
 @torch.no_grad()
 def vertical_main_decision(lstm, z0, mean_t, std_t, device):
     """ Δοκιμάζει 'ξεκίνα main από βήμα j' (j=0..K· j=K -> ποτέ). Vertical dream -> ποινή
-    Σ w_ground(y)·vy² + fuel. Επιστρέφει 1η ενέργεια του best profile: 2 (add main) ή 0 (no add). """
+    Σ w_ground(y)·vy² + fuel. Επιστρέφει 1η ενέργεια και improvement έναντι no-main. """
     K = VERT_HORIZON
     seqs = torch.zeros(K + 1, K, dtype=torch.long, device=device)        # (K+1, K)
     for j in range(K + 1):
@@ -159,7 +161,20 @@ def vertical_main_decision(lstm, z0, mean_t, std_t, device):
         w_ground = torch.exp(-torch.relu(y) / Y_GROUND_SCALE)            # ~1 κοντά στο έδαφος
         cost += w_ground * (vy * vy) + VERT_FUEL_W * fc[a]
     best = int(torch.argmin(cost).item())
-    return int(seqs[best, 0].item())                                     # 2 ή 0
+    no_main_cost = cost[-1]
+    improvement = no_main_cost - cost[best]
+    return int(seqs[best, 0].item()), float(improvement.item())          # 2 ή 0, gain
+
+
+def emergency_gate(phys):
+    y, vy = float(phys[1]), float(phys[3])
+    theta, omega = abs(float(phys[4])), abs(float(phys[5]))
+    return (
+        y < EMERGENCY_Y_MAX
+        and vy < EMERGENCY_VY_MAX
+        and theta < EMERGENCY_THETA_MAX
+        and omega < EMERGENCY_OMEGA_MAX
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +186,7 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, reco
     f_cur = resize_frame(env.render()); f_prev = f_cur
     total_r, fuel, last_r = 0.0, 0.0, 0.0
     frames = []
-    n_add_main, n_add_checks, n_pid_main = 0, 0, 0
+    n_add_main, n_add_opportunities, n_gate_pass, n_pid_main = 0, 0, 0, 0
     for _ in range(MAX_STEPS):
         raw = env.render(); f_cur = resize_frame(raw)
         if record:
@@ -188,18 +203,20 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, reco
             if a_pid == 2:
                 a = 2                                                     # ποτέ suppress PID-main
                 n_pid_main += 1
+            elif a_pid in (1, 3):
+                a = a_pid                                                 # ποτέ override σε side engines
             else:
-                tilted = abs(phys[4]) > THETA_SAFE or abs(phys[5]) > OMEGA_SAFE
-                if tilted and a_pid in (1, 3):
-                    a = a_pid                                             # γωνία προτεραιότητα
+                n_add_opportunities += 1                                  # μόνο PID-noop μπορεί να γίνει emergency main
+                if not emergency_gate(phys):
+                    a = a_pid                                             # noop, αλλά όχι πραγματικό emergency
                 else:
-                    a_vert = vertical_main_decision(lstm, mu, mean_t, std_t, device)  # 2 ή 0
-                    n_add_checks += 1
-                    if a_vert == 2:
+                    n_gate_pass += 1
+                    a_vert, gain = vertical_main_decision(lstm, mu, mean_t, std_t, device)
+                    if a_vert == 2 and gain >= EMERGENCY_COST_MARGIN:
                         a = 2
                         n_add_main += 1
                     else:
-                        a = a_pid                                         # κράτα side/noop του PID
+                        a = a_pid                                         # κράτα noop του PID
         else:
             raise ValueError(controller)
 
@@ -211,9 +228,11 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, reco
             break
 
     landed = last_r >= 100.0; crashed = last_r <= -100.0
-    add_pct = (100.0 * n_add_main / n_add_checks) if n_add_checks else 0.0
+    add_pct = (100.0 * n_add_main / n_add_opportunities) if n_add_opportunities else 0.0
+    gate_pct = (100.0 * n_gate_pass / n_add_opportunities) if n_add_opportunities else 0.0
     return {"return": total_r, "landed": landed, "crashed": crashed, "fuel": fuel,
-            "frames": frames, "add_pct": add_pct, "add_main": n_add_main, "pid_main": n_pid_main}
+            "frames": frames, "add_pct": add_pct, "gate_pct": gate_pct,
+            "add_main": n_add_main, "pid_main": n_pid_main}
 
 
 # ---------------------------------------------------------------------------
@@ -245,13 +264,13 @@ def main():
             if rec:
                 save_gif(res["frames"], os.path.join(SAVE_DIR, f"ems_{MODEL}_{c}.gif"))
             res["frames"] = []
-            extra = f"  add_main={res['add_pct']:.0f}%" if c == "emergency_shield" else ""
+            extra = f"  add_main={res['add_pct']:.0f}% gate={res['gate_pct']:.0f}%" if c == "emergency_shield" else ""
             print(f"  ep{ep:02d}  return={res['return']:8.1f}  "
                   f"{'LAND' if res['landed'] else 'CRASH' if res['crashed'] else 'timeout':6}  fuel={res['fuel']:.1f}{extra}")
     env.close()
 
     print(f"\n{'='*76}")
-    print(f"{'controller':<14}{'mean return':>13}{'success %':>11}{'crash %':>10}{'mean fuel':>11}{'add-main %':>12}")
+    print(f"{'controller':<14}{'mean return':>13}{'success %':>11}{'crash %':>10}{'mean fuel':>11}{'add-main %':>12}{'gate %':>9}")
     print("-" * 76)
     for c in CONTROLLERS:
         R = np.array([r["return"] for r in results[c]])
@@ -259,7 +278,8 @@ def main():
         crash = 100.0 * np.mean([r["crashed"] for r in results[c]])
         fuelm = np.mean([r["fuel"] for r in results[c]])
         mpc = np.mean([r["add_pct"] for r in results[c]]) if c == "emergency_shield" else 0.0
-        print(f"{c:<14}{R.mean():>13.1f}{succ:>11.0f}{crash:>10.0f}{fuelm:>11.1f}{mpc:>12.0f}")
+        gate = np.mean([r["gate_pct"] for r in results[c]]) if c == "emergency_shield" else 0.0
+        print(f"{c:<14}{R.mean():>13.1f}{succ:>11.0f}{crash:>10.0f}{fuelm:>11.1f}{mpc:>12.0f}{gate:>9.0f}")
     print("=" * 76)
 
     plt.figure(figsize=(7, 4.6))
@@ -276,9 +296,11 @@ def main():
              landed=np.array([[r["landed"] for r in results[c]] for c in CONTROLLERS]),
              crashed=np.array([[r["crashed"] for r in results[c]] for c in CONTROLLERS]),
              fuel=np.array([[r["fuel"] for r in results[c]] for c in CONTROLLERS]),
-             add_pct=np.array([[r.get("add_pct", 0.0) for r in results[c]] for c in CONTROLLERS]))
+             add_pct=np.array([[r.get("add_pct", 0.0) for r in results[c]] for c in CONTROLLERS]),
+             gate_pct=np.array([[r.get("gate_pct", 0.0) for r in results[c]] for c in CONTROLLERS]))
     print(f"\nsaved -> {SAVE_DIR}")
 
 
 if __name__ == "__main__":
     main()
+
