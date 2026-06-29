@@ -53,7 +53,7 @@ MODEL_REGISTRY = {
 N_EPISODES = 20
 MAX_STEPS = 400
 SEED = 0
-ENABLE_WIND = False
+ENABLE_WIND = True
 WIND_POWER, TURBULENCE_POWER = 15.0, 1.5
 CONTROLLERS = ["true_pid", "enc_pid", "emergency_shield"]
 RECORD_GIF = True
@@ -63,11 +63,11 @@ GIF_FPS = 30
 VERT_HORIZON = 10                 # ≤ train window (το μοντέλο είναι αξιόπιστο ~10 βήματα)
 Y_GROUND_SCALE = 0.40             # βάρος vy² ~ exp(-y/scale): μεγάλο κοντά στο έδαφος
 VERT_FUEL_W = 0.05                # ήπια ποινή καυσίμου (να μη μπλοκάρει αναγκαίο braking)
-EMERGENCY_Y_MAX = 0.60            # μόνο κοντά στο έδαφος
-EMERGENCY_VY_MAX = -0.35          # μόνο αν κατεβαίνει αρκετά γρήγορα
-EMERGENCY_THETA_MAX = 0.15        # rad: main μόνο όταν είναι σχεδόν upright
-EMERGENCY_OMEGA_MAX = 0.30        # rad/s
-EMERGENCY_COST_MARGIN = 0.05      # χρειάζεται καθαρό predicted gain έναντι no-main
+EMERGENCY_Y_MAX = 0.85       # από 0.60
+EMERGENCY_VY_MAX = -0.25     # από -0.35
+EMERGENCY_THETA_MAX = 0.20   # από 0.15
+EMERGENCY_OMEGA_MAX = 0.40   # από 0.30
+EMERGENCY_COST_MARGIN = 0.02 # από 0.05
 
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
 
