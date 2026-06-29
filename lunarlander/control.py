@@ -39,8 +39,8 @@ from lstm import LatentPredictor
 # ---------------------------------------------------------------------------
 DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "<lunarlander-p1-vae>"               # P1 VAE (decoupled encoders)
-LSTM_CKPT = "<lunarlander-p1-lstm>"             # LSTM στο ΝΕΟ μεγάλο dataset (δείξε εδώ το νέο .pth)
+VAE_CKPT = "<lunarlander-vae-tubano>"               # P1 VAE (decoupled encoders)
+LSTM_CKPT = "<lunarlander-lstm-tubano>"             # LSTM στο ΝΕΟ μεγάλο dataset (δείξε εδώ το νέο .pth)
 SAVE_DIR = "/kaggle/working/lunarlander_control"
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
