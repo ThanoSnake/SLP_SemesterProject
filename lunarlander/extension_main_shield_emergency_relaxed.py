@@ -62,9 +62,9 @@ GIF_FPS = 30
 # --- Vertical MPC (main-only additive shield) ---
 VERT_HORIZON = 10                 # ≤ train window (το μοντέλο είναι αξιόπιστο ~10 βήματα)
 Y_GROUND_SCALE = 0.60             # πιο proactive από 0.40, αλλά ακόμα near-ground focused
-VERT_FUEL_W = 0.02                # χαμηλότερη ποινή fuel ώστε να μη μπλοκάρει emergency braking
-EMERGENCY_Y_MAX = 1.20            # πιο χαλαρό: δώσε περισσότερο χρόνο στο main πριν το έδαφος
-EMERGENCY_VY_MAX = -0.10          # πιο χαλαρό: πιάσε πιο νωρίς καθοδική τάση
+VERT_FUEL_W = 0.05                # χαμηλότερη ποινή fuel ώστε να μη μπλοκάρει emergency braking
+EMERGENCY_Y_MAX = 1.10            # πιο χαλαρό: δώσε περισσότερο χρόνο στο main πριν το έδαφος
+EMERGENCY_VY_MAX = -0.25          # πιο χαλαρό: πιάσε πιο νωρίς καθοδική τάση
 EMERGENCY_COST_MARGIN = 0.00      # δέξου οποιοδήποτε predicted gain, αφού ήδη έχουμε gate
 
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
