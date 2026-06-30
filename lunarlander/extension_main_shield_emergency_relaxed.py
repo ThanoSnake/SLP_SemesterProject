@@ -44,7 +44,7 @@ N_ACTIONS, HIDDEN, LAYERS = 4, 64, 2
 MODEL = "p1"
 MODEL_REGISTRY = {
     "baseline": (lambda: VAE(latent_size=LATENT_SIZE),    "<lunarlander-baseline-vae>", "<lunarlander-baseline-lstm>"),
-    "p1":       (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG), "<lunarlander-p1-vae>",       "<lunarlander-p1-lstm>"),
+    "p1":       (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG), "<lunarlander-p1-vae>",       "<lunarlander-lstm-tubano>"),
     "p2":       (lambda: VAE_P2(latent_size=LATENT_SIZE),  "<lunarlander-p2-vae>",       "<lunarlander-p2-lstm>"),
     "p3_semi":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  "<lunarlander-p3-semi-vae>",  "<lunarlander-p3-semi-lstm>"),
     "p3_weak":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  "<lunarlander-p3-weak-vae>",  "<lunarlander-p3-weak-lstm>"),
@@ -53,7 +53,7 @@ MODEL_REGISTRY = {
 N_EPISODES = 20
 MAX_STEPS = 400
 SEED = 0
-ENABLE_WIND = False
+ENABLE_WIND = True
 WIND_POWER, TURBULENCE_POWER = 15.0, 1.5
 CONTROLLERS = ["true_pid", "enc_pid", "emergency_shield_relaxed"]
 RECORD_GIF = True
