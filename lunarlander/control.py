@@ -8,8 +8,8 @@ control.py — Λύνει το LunarLander ΑΠΟ PIXELS και αναδεικν
 
   true_pid    : PD πάνω στο ΑΛΗΘΙΝΟ obs                         (upper bound του ίδιου του heuristic)
   enc_pid     : PD πάνω στο ΩΜΟ encoder-estimate                (κλασικός έλεγχος, χωρίς μοντέλο)
-  est_pid     : PD πάνω στο model-FILTERED estimate             (μοντέλο ως αισθητήρας: lag-removal+denoise)
-  shield      : est_pid + safety SHIELD                         (μοντέλο veto-άρει προβλεπόμενα crashes)
+  est_pid     : PD πάνω σε ADAPTIVE model-estimate              (lag-removal ΜΟΝΟ σε γρήγορες δυναμικές)
+  shield      : enc_pid + brake-if-upright SHIELD              (μοντέλο=crash-predictor· main μόνο αν όρθιος)
 
 ΕΥΡΗΜΑΤΑ (control_diag + control_diag2): το μοντέλο είναι ΑΚΡΙΒΕΣ στην ΠΡΟΒΛΕΨΗ (dream RMSE@h10≈0.35,
 encoder R²>0.97), ΑΛΛΑ το model-value είναι ΑΧΡΗΣΤΟ για policy-RANKING (corr(model-gap, real-improve)
@@ -83,12 +83,15 @@ TERM_W, LAND_LEG, LAND_CRASH, SAFE_SPEED = 1.0, 20.0, 100.0, 0.5   # terminal la
 ROLLOUT_HORIZON = 30             # βήματα PID-continuation στο όνειρο (το μοντέλο αξιόπιστο ως ~h24)
 ROLLOUT_MARGIN = 2.0             # override τον PID μόνο αν σαφώς καλύτερο (αποφυγή θορυβωδών flips)
 
-# --- Model-as-ESTIMATOR + safety SHIELD (η ΣΩΣΤΗ χρήση) ---
-# control_diag2: το model-value είναι ΑΧΡΗΣΤΟ για policy-ranking (corr −0.08). Αλλά το μοντέλο είναι
-# ΑΚΡΙΒΕΣ στην ΠΡΟΒΛΕΨΗ (D1) -> το χρησιμοποιούμε για (α) καλύτερη ΚΑΤΑΣΤΑΣΗ, (β) ανίχνευση crash.
-ALPHA_FILTER = 0.3               # βάρος model-prediction στο complementary filter (0 = μόνο encoder)
+# --- Model-as-ESTIMATOR (ADAPTIVE) + safety SHIELD (brake-if-upright) ---
+# Ευρήματα (control_diag3): (G1) ο estimator βελτιώνει την κατάσταση ΟΜΟΙΟΜΟΡΦΑ, ΑΛΛΑ accuracy≠control:
+# η lag-removal βοηθάει ΜΟΝΟ σε γρήγορες δυναμικές (όπου το lag μετράει)· στο calm αποσταθεροποιεί
+# τον βρόχο -> ADAPTIVE gate. (G2) το shield είναι ΑΚΡΙΒΗΣ crash-predictor (precision 0.9-0.98,
+# lead ~4 βήματα)· το πρόβλημα ΗΤΑΝ η ΑΠΟΚΡΙΣΗ (τυφλό main) -> brake-if-upright.
+V_GATE = 0.35                    # est_pid: lag-removal ΜΟΝΟ όταν speed>V_GATE (αλλιώς ωμό encoder)
 SHIELD_HORIZON = 20              # βήματα PID-dream για ανίχνευση επικείμενου crash
-Y_LOW, S_DANGER = 0.4, 0.6       # «κοντά στο έδαφος» & «επικίνδυνη ταχύτητα» -> predictive braking (main)
+Y_LOW, S_DANGER = 0.4, 0.6       # «κοντά στο έδαφος» & «επικίνδυνη ταχύτητα» στο όνειρο -> crash
+THETA_OK, VY_DESC = 0.20, -0.10  # shield: brake (main) ΜΟΝΟ αν |θ|<THETA_OK & vy<VY_DESC (όρθιος & κατεβαίνει)
 
 FUEL_COST = [0.0, 0.03, 0.30, 0.03]
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
@@ -296,27 +299,25 @@ def _model_step(lstm, z, a, device):
 
 
 class StateEstimator:
-    """Ο encoder δίνει mu ≈ state_{t-1} (1-step lag). Χρησιμοποιούμε το μοντέλο:
-       (1) FILTER: fuse(mu, model_pred(state_{t-1})) -> denoise.
-       (2) LAG REMOVAL: predict-forward με την τελευταία action -> εκτίμηση state_t (τωρινό).
-    Ο PID ελέγχει πάνω σε αυτή την καθαρότερη/συγχρονισμένη κατάσταση."""
+    """ADAPTIVE lag removal. Ο encoder δίνει mu ≈ state_{t-1} (1-step lag). ΜΟΝΟ όταν οι δυναμικές
+    είναι γρήγορες (speed>V_GATE, όπου το lag μετράει) προβλέπουμε 1 βήμα μπροστά με το μοντέλο ->
+    εκτίμηση state_t. Στο calm/αργό χρησιμοποιούμε ΩΜΟ encoder (κανένας θόρυβος μοντέλου στον βρόχο
+    -> δεν αποσταθεροποιεί εκεί που δεν χρειάζεται). (G1: accuracy≠control· η lag-removal βοηθά
+    μόνο σε γρήγορες δυναμικές.)"""
     def __init__(self, lstm, mean_t, std_t, device):
         self.lstm, self.mean_t, self.std_t, self.device = lstm, mean_t, std_t, device
-        self.z_filt, self.a_prev, self.a_prev2 = None, None, None
+        self.a_prev = None
 
     @torch.no_grad()
     def estimate(self, mu):
-        if self.z_filt is not None and self.a_prev2 is not None:
-            pred = _model_step(self.lstm, self.z_filt, self.a_prev2, self.device)   # model ≈ state_{t-1}
-            z_meas = (1.0 - ALPHA_FILTER) * mu + ALPHA_FILTER * pred                # fuse -> denoise
-        else:
-            z_meas = mu
-        self.z_filt = z_meas
-        z_cur = _model_step(self.lstm, z_meas, self.a_prev, self.device) if self.a_prev is not None else z_meas
-        return z_cur                                                                # lag-removed ≈ state_t
+        phys = (mu[0, :N_SUP] * self.std_t[:N_SUP] + self.mean_t[:N_SUP]).cpu().numpy()
+        speed = (phys[2] ** 2 + phys[3] ** 2) ** 0.5
+        if self.a_prev is not None and speed > V_GATE:
+            return _model_step(self.lstm, mu, self.a_prev, self.device)    # lag removal (γρήγορες δυναμικές)
+        return mu                                                          # ωμό encoder (calm/αργό)
 
     def set_action(self, a):
-        self.a_prev2, self.a_prev = self.a_prev, int(a)
+        self.a_prev = int(a)
 
 
 # ---------------------------------------------------------------------------
@@ -361,14 +362,18 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, mpc_
             a = heuristic_control(obs)
         elif controller == "enc_pid":
             a = heuristic_control(to_phys(mu[0, :N_SUP], mean_t, std_t).cpu().numpy())
-        elif controller in ("est_pid", "shield"):
-            z_cur = est.estimate(mu)                                  # lag-removed + filtered ≈ state_t
+        elif controller == "est_pid":
+            z_cur = est.estimate(mu)                                  # ADAPTIVE lag-removed state
             a = heuristic_control(to_phys(z_cur[0, :N_SUP], mean_t, std_t).cpu().numpy())
-            if controller == "shield":
-                n_model += 1
-                if shield_predicts_crash(lstm, z_cur, mean_t, std_t, device):
+        elif controller == "shield":
+            enc_state = to_phys(mu[0, :N_SUP], mean_t, std_t).cpu().numpy()      # base = enc_pid (ωμό)
+            a = heuristic_control(enc_state)
+            n_model += 1
+            if shield_predicts_crash(lstm, mu, mean_t, std_t, device):           # ακριβής crash-predictor
+                if abs(enc_state[4]) < THETA_OK and enc_state[3] < VY_DESC:      # όρθιος & κατεβαίνει γρήγορα
                     n_override += int(a != 2)
-                    a = 2                                             # predictive braking (main engine)
+                    a = 2                                                         # smart brake (main engine)
+                # αλλιώς: κράτα τον PID (διορθώνει γωνία) -> αποφυγή tumble
         elif controller == "mpc_cem":
             nominal, _ = pid_nominal_dream(lstm, mu, mean_t, std_t, device)
             a, _ = mpc_cem(lstm, mu, nominal, mean_t, std_t, device, mpc_rng)
