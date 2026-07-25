@@ -1,18 +1,18 @@
 """
-test_p1.py — Αξιολόγηση Baseline vs Principle 1 με ΘΟΡΥΒΩΔΕΙΣ εικόνες (LunarLander).
+test_p1.py — Evaluation of Baseline vs Principle 1 on NOISY images (LunarLander).
 
-Port του cart_pole/test_p1.py· state 4D -> 8D. Imports από τα canonical modules του lunarlander/.
+Port of cart_pole/test_p1.py; state 4D -> 8D. Imports from the canonical lunarlander/ modules.
 
-ΕΣΤΙΑΣΜΕΝΗ ΕΚΔΟΣΗ (single-setting):
-  * ΜΟΝΟ gaussian θόρυβος σ=0.1.
-  * ΜΟΝΟ "encoded" seed mode (z_0 από VAE -> LSTM rollout).
-  * Ο θόρυβος εφαρμόζεται ΑΠΟΚΛΕΙΣΤΙΚΑ στη φάση encoding (precompute), πριν τον encoder.
+FOCUSED VERSION (single setting):
+  * ONLY gaussian noise σ=0.1.
+  * ONLY "encoded" seed mode (z_0 from the VAE -> LSTM rollout).
+  * Noise is applied EXCLUSIVELY at the encoding stage (precompute), before the encoder.
 
-ΠΑΡΑΓΟΜΕΝΑ:
-  (1) Overall median+IQR state-MSE ανά horizon (mean over dims)   [standardized]
-  (2) Per-dim median+IQR state-MSE ανά horizon (2×4)              [standardized]
-  (3) Paired Δ (baseline − p1) median + 95% bootstrap CI ανά horizon
-  (4) ΦΥΣΙΚΑ ΜΕΓΕΘΗ ενός ΤΥΧΑΙΟΥ test window: GT vs baseline vs p1 (2×4)  [physical units]
+OUTPUTS:
+  (1) Overall median+IQR state-MSE per horizon (mean over dims)   [standardized]
+  (2) Per-dim median+IQR state-MSE per horizon (2×4)              [standardized]
+  (3) Paired Δ (baseline − p1) median + 95% bootstrap CI per horizon
+  (4) PHYSICAL QUANTITIES of a RANDOM test window: GT vs baseline vs p1 (2×4)  [physical units]
 """
 import os
 import numpy as np
@@ -26,12 +26,13 @@ from vae_p1 import VAE_P1
 from lstm import LatentPredictor
 from loader import LatentSequenceDataset, load_norm_stats, list_npz
 
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, P1_LSTM, P1_VAE, outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG — placeholders <...> τα συμπληρώνει το bootstrap patcher (CONFIG_PATHS)
+# CONFIG  (paths from config.py via paths.py)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_p1_out"
+SAVE_DIR = outputs("lunarlander_p1_out")
 
 SHIFT = 0
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
@@ -46,15 +47,15 @@ BOOT_SEED = 0
 LOG_Y = True
 
 # ---------------------------------------------------------------------------
-# NOISE CONFIG — μοναδικό setting: gaussian σ=0.1
+# NOISE CONFIG — a single setting: gaussian σ=0.1
 # ---------------------------------------------------------------------------
 NOISE_TYPE = "gaussian"           # "gaussian" | "salt_pepper"
-NOISE_SIGMA = 0.01                # std (gaussian) πάνω σε [0,1] εικόνα
+NOISE_SIGMA = 0.01                # std (gaussian) on a [0,1] image
 NOISE_SEED = 42
 
-# Trajectory plot (4): τυχαίο test window
-TRAJ_SEED = None                  # None -> ΓΝΗΣΙΑ τυχαίο· int -> reproducible
-TRAJ_WINDOW = None                # None -> τυχαίο· ή ακέραιος index
+# Trajectory plot (4): a random test window
+TRAJ_SEED = None                  # None -> GENUINELY random; int -> reproducible
+TRAJ_WINDOW = None                # None -> random; or an integer index
 N_TRAJ_WINDOWS = 1
 
 # ---------------------------------------------------------------------------
@@ -63,14 +64,14 @@ N_TRAJ_WINDOWS = 1
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<lunarlander-baseline-vae>",
-     "lstm_ckpt": "<lunarlander-baseline-lstm>",
-     "latent_root": "/kaggle/working/lunarlander_p1_latents/baseline"},
+     "vae_ckpt": BASELINE_VAE,
+     "lstm_ckpt": BASELINE_LSTM,
+     "latent_root": outputs("lunarlander_p1_latents/baseline")},
     {"label": "Principle 1", "color": "C1",
      "make_vae": lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG),
-     "vae_ckpt": "<lunarlander-p1-vae>",
-     "lstm_ckpt": "<lunarlander-p1-lstm>",
-     "latent_root": "/kaggle/working/lunarlander_p1_latents/p1"},
+     "vae_ckpt": P1_VAE,
+     "lstm_ckpt": P1_LSTM,
+     "latent_root": outputs("lunarlander_p1_latents/p1")},
 ]
 
 
@@ -103,7 +104,7 @@ def make_noise_fn(noise_type, level, seed, device):
 
 
 # ---------------------------------------------------------------------------
-# NOISY precompute_latents — εφαρμόζει noise ΠΡΙΝ το encoding
+# NOISY precompute_latents — applies the noise BEFORE encoding
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def precompute_latents_noisy(encode_fn, root, out_root, noise_fn, shift=0, batch=256, device="cuda"):
@@ -286,7 +287,7 @@ def plot_paired(err, save_dir, rng):
 
 
 def plot_trajectory(data, mean_s, std_s, save_dir, rng):
-    """(4) Physical trajectory ενός ΤΥΧΑΙΟΥ window: GT vs baseline vs p1 (2×4)."""
+    """(4) Physical trajectory of a RANDOM window: GT vs baseline vs p1 (2×4)."""
     base, p1 = MODELS[0]["label"], MODELS[1]["label"]
     mean8 = np.asarray(mean_s[:N_SUP], np.float64)
     std8 = np.asarray(std_s[:N_SUP], np.float64)

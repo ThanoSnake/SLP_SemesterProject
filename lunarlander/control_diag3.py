@@ -1,15 +1,15 @@
 """
-control_diag3.py — Γιατί το est_pid βοηθά στον άνεμο αλλά βλάπτει στο calm, και γιατί το shield σπάει.
+control_diag3.py — Why does est_pid help in wind but hurt in calm, and why does the shield break?
 
-  G1) ESTIMATOR QUALITY vs GT (το κρίσιμο). Οδηγούμε με true_pid (καθαρή τροχιά)· σε κάθε βήμα
-      συγκρίνουμε ΚΑΙ το ΩΜΟ encoder-state (mu) ΚΑΙ το model-FILTERED est-state με την ΑΛΗΘΙΝΗ obs.
-      Per-dim standardized RMSE, calm vs wind. -> Βελτιώνει το μοντέλο την ΤΩΡΙΝΗ κατάσταση; ΠΟΥ
-      (ποιες dims) και ΠΟΤΕ (calm/wind); -> καθορίζει τη διόρθωση του est_pid (velocity-only/adaptive).
+  G1) ESTIMATOR QUALITY vs GT (the critical one). We drive with true_pid (a clean trajectory); at every step
+      we compare BOTH the RAW encoder state (mu) AND the model-FILTERED est-state against the TRUE obs.
+      Per-dim standardized RMSE, calm vs wind. -> Does the model improve the CURRENT state? WHERE
+      (which dims) and WHEN (calm/wind)? -> this determines the est_pid fix (velocity-only/adaptive).
 
-  G2) SHIELD PRECISION. Τρέχουμε est_pid ΧΩΡΙΣ shield, καταγράφουμε πότε το shield ΘΑ πυροδοτούσε,
-      και ελέγχουμε αν στην ΠΡΑΓΜΑΤΙΚΗ (unshielded) τροχιά εμφανίζεται όντως ο κίνδυνος (y<Y_LOW &
-      speed>S_DANGER) εντός SHIELD_HORIZON -> precision + lead-time. Χαμηλό precision = false alarms·
-      μεγάλο lead = φρενάρει πολύ νωρίς.
+  G2) SHIELD PRECISION. We run est_pid WITHOUT the shield, record when the shield WOULD have fired,
+      and check whether the danger actually appears in the REAL (unshielded) trajectory (y<Y_LOW &
+      speed>S_DANGER) within SHIELD_HORIZON -> precision + lead time. Low precision = false alarms;
+      a large lead = it brakes far too early.
 
 Run:  !python3 lunarlander/control_diag3.py
 """
@@ -36,7 +36,7 @@ def get_models(device):
 
 @torch.no_grad()
 def g1_estimator_quality(vae, lstm, mean_t, std_t, std8, device, enable_wind):
-    """ -> (rmse_enc (8,), rmse_est (8,)) standardized, vs ΑΛΗΘΙΝΗ obs. Οδήγηση με true_pid."""
+    """ -> (rmse_enc (8,), rmse_est (8,)) standardized, vs the TRUE obs. Driven with true_pid."""
     env = C.make_env(enable_wind)
     se_enc = np.zeros(N_SUP); se_est = np.zeros(N_SUP); cnt = 0
     for ep in range(N_EPS):
@@ -53,7 +53,7 @@ def g1_estimator_quality(vae, lstm, mean_t, std_t, std8, device, enable_wind):
                 se_enc += ((enc_state - obs) / std8) ** 2
                 se_est += ((est_state - obs) / std8) ** 2
                 cnt += 1
-            a = C.heuristic_control(obs)                     # true_pid drive (καθαρή τροχιά)
+            a = C.heuristic_control(obs)                     # true_pid drive (a clean trajectory)
             est.set_action(a)
             obs, r, term, trunc, _ = env.step(a); f_prev = f_cur
             if term or trunc:
@@ -64,7 +64,7 @@ def g1_estimator_quality(vae, lstm, mean_t, std_t, std8, device, enable_wind):
 
 @torch.no_grad()
 def g2_shield_precision(vae, lstm, mean_t, std_t, device, enable_wind):
-    """Τρέχει est_pid ΧΩΡΙΣ shield· precision = P(πραγματικός κίνδυνος εντός SHIELD_HORIZON | shield fired)."""
+    """Runs est_pid WITHOUT the shield; precision = P(real danger within SHIELD_HORIZON | shield fired)."""
     env = C.make_env(enable_wind)
     n_fire, n_true, leads = 0, 0, []
     for ep in range(N_EPS):
@@ -109,27 +109,27 @@ def main():
     std8 = std[:N_SUP]
     vae, lstm = get_models(device)
 
-    print(f"\n[G1] ESTIMATOR QUALITY vs GT obs (standardized RMSE· ΧΑΜΗΛΟΤΕΡΟ=καλύτερο)")
+    print(f"\n[G1] ESTIMATOR QUALITY vs GT obs (standardized RMSE; LOWER=better)")
     for tag, wind in (("no_wind", False), ("wind", True)):
         rmse_enc, rmse_est = g1_estimator_quality(vae, lstm, mean_t, std_t, std8, device, wind)
         print(f"\n  --- {tag} ---")
-        print(f"  {'dim':<8}{'enc(ωμό)':>10}{'est(model)':>12}{'Δ%':>8}")
+        print(f"  {'dim':<8}{'enc(raw)':>10}{'est(model)':>12}{'Δ%':>8}")
         for d in range(N_SUP):
             imp = 100.0 * (rmse_enc[d] - rmse_est[d]) / (rmse_enc[d] + 1e-8)
             print(f"  {DIM_NAMES[d]:<8}{rmse_enc[d]:>10.3f}{rmse_est[d]:>12.3f}{imp:>+7.0f}%")
         imp_m = 100.0 * (rmse_enc.mean() - rmse_est.mean()) / (rmse_enc.mean() + 1e-8)
-        print(f"  {'MEAN':<8}{rmse_enc.mean():>10.3f}{rmse_est.mean():>12.3f}{imp_m:>+7.0f}%   (>0 = model βελτιώνει)")
+        print(f"  {'MEAN':<8}{rmse_enc.mean():>10.3f}{rmse_est.mean():>12.3f}{imp_m:>+7.0f}%   (>0 = the model improves it)")
 
-    print(f"\n[G2] SHIELD PRECISION (est_pid χωρίς shield)")
+    print(f"\n[G2] SHIELD PRECISION (est_pid without the shield)")
     print(f"  {'cond':<9}{'#fires':>8}{'precision':>11}{'mean lead':>11}")
     for tag, wind in (("no_wind", False), ("wind", True)):
         nf, prec, lead = g2_shield_precision(vae, lstm, mean_t, std_t, device, wind)
         print(f"  {tag:<9}{nf:>8}{prec:>11.2f}{lead:>11.1f}")
 
-    print(f"\n{'='*70}\nΠΩΣ ΔΙΑΒΑΖΕΤΑΙ:")
-    print("  G1: αν est βελτιώνει ΜΟΝΟ στον άνεμο/μόνο σε velocities -> velocity-only ή adaptive estimator.")
-    print("      αν est ΧΕΙΡΟΤΕΡΟ στο calm -> η lag-removal εισάγει θόρυβο εκεί που δεν χρειάζεται.")
-    print("  G2: precision χαμηλό -> false alarms (αυστηρότερο trigger)· lead μεγάλο -> φρενάρει πολύ νωρίς.")
+    print(f"\n{'='*70}\nHOW TO READ IT:")
+    print("  G1: if est only improves in wind/only on velocities -> a velocity-only or adaptive estimator.")
+    print("      if est is WORSE in calm -> the lag removal injects noise where it is not needed.")
+    print("  G2: low precision -> false alarms (a stricter trigger); a large lead -> it brakes far too early.")
     print(f"{'='*70}\nsaved -> {SAVE_DIR}")
 
 

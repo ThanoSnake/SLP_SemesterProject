@@ -1,22 +1,22 @@
 """
-test_baseline_lunarlander.py — Αυτόνομη αξιολόγηση του Baseline world model (LunarLander).
+test_baseline_lunarlander.py — Standalone evaluation of the baseline world model (LunarLander).
 
-Port του cart_pole/test_baseline_cartpole.py· state 4D -> 8D. ΧΡΗΣΙΜΟΠΟΙΕΙ IMPORTS από τα
-canonical modules του φακέλου lunarlander/ (όπως το cart_pole importάρει vae/loader):
+Port of cart_pole/test_baseline_cartpole.py; state 4D -> 8D. It USES IMPORTS from the
+canonical modules of the lunarlander/ folder (just as cart_pole imports vae/loader):
     from vae import VAE
     from loader import VaePairDataset, load_norm_stats, list_npz
--> καμία επανα-ορισμένη κλάση εδώ· τρέχει στο Kaggle αφού git-clone-άρεις το repo (cwd: lunarlander/).
+-> no class is redefined here; it runs on Kaggle after you git-clone the repo (cwd: lunarlander/).
 
-MODULE 1 — «Physical encoding vs GT» (μόνο ο encoder, χωρίς LSTM):
-  (1) Per-dim μετρικές: RMSE & MAE (φυσικές μονάδες), R², Pearson r  -> πίνακας + bar chart
-  (2) Scatter pred-vs-GT ανά dim (+ γραμμή ταυτότητας, R²)
-  (3) Per-dim ιστόγραμμα σφάλματος (φυσικές μονάδες) -> bias/spread ανά μέγεθος.
-  (4) Time-series overlay GT vs encoded mu[:8] σε δείγμα επεισοδίων -> tracking + θόρυβος/υστέρηση.
+MODULE 1 — "Physical encoding vs GT" (encoder only, no LSTM):
+  (1) Per-dim metrics: RMSE & MAE (physical units), R², Pearson r  -> table + bar chart
+  (2) Scatter pred-vs-GT per dim (+ identity line, R²)
+  (3) Per-dim error histogram (physical units) -> bias/spread per quantity.
+  (4) Time-series overlay of GT vs encoded mu[:8] on a sample of episodes -> tracking + noise/lag.
 
-ΠΩΣ ΔΙΑΒΑΖΕΤΑΙ:
-  * Υψηλό R² (≈1) & χαμηλό RMSE σε x,y,theta,leg1,leg2 = καθαρή κωδικοποίηση ΣΤΑΤΙΚΗΣ κατάστασης.
-  * Χαμηλότερο R² / μεγαλύτερο RMSE στις vx,vy,omega = αδυναμία κωδικοποίησης ΤΑΧΥΤΗΤΩΝ
-    -> κίνητρο για τις αρχές (π.χ. P3 weak supervision).
+HOW TO READ IT:
+  * High R² (~1) & low RMSE on x,y,theta,leg1,leg2 = clean encoding of the STATIC state.
+  * Lower R² / higher RMSE on vx,vy,omega = weaker encoding of the VELOCITIES
+    -> the motivation for the principles (e.g. P3 weak supervision).
 """
 import os
 import numpy as np
@@ -27,18 +27,19 @@ from torch.utils.data import DataLoader
 from vae import VAE
 from loader import VaePairDataset, load_norm_stats, list_npz
 
+from paths import BASELINE_VAE, DATA_ROOT, outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG — placeholders <...> τα συμπληρώνει το bootstrap patcher (CONFIG_PATHS)
+# CONFIG  (paths from config.py via paths.py)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 TEST_DIR = os.path.join(DATA_ROOT, "test")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "<lunarlander-baseline-vae>"        # μόνο VAE — το LSTM ΔΕΝ χρειάζεται (encoder-only test)
-SAVE_DIR = "/kaggle/working/lunar_baseline_test"
+VAE_CKPT = BASELINE_VAE        # VAE only — the LSTM is NOT needed (encoder-only test)
+SAVE_DIR = outputs("lunar_baseline_test")
 
 LATENT_SIZE = 64
 N_SUP = 8
-SHIFT = 0                 # 0=clean GT comparison (το σωστό για interpretability check)
+SHIFT = 0                 # 0=clean GT comparison (the right choice for an interpretability check)
 BATCH = 128
 NUM_WORKERS = 2
 SEED = 0
@@ -47,11 +48,11 @@ DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
 DIM_LABELS = ["x", "y", r"$v_x$", r"$v_y$", r"$\theta$", r"$\omega$", "leg1", "leg2"]
 DIM_UNITS = ["(pos)", "(pos)", "(vel)", "(vel)", "[rad]", "[rad/s]", "(contact)", "(contact)"]
 
-N_EPISODE_PLOTS = 3       # πόσα επεισόδια για το time-series overlay
-SCATTER_MAX_PTS = 8000    # subsample για ελαφρύ scatter
+N_EPISODE_PLOTS = 3       # how many episodes for the time-series overlay
+SCATTER_MAX_PTS = 8000    # subsample to keep the scatter light
 SEED_SCATTER = 0
 
-# "standardized" (mean0/std1, κοινή κλίμακα) [ΠΡΟΕΠΙΛΟΓΗ] ή "physical" (de-standardized).
+# "standardized" (mean0/std1, common scale) [DEFAULT] or "physical" (de-standardized).
 UNITS = "standardized"
 
 
@@ -64,7 +65,7 @@ def get_device():
 
 
 def _to_img(t, device):
-    """uint8 ή float (B,3,H,W) -> float [0,1] στη συσκευή (robust)."""
+    """uint8 or float (B,3,H,W) -> float [0,1] on the device (robust)."""
     t = t.to(device, non_blocking=True)
     return t.float().div_(255.0) if t.dtype == torch.uint8 else t.float()
 
@@ -82,7 +83,7 @@ def _to_units(mu_std, gt_std, mean, std):
 
 
 # ---------------------------------------------------------------------------
-# (collect) Κωδικοποίηση όλου του test set: mu[:8] (std) vs GT state (std)
+# (collect) Encode the whole test set: mu[:8] (std) vs GT state (std)
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def collect_encoding(model, loader, device):
@@ -92,12 +93,12 @@ def collect_encoding(model, loader, device):
         x = torch.cat([_to_img(img_t, device), _to_img(img_tp1, device)], dim=1)
         mu, _ = model.encode(x)
         mus.append(mu[:, :N_SUP].cpu().numpy())
-        gts.append(state_t.numpy())                 # ήδη standardized από τον loader
+        gts.append(state_t.numpy())                 # already standardized by the loader
     return np.concatenate(mus, 0), np.concatenate(gts, 0)
 
 
 # ---------------------------------------------------------------------------
-# (metrics) Per-dim: RMSE/MAE φυσικές μονάδες, R², Pearson r
+# (metrics) Per-dim: RMSE/MAE in physical units, R², Pearson r
 # ---------------------------------------------------------------------------
 def physical_metrics(mu_std, gt_std, mean, std):
     std8 = np.asarray(std[:N_SUP], np.float64)
@@ -202,7 +203,7 @@ def plot_error_hist(mu_std, gt_std, mean, std, save_dir):
 
 
 # ---------------------------------------------------------------------------
-# (episode) Κωδικοποίηση ΟΛΟΚΛΗΡΟΥ επεισοδίου -> time-series overlay
+# (episode) Encode a WHOLE episode -> time-series overlay
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def encode_episode(model, npz_path, device, batch=256):

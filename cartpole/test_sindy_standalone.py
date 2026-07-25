@@ -1,39 +1,40 @@
 """
-test_sindy_standalone.py — Standalone αξιολόγηση του SINDy world-model (CartPole).
+test_sindy_standalone.py — Standalone evaluation of the SINDy world model (CartPole).
 
-ΤΙ ΚΑΝΕΙ (ίδια μετρική/διαγράμματα με τα test_pX του baseline):
-  1) Fit του αραιού Ξ (dyn_phys της Definition 2 του paper) στα TRAIN transitions (x_t,u_t)->x_{t+1},
-     σε ΔΥΟ πηγές: ENCODED z[:4] (primary, ίδια «οπτική» με τον LSTM) και CLEAN GT (physics ref).
-  2) Τυπώνει τις ΑΝΑΚΑΛΥΦΘΕΙΣΕΣ ΕΞΙΣΩΣΕΙΣ (interpretability — αυτό που ο LSTM δεν δίνει).
-  3) Discrete rollout 30 βημάτων από τον ENCODED seed z_0[:4] (de-standardized) + actions,
-     ολοκληρώνοντας τον χάρτη x_{t+1}=x_t+Θ(x_t,F_t)·Ξ.
-  4) Μετρική ΙΔΙΑ με test_pX: standardized state-MSE, median+IQR ανά horizon (overall & per-dim).
-  5) Τρέχει σε clean ΚΑΙ noisy-image conditions (θόρυβος μόνο στο test encoding, όπως test_p1/p3).
+WHAT IT DOES (same metric/plots as the baseline test_pX):
+  1) Fits the sparse Ξ (the dyn_phys of the paper's Definition 2) on the TRAIN transitions (x_t,u_t)->x_{t+1},
+     from TWO sources: ENCODED z[:4] (primary, the same "view" as the LSTM) and CLEAN GT (physics ref).
+  2) Prints the DISCOVERED EQUATIONS (interpretability — what the LSTM does not give).
+  3) Discrete 30-step rollout from the ENCODED seed z_0[:4] (de-standardized) + actions,
+     integrating the map x_{t+1}=x_t+Θ(x_t,F_t)·Ξ.
+  4) Metric IDENTICAL to test_pX: standardized state-MSE, median+IQR per horizon (overall & per-dim).
+  5) Runs on clean AND noisy-image conditions (noise only on the test encoding, as in test_p1/p3).
 
-ΚΑΜΠΥΛΕΣ ανά noise condition:
-  * SINDy (enc fit)        : Ξ από encoded train, ENCODED seed         [primary, fair vs LSTM]
-  * SINDy (GT fit)         : Ξ από clean GT train, ENCODED seed        [πόσο καλή είναι η δυναμική]
-  * SINDy (GT fit·GT seed) : Ξ από GT, GT seed                         [pure-physics ceiling]
+CURVES per noise condition:
+  * SINDy (enc fit)        : Ξ from encoded train, ENCODED seed         [primary, fair vs LSTM]
+  * SINDy (GT fit)         : Ξ from clean GT train, ENCODED seed        [how good the dynamics itself is]
+  * SINDy (GT fit·GT seed) : Ξ from GT, GT seed                         [pure-physics ceiling]
 
-Τοποθεσία: flat μέσα στο cartpole/ (δίπλα στα vae/lstm/loader). Τρέξε: !python3 cartpole/test_sindy_standalone.py
-Συμπλήρωσε τα <...> paths (ίδιο convention με τα υπόλοιπα scripts).
+Location: flat inside cartpole/ (next to vae/lstm/loader). Run: !python3 cartpole/test_sindy_standalone.py
+Paths come from config.py (via paths.py).
 """
 import os
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sindy_core import *          # SINDy core (numpy) + path-bootstrap για vae/lstm/loader
+from sindy_core import *          # SINDy core (numpy) + path bootstrap for vae/lstm/loader
 from sindy_eval_utils import *    # VAE encode / LSTM rollout / noise / measurement helpers
+
+from paths import BASELINE_VAE, DATA_ROOT, outputs
 
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "<cartpole-baseline-vae>"
-LATENT_ROOT = "/kaggle/working/sindy_latents"            # cache encoded splits
-SAVE_DIR = "/kaggle/working/sindy_standalone_out"
+VAE_CKPT = BASELINE_VAE
+LATENT_ROOT = outputs("sindy_latents")            # cache encoded splits
+SAVE_DIR = outputs("sindy_standalone_out")
 
 SEQ_LEN, TEST_STRIDE, N_SUP = 30, 1, 4
 
@@ -42,7 +43,7 @@ FEATURE_MODE = "physics"      # "physics" (cartpole-aware) | "poly2" (generic ab
 THRESHOLD = 0.02
 RIDGE = 1e-6
 
-# Noise conditions (clean + δύο gaussian επίπεδα όπως test_p3/test_p1)
+# Noise conditions (clean + two gaussian levels, as in test_p3/test_p1)
 NOISE_CONDS = [
     ("gaussian", 0.0),
     ("gaussian", 0.05),
@@ -58,7 +59,7 @@ LOG_Y = True
 
 
 # ---------------------------------------------------------------------------
-# Fit Ξ (encoded + GT) στο CLEAN train + τύπωσε εξισώσεις
+# Fit Ξ (encoded + GT) on the CLEAN train split + print the equations
 # ---------------------------------------------------------------------------
 def fit_models(train_dir, mean, std):
     Xe, Fe, Xne = assemble_fit_data(train_dir, "encoded", mean, std)
@@ -67,7 +68,7 @@ def fit_models(train_dir, mean, std):
     Xi_g, _ = fit_sindy(Xg, Fg, Xng, mode=FEATURE_MODE, threshold=THRESHOLD, ridge=RIDGE)
 
     print("\n" + "=" * 78)
-    print("ΑΝΑΚΑΛΥΦΘΕΙΣΕΣ ΕΞΙΣΩΣΕΙΣ (discrete delta map)  —  dyn_phys της Definition 2")
+    print("DISCOVERED EQUATIONS (discrete delta map)  —  the dyn_phys of Definition 2")
     print("=" * 78)
     print(f"[ENCODED fit]  (#train transitions={Xe.shape[0]}, mode={FEATURE_MODE})")
     for line in format_equations(Xi_e, names):
@@ -80,7 +81,7 @@ def fit_models(train_dir, mean, std):
 
 
 # ---------------------------------------------------------------------------
-# Rollout + standardized sq-err ανά noise condition
+# Rollout + standardized sq-err per noise condition
 # ---------------------------------------------------------------------------
 def evaluate_condition(test_dir, Xi_e, Xi_g, mean, std):
     seed_enc, U, gt = assemble_windows(test_dir, mean, std, seq_len=SEQ_LEN,
@@ -159,7 +160,7 @@ def main():
     print("device:", device)
     mean, std = load_norm_stats(NORM_STATS)
 
-    # ---- encode CLEAN train (για το fit) ----
+    # ---- encode the CLEAN train split (for the fit) ----
     train_dir = ensure_encoded(VAE_CKPT, DATA_ROOT,
                                    os.path.join(LATENT_ROOT, "clean"),
                                    device, noise_fn=None, splits=("train",))["train"]
@@ -168,7 +169,7 @@ def main():
     save_curves = {"horizons": np.arange(1, SEQ_LEN + 1)}
     for ntype, level in NOISE_CONDS:
         tag = noise_tag(ntype, level)
-        label = "clean" if level == 0.0 else f"{ntype} σ={level:.2f}"
+        label = "clean" if level == 0.0 else f"{ntype} sigma={level:.2f}"
         print(f"\n{'='*60}\n  CONDITION: {label}\n{'='*60}")
 
         nf = make_noise_fn(ntype, level, NOISE_SEED, device)

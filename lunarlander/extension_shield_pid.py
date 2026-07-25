@@ -1,17 +1,17 @@
 """
-extension_shield_pid.py — Επέκταση 4: world-model ως ΣΥΝΤΗΡΗΤΙΚΗ κάθετη ασπίδα (ΕΠΙΛΟΓΗ Α).
+extension_shield_pid.py — Extension 4: the world model as a CONSERVATIVE vertical shield (OPTION A).
 
-Default ελεγκτής = enc_pid (PID στην encoder-εκτίμηση). Το world-model ΕΠΕΜΒΑΙΝΕΙ ΜΟΝΟ στα
-βήματα όπου ο PID ΗΔΗ θέλει κατακόρυφο (main, a_pid==2), και εκεί αποφασίζει αν θα κρατήσει
-το main ή θα το ΚΑΘΥΣΤΕΡΗΣΕΙ (noop) — "delay-the-burn" για μαλακότερη προσγείωση. ΠΟΤΕ δεν
-εισάγει main σε horizontal/noop βήματα -> καμία πλάγια ώθηση, καμία διαταραχή του οριζόντιου
-ελέγχου. Εγγύηση: σχεδόν ≥ enc_pid (το MPC μόνο καθυστερεί/επιβεβαιώνει το main του PID).
+Default controller = enc_pid (a PID on the encoder estimate). The world model INTERVENES ONLY at
+the steps where the PID ALREADY wants vertical thrust (main, a_pid==2), and there it decides whether to keep
+the main or to DELAY it (noop) — "delay-the-burn" for a softer landing. It NEVER
+introduces main at horizontal/noop steps -> no lateral thrust, no disturbance of the horizontal
+control. Guarantee: essentially >= enc_pid (the MPC only delays/confirms the PID's main).
 
-ΓΙΑΤΙ ΜΟΝΟ main: το διαγνωστικό (mpc_model_sanity.py) έδειξε ότι το μοντέλο προβλέπει αξιόπιστα
-τη σχέση main→vy, αλλά έχει ~νεκρό action-conditioning στα πλευρικά engines (left/right→vx).
-Άρα το αξιοποιούμε ΜΟΝΟ στο κάθετο, όπου είναι έμπιστο.
+WHY main ONLY: the diagnostic (mpc_model_sanity.py) showed that the model reliably predicts
+the main->vy relation, but has ~dead action conditioning on the side engines (left/right->vx).
+So we use it ONLY on the vertical axis, where it is trustworthy.
 
-Imports από canonical modules· cwd: lunarlander/. Απαιτεί gymnasium[box2d].
+Imports from the canonical modules; cwd: lunarlander/. Requires gymnasium[box2d].
 """
 import os
 import numpy as np
@@ -28,23 +28,24 @@ from vae_p3 import VAE_P3
 from lstm import LatentPredictor
 from loader import load_norm_stats
 
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, P1_LSTM, P1_VAE, P2_LSTM, P2_VAE, P3_SEMI_LSTM, P3_SEMI_VAE, P3_WEAK_LSTM, P3_WEAK_VAE, outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG — placeholders <...> τα συμπληρώνει ο patcher
+# CONFIG  (paths from config.py via paths.py)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_ext4_shield_pid"
+SAVE_DIR = outputs("lunarlander_ext4_shield_pid")
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
 N_ACTIONS, HIDDEN, LAYERS = 4, 64, 2
 
 MODEL = "p1"
 MODEL_REGISTRY = {
-    "baseline": (lambda: VAE(latent_size=LATENT_SIZE),    "<lunarlander-baseline-vae>", "<lunarlander-baseline-lstm>"),
-    "p1":       (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG), "<lunarlander-p1-vae>",       "<lunarlander-p1-lstm>"),
-    "p2":       (lambda: VAE_P2(latent_size=LATENT_SIZE),  "<lunarlander-p2-vae>",       "<lunarlander-p2-lstm>"),
-    "p3_semi":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  "<lunarlander-p3-semi-vae>",  "<lunarlander-p3-semi-lstm>"),
-    "p3_weak":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  "<lunarlander-p3-weak-vae>",  "<lunarlander-p3-weak-lstm>"),
+    "baseline": (lambda: VAE(latent_size=LATENT_SIZE),    BASELINE_VAE, BASELINE_LSTM),
+    "p1":       (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG), P1_VAE,       P1_LSTM),
+    "p2":       (lambda: VAE_P2(latent_size=LATENT_SIZE),  P2_VAE,       P2_LSTM),
+    "p3_semi":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  P3_SEMI_VAE,  P3_SEMI_LSTM),
+    "p3_weak":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  P3_WEAK_VAE,  P3_WEAK_LSTM),
 }
 
 N_EPISODES = 20
@@ -57,9 +58,9 @@ RECORD_GIF = True
 GIF_FPS = 30
 
 # --- Vertical shield (main-only, suppress/delay) ---
-VERT_HORIZON = 10                 # ≤ train window (το μοντέλο είναι αξιόπιστο ~10 βήματα)
-Y_GROUND_SCALE = 0.40             # βάρος vy² ~ exp(-y/scale): μεγάλο κοντά στο έδαφος
-VERT_FUEL_W = 0.05                # ήπια ποινή καυσίμου (να μη μπλοκάρει αναγκαίο braking)
+VERT_HORIZON = 10                 # <= the train window (the model is reliable for ~10 steps)
+Y_GROUND_SCALE = 0.40             # weight vy² ~ exp(-y/scale): large close to the ground
+VERT_FUEL_W = 0.05                # mild fuel penalty (must not block necessary braking)
 
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
 
@@ -80,11 +81,11 @@ def make_env():
             return gym.make(env_id, **kw)
         except Exception as e:
             last_err = e
-    raise RuntimeError(f"LunarLander δεν βρέθηκε (pip install 'gymnasium[box2d]'). {last_err}")
+    raise RuntimeError(f"LunarLander not found (pip install 'gymnasium[box2d]'). {last_err}")
 
 
 # ---------------------------------------------------------------------------
-# PD heuristic (ίδιο με dataCollect) + encoder helpers
+# PD heuristic (same as dataCollect) + encoder helpers
 # ---------------------------------------------------------------------------
 def heuristic_control(s):
     x, y, vx, vy, theta, omega = float(s[0]), float(s[1]), float(s[2]), float(s[3]), float(s[4]), float(s[5])
@@ -129,16 +130,16 @@ def save_gif(frames, path, fps=GIF_FPS):
 
 
 # ---------------------------------------------------------------------------
-# Vertical decision (main-only) — "delay-the-burn" στο αξιόπιστο main→vy
+# Vertical decision (main-only) — "delay-the-burn" on the reliable main->vy axis
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def vertical_main_decision(lstm, z0, mean_t, std_t, device):
-    """ Δοκιμάζει 'ξεκίνα main από βήμα j' (j=0..K· j=K -> ποτέ). Vertical dream -> ποινή
-    Σ w_ground(y)·vy² + fuel. Επιστρέφει 1η ενέργεια του best profile: 2 (main) ή 0 (noop). """
+    """ Tries 'start main at step j' (j=0..K; j=K -> never). Vertical dream -> penalty
+    Σ w_ground(y)·vy² + fuel. Returns the first action of the best profile: 2 (main) or 0 (noop). """
     K = VERT_HORIZON
     seqs = torch.zeros(K + 1, K, dtype=torch.long, device=device)
     for j in range(K + 1):
-        seqs[j, j:] = 2                                                  # main από j και μετά
+        seqs[j, j:] = 2                                                  # main from j onwards
     N = K + 1
     z = z0.expand(N, -1).contiguous()
     hid = lstm.init_hidden(N, device)
@@ -150,7 +151,7 @@ def vertical_main_decision(lstm, z0, mean_t, std_t, device):
         z, hid = lstm.step(z, F.one_hot(a, N_ACTIONS).float(), hid)
         phys = z[:, :N_SUP] * std8 + mean8
         y, vy = phys[:, 1], phys[:, 3]
-        w_ground = torch.exp(-torch.relu(y) / Y_GROUND_SCALE)            # ~1 κοντά στο έδαφος
+        w_ground = torch.exp(-torch.relu(y) / Y_GROUND_SCALE)            # ~1 close to the ground
         cost += w_ground * (vy * vy) + VERT_FUEL_W * fc[a]
     best = int(torch.argmin(cost).item())
     return int(seqs[best, 0].item())                                     # 2 ή 0
@@ -179,13 +180,13 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, reco
             a = heuristic_control(phys)
         elif controller == "shield_pid":
             a_pid = heuristic_control(phys)
-            if a_pid == 2:                          # ΜΟΝΟ όταν ο PID θέλει κατακόρυφο (main)
-                a_vert = vertical_main_decision(lstm, mu, mean_t, std_t, device)  # 2 (κράτα) ή 0 (καθυστέρησε)
+            if a_pid == 2:                          # ONLY when the PID wants vertical thrust (main)
+                a_vert = vertical_main_decision(lstm, mu, mean_t, std_t, device)  # 2 (keep) or 0 (delay)
                 n_vert += 1
                 a = a_vert
                 n_keep += int(a_vert == 2)
             else:
-                a = a_pid                           # side/noop -> ΑΝΕΓΓΙΧΤΟ (καμία οριζόντια διαταραχή)
+                a = a_pid                           # side/noop -> UNTOUCHED (no horizontal disturbance)
         else:
             raise ValueError(controller)
 
@@ -197,7 +198,7 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, reco
             break
 
     landed = last_r >= 100.0; crashed = last_r <= -100.0
-    keep_pct = (100.0 * n_keep / n_vert) if n_vert else 0.0              # % των PID-main βημάτων που κράτησε main
+    keep_pct = (100.0 * n_keep / n_vert) if n_vert else 0.0              # % of PID-main steps that kept main
     return {"return": total_r, "landed": landed, "crashed": crashed, "fuel": fuel,
             "frames": frames, "keep_pct": keep_pct}
 

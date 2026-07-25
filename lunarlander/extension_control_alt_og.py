@@ -1,36 +1,36 @@
 """
-extension4_control_alt.py — Επέκταση 4 (ΒΕΛΤΙΩΜΕΝΗ, wind-oriented): world-model ΣΥΜΠΛΗΡΩΜΑΤΙΚΑ
-στον κλασικό έλεγχο, ΟΧΙ ως αποκλειστικός greedy planner.
+extension4_control_alt.py — Extension 4 (IMPROVED, wind-oriented): the world model COMPLEMENTARY
+to classical control, NOT as an exclusive greedy planner.
 
-ΓΙΑΤΙ άλλαξε σε σχέση με το extension4_control.py (που το latent_mpc «δεν προσγείωνε ποτέ»):
-  Το αρχικό latent_mpc απέτυχε για πολλούς λόγους ταυτόχρονα — εδώ διορθώνονται όλοι:
+WHY it changed relative to extension4_control.py (where latent_mpc "never landed"):
+  The original latent_mpc failed for several reasons at once — all of them are fixed here:
 
-  (1) ΣΩΣΤΟ OBJECTIVE. Το αρχικό άθροιζε ABSOLUTE shaping πάνω στον ορίζοντα -> μεγιστοποιείται
-      με HOVER κοντά στο (0,0), ΟΧΙ με προσγείωση. Εδώ χρησιμοποιούμε το ΠΡΑΓΜΑΤΙΚΟ gym objective:
+  (1) THE RIGHT OBJECTIVE. The original summed ABSOLUTE shaping over the horizon -> it is maximized
+      by HOVERING near (0,0), NOT by landing. Here we use the REAL gym objective:
       potential-DIFFERENCE (telescoping) shaping  +  terminal landing/crash value  −  fuel.
-      Το hovering πλέον δίνει ~0 shaping-gain και μόνο fuel cost -> αποθαρρύνεται.
+      Hovering now gives ~0 shaping gain and only fuel cost -> it is discouraged.
 
-  (2) PID-GUIDED CEM (αντί random shooting). Το μοντέλο εκπαιδεύτηκε ΜΟΝΟ σε heuristic+ε=0.2 data
-      (dataCollect.py) -> uniform-random ακολουθίες είναι OOD -> «όνειρο» σκουπίδια. Εδώ δειγματίζουμε
-      ΓΥΡΩ από τον heuristic (warm-start) και «σφίγγουμε» την κατανομή με Cross-Entropy Method.
-      In-distribution rollouts -> ο MPC ψάχνει μόνο ΤΟΠΙΚΕΣ βελτιώσεις. + ACTION-REPEAT για μακρύτερο
-      effective horizon (συνεκτικά bursts, που χρειάζεται η προσγείωση).
+  (2) PID-GUIDED CEM (instead of random shooting). The model was trained ONLY on heuristic+ε=0.2 data
+      (dataCollect.py) -> uniform-random sequences are OOD -> the "dream" is garbage. Here we sample
+      AROUND the heuristic (warm start) and "tighten" the distribution with the Cross-Entropy Method.
+      In-distribution rollouts -> the MPC only searches for LOCAL improvements. + ACTION REPEAT for a longer
+      effective horizon (the coherent bursts that landing needs).
 
-  (3) MPC ως SHIELD/CORRECTOR. Default = PID· ο MPC κάνει override ΜΟΝΟ όταν (α) το μοντέλο είναι
-      έμπιστο (χαμηλό disturbance residual) ΚΑΙ (β) το «όνειρό» του είναι σαφώς καλύτερο από το
-      PID-plan. Εγγύηση ≥ PID, αποφυγή model-exploitation. Υπό WIND (υψηλό residual) -> PID.
+  (3) MPC as a SHIELD/CORRECTOR. Default = PID; the MPC overrides ONLY when (a) the model is
+      trustworthy (low disturbance residual) AND (b) its "dream" is clearly better than the
+      PID plan. A >= PID guarantee, avoiding model exploitation. Under WIND (a high residual) -> PID.
 
-  (4) COMPLEMENTARY STATE FILTER. Ο encoder είναι θορυβώδης στις ΤΑΧΥΤΗΤΕΣ. Συνδυάζουμε encoder +
-      1-step model-prediction (gated από το residual: υψηλό residual -> εμπιστεύσου τον encoder).
-      Βελτιώνει ΚΑΙ το enc_pid ΚΑΙ τον MPC seed. (Ίδια ιδέα με το Kalman fusion του cartpole.)
+  (4) COMPLEMENTARY STATE FILTER. The encoder is noisy on the VELOCITIES. We combine encoder +
+      1-step model prediction (gated by the residual: a high residual -> trust the encoder).
+      It improves BOTH enc_pid AND the MPC seed. (The same idea as cartpole's Kalman fusion.)
 
-CONTROLLERS (ίδια seeds):
-   true_pid        : PD στο ΑΛΗΘΙΝΟ obs                         (upper bound)
-   enc_pid         : PD στο ΦΙΛΤΡΑΡΙΣΜΕΝΟ encoder-estimate      (encoder ως αισθητήρας + filter)
-   latent_mpc_rand : ΠΑΛΙΟ random-shooting MPC                  (baseline «πριν», για contrast)
-   guided_mpc      : PID-guided CEM shield/corrector            (η βελτιωμένη πρόταση)
+CONTROLLERS (the same seeds):
+   true_pid        : PD on the TRUE obs                          (upper bound)
+   enc_pid         : PD on the FILTERED encoder estimate         (encoder as a sensor + filter)
+   latent_mpc_rand : the OLD random-shooting MPC                 (the "before" baseline, for contrast)
+   guided_mpc      : PID-guided CEM shield/corrector             (the improved proposal)
 
-Imports από τα canonical modules του lunar_lander/. Απαιτεί gymnasium[box2d].
+Imports from the canonical lunar_lander/ modules. Requires gymnasium[box2d].
 """
 import os
 import numpy as np
@@ -47,12 +47,13 @@ from vae_p3 import VAE_P3
 from lstm import LatentPredictor
 from loader import load_norm_stats
 
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, P1_LSTM, P1_VAE, P2_LSTM, P2_VAE, P3_SEMI_LSTM, P3_SEMI_VAE, P3_WEAK_LSTM, P3_WEAK_VAE, outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG — placeholders <...> τα συμπληρώνει το bootstrap patcher (CONFIG_PATHS)
+# CONFIG  (paths from config.py via paths.py)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_ext4_control_alt"
+SAVE_DIR = outputs("lunarlander_ext4_control_alt")
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
 N_ACTIONS, HIDDEN, LAYERS = 4, 64, 2
@@ -60,59 +61,59 @@ IMG_H, IMG_W = 80, 120
 
 MODEL = "p1"
 MODEL_REGISTRY = {
-    "baseline": (lambda: VAE(latent_size=LATENT_SIZE),       "<lunarlander-baseline-vae>", "<lunarlander-baseline-lstm>"),
-    "p1":       (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG),    "<lunarlander-p1-vae>",       "<lunarlander-p1-lstm>"),
-    "p2":       (lambda: VAE_P2(latent_size=LATENT_SIZE),     "<lunarlander-p2-vae>",       "<lunarlander-p2-lstm>"),
-    "p3_semi":  (lambda: VAE_P3(latent_size=LATENT_SIZE),     "<lunarlander-p3-semi-vae>",  "<lunarlander-p3-semi-lstm>"),
-    "p3_weak":  (lambda: VAE_P3(latent_size=LATENT_SIZE),     "<lunarlander-p3-weak-vae>",  "<lunarlander-p3-weak-lstm>"),
+    "baseline": (lambda: VAE(latent_size=LATENT_SIZE),       BASELINE_VAE, BASELINE_LSTM),
+    "p1":       (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG),    P1_VAE,       P1_LSTM),
+    "p2":       (lambda: VAE_P2(latent_size=LATENT_SIZE),     P2_VAE,       P2_LSTM),
+    "p3_semi":  (lambda: VAE_P3(latent_size=LATENT_SIZE),     P3_SEMI_VAE,  P3_SEMI_LSTM),
+    "p3_weak":  (lambda: VAE_P3(latent_size=LATENT_SIZE),     P3_WEAK_VAE,  P3_WEAK_LSTM),
 }
 
 N_EPISODES = 20
 MAX_STEPS = 400
 SEED = 0
-ENABLE_WIND = False               # το πείραμα ΕΧΕΙ wind -> εδώ ο corrector/shield έχει νόημα
+ENABLE_WIND = False               # the experiment HAS wind -> that is where the corrector/shield makes sense
 WIND_POWER, TURBULENCE_POWER = 15.0, 1.5
 CONTROLLERS = ["true_pid", "enc_pid", "latent_mpc_rand", "guided_mpc"]
 
 RECORD_GIF = True
 GIF_FPS = 30
 
-# --- Complementary state filter (encoder + model, gated από το residual) ---
+# --- Complementary state filter (encoder + model, gated by the residual) ---
 USE_FILTER = True
-#                x     y     vx    vy    theta omega leg1  leg2   (βάρος του ΜΟΝΤΕΛΟΥ ανά dim)
+#                x     y     vx    vy    theta omega leg1  leg2   (the MODEL's weight per dim)
 W_MODEL = np.array([0.15, 0.15, 0.50, 0.50, 0.20, 0.45, 0.00, 0.00], dtype=np.float64)
-RESID_SCALE0 = 1.0               # αρχικό scale του gate πριν μαζευτεί ιστορικό residual
-FILTER_WARMUP = 5                # βήματα πριν ενεργοποιηθεί το adaptive scaling/threshold
+RESID_SCALE0 = 1.0               # the gate's initial scale, before residual history accumulates
+FILTER_WARMUP = 5                # steps before the adaptive scaling/threshold kicks in
 
 # --- Guided MPC (CEM shield/corrector) ---
-MPC_HORIZON = 5                  # K macro-βήματα απόφασης
+MPC_HORIZON = 5                  # K macro decision steps
 MPC_REPEAT = 2                   # action-repeat -> effective horizon = K*REPEAT (=24)
-MPC_SAMPLES = 256                # ακολουθίες ανά CEM iteration
-CEM_ITERS = 3                    # iterations του Cross-Entropy Method
-CEM_ELITE = 32                   # πλήθος elites
-CEM_LR = 0.7                     # refit rate της κατανομής προς τα elites
-PID_BIAS = 0.5                   # warm-start: μάζα πιθανότητας στο PID-nominal action ανά βήμα
+MPC_SAMPLES = 256                # sequences per CEM iteration
+CEM_ITERS = 3                    # Cross-Entropy Method iterations
+CEM_ELITE = 32                   # number of elites
+CEM_LR = 0.7                     # refit rate of the distribution toward the elites
+PID_BIAS = 0.5                   # warm start: probability mass on the PID-nominal action per step
 MPC_SEED = 0
 
-# --- Cost weights (tunable· οι τιμές είναι σε «φυσικές μονάδες» του LunarLander shaping) ---
-GAMMA = 0.93                     # discount στο dream rollout: γ^10≈0.48 -> ο αξιόπιστος (≤SEQ_LEN)
-                                 # ορίζοντας κυριαρχεί· down-weights τον αναξιόπιστο μακρινό ορίζοντα
-                                 # (το LSTM εκπαιδεύεται free-running ~10 βήματα· το MPC ονειρεύεται 24)
-FUEL_W = 0.30                    # ποινή καυσίμου
-TERM_W = 1.0                     # βάρος terminal value
-LAND_CRASH = 100.0               # ποινή για υψηλή ταχύτητα στο τέλος (proxy του −100 crash)
-SAFE_SPEED = 0.5                 # «ασφαλής» ταχύτητα προσγείωσης (πάνω από αυτή -> crash risk)
-# Landing-funnel terminal σε ΚΑΛΑ προβλέψιμα dims (x,y,θ,speed) — ΟΧΙ predicted legs (το μοντέλο
-# δεν τα προβλέπει: W_MODEL[legs]=0 και τα leg-flags είναι ~0 μέχρι την επαφή). Peak + widths^2.
-FUNNEL_BONUS = 40.0              # peak terminal bonus (over-pad, upright, αργό) — proxy του +100 landing
+# --- Cost weights (tunable; the values are in the "physical units" of the LunarLander shaping) ---
+GAMMA = 0.93                     # discount in the dream rollout: γ^10~0.48 -> the reliable (<=SEQ_LEN)
+                                 # horizon dominates; it down-weights the unreliable far horizon
+                                 # (the LSTM is trained free-running for ~10 steps; the MPC dreams 24)
+FUEL_W = 0.30                    # fuel penalty
+TERM_W = 1.0                     # terminal-value weight
+LAND_CRASH = 100.0               # penalty for high speed at the end (a proxy for the −100 crash)
+SAFE_SPEED = 0.5                 # a "safe" landing speed (above it -> crash risk)
+# A landing-funnel terminal on the WELL-predicted dims (x,y,θ,speed) — NOT the predicted legs (the model
+# does not predict them: W_MODEL[legs]=0 and the leg flags are ~0 until contact). Peak + widths^2.
+FUNNEL_BONUS = 40.0              # peak terminal bonus (over-pad, upright, slow) — a proxy for the +100 landing
 FUNNEL_X2, FUNNEL_Y2, FUNNEL_TH2 = 0.25, 0.25, 0.04
 
 # --- Shield / corrector ---
 USE_SHIELD = True
-TRUST_FACTOR = 2.0               # distrust όταν residual > TRUST_FACTOR * median(residual)
-MPC_MARGIN = 5.0                 # override μόνο αν dream-value(MPC) > dream-value(PID) + MARGIN
+TRUST_FACTOR = 2.0               # distrust when residual > TRUST_FACTOR * median(residual)
+MPC_MARGIN = 5.0                 # override only if dream-value(MPC) > dream-value(PID) + MARGIN
 
-FUEL_COST = [0.0, 0.03, 0.30, 0.03]   # ανά action {noop,left,main,right}
+FUEL_COST = [0.0, 0.03, 0.30, 0.03]   # per action {noop,left,main,right}
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
 
 
@@ -134,14 +135,14 @@ def make_env():
             return gym.make(env_id, **kw)
         except Exception as e:
             last_err = e
-    raise RuntimeError(f"LunarLander δεν βρέθηκε (pip install 'gymnasium[box2d]'). {last_err}")
+    raise RuntimeError(f"LunarLander not found (pip install 'gymnasium[box2d]'). {last_err}")
 
 
 # ---------------------------------------------------------------------------
-# (A) Κλασικός controller — ντετερμινιστικό PD heuristic (ίδιο με dataCollect)
+# (A) Classical controller — a deterministic PD heuristic (same as dataCollect)
 # ---------------------------------------------------------------------------
 def heuristic_control(s):
-    """ s = [x, y, vx, vy, theta, omega, leg1, leg2] (φυσικές μονάδες) -> action ∈ {0,1,2,3}. """
+    """ s = [x, y, vx, vy, theta, omega, leg1, leg2] (physical units) -> action ∈ {0,1,2,3}. """
     x, y, vx, vy, theta, omega = float(s[0]), float(s[1]), float(s[2]), float(s[3]), float(s[4]), float(s[5])
     leg1, leg2 = float(s[6]) > 0.5, float(s[7]) > 0.5
     angle_targ = float(np.clip(x * 0.5 + vx * 1.0, -0.4, 0.4))
@@ -175,7 +176,7 @@ def encode_pair(vae, f_prev, f_cur, device):
 
 
 def to_phys(z8_std, mean_t, std_t):
-    """standardized (...,8) -> φυσικές μονάδες."""
+    """standardized (...,8) -> physical units."""
     return z8_std * std_t[:N_SUP] + mean_t[:N_SUP]
 
 
@@ -193,9 +194,9 @@ def save_gif(frames, path, fps=GIF_FPS):
 # Complementary state estimator: encoder + 1-step model prediction (gated)
 # ---------------------------------------------------------------------------
 class StateEstimator:
-    """fused_phys = (1-w_eff)·encoder + w_eff·model_pred, με w_eff = W_MODEL·exp(-residual/scale).
-       Υψηλό residual (π.χ. wind/OOD) -> w_eff->0 -> εμπιστεύσου τον encoder. Κρατά ιστορικό
-       residual για adaptive scale & trust-threshold (για το shield)."""
+    """fused_phys = (1-w_eff)·encoder + w_eff·model_pred, with w_eff = W_MODEL·exp(-residual/scale).
+       A high residual (e.g. wind/OOD) -> w_eff->0 -> trust the encoder. Keeps a history of the
+       residual for the adaptive scale & trust threshold (used by the shield)."""
 
     def __init__(self, lstm, mean_t, std_t, device):
         self.lstm, self.mean_t, self.std_t, self.device = lstm, mean_t, std_t, device
@@ -203,7 +204,7 @@ class StateEstimator:
         self.reset()
 
     def reset(self):
-        self.z_fused = None       # προηγούμενο fused full latent (για το model predict)
+        self.z_fused = None       # the previous fused full latent (for the model predict)
         self.a_prev = None
         self.resid = 0.0
         self.resid_hist = []
@@ -213,12 +214,12 @@ class StateEstimator:
 
     def trust_threshold(self):
         if len(self.resid_hist) < FILTER_WARMUP:
-            return float("inf")   # warmup -> πάντα έμπιστο (MPC ενεργό)
+            return float("inf")   # warmup -> always trusted (MPC active)
         return float(np.median(self.resid_hist) * TRUST_FACTOR)
 
     @torch.no_grad()
     def update(self, mu):
-        """mu: (1,64) encoder output. -> fused_mu (1,64) με denoised [:8]."""
+        """mu: (1,64) encoder output. -> fused_mu (1,64) with a denoised [:8]."""
         enc_phys = mu[:, :N_SUP]
         if self.z_fused is not None and self.a_prev is not None:
             a_oh = F.one_hot(torch.tensor([self.a_prev], device=self.device), N_ACTIONS).float()
@@ -246,10 +247,10 @@ class StateEstimator:
 
 
 # ---------------------------------------------------------------------------
-# Reward shaping (gym LunarLander potential) — clamp legs για ασφάλεια στο dreamed state
+# Reward shaping (the gym LunarLander potential) — clamp legs for safety in the dreamed state
 # ---------------------------------------------------------------------------
 def shaping_phys(phys):
-    """phys: (...,8) φυσικές μονάδες -> shaping potential (...). Ίδιοι συντελεστές με το gym."""
+    """phys: (...,8) physical units -> shaping potential (...). The same coefficients as gym."""
     x, y, vx, vy, theta = phys[..., 0], phys[..., 1], phys[..., 2], phys[..., 3], phys[..., 4]
     leg1 = phys[..., 6].clamp(0.0, 1.0)
     leg2 = phys[..., 7].clamp(0.0, 1.0)
@@ -260,11 +261,11 @@ def shaping_phys(phys):
 
 
 # ---------------------------------------------------------------------------
-# Dream rollout & ΣΩΣΤΟ cost (telescoping shaping + terminal landing/crash − fuel)
+# Dream rollout & the RIGHT cost (telescoping shaping + terminal landing/crash − fuel)
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def dream_rollout(lstm, z0, macro_actions, mean_t, std_t, device):
-    """z0 (1,64)· macro_actions (N,K). Κάθε macro-action κρατιέται MPC_REPEAT βήματα.
+    """z0 (1,64); macro_actions (N,K). Each macro-action is held for MPC_REPEAT steps.
        -> phys_traj (N, K*REPEAT+1, 8), prim_acts (N, K*REPEAT)."""
     N, K = macro_actions.shape
     z = z0.expand(N, -1).contiguous()
@@ -285,10 +286,10 @@ def dream_value(phys_traj, prim_acts, device):
     """ -> (N,) score. DISCOUNTED gym-faithful objective:
          Σ_t γ^t (Δshaping_t − FUEL_W·fuel_t)  +  γ^T·TERM_W·(landing-funnel − crash).
        Δshaping_t = potential difference per step == gym's shaping reward (telescopes to the
-       gym return when γ=1). Discount: το μοντέλο είναι αξιόπιστο ~SEQ_LEN(10) βήματα αλλά το MPC
-       ονειρεύεται K·REPEAT(=24) -> down-weight τον αναξιόπιστο μακρινό ορίζοντα (συμβατό με το
-       uncertainty work: το σφάλμα συσσωρεύεται με τον ορίζοντα). Terminal σε ΚΑΛΑ προβλέψιμα dims
-       (x,y,θ,speed)· ΟΧΙ predicted legs (το αρχικό leg-bonus σχεδόν ποτέ δεν ενεργοποιούνταν στο όνειρο)."""
+       gym return when γ=1). Discount: the model is reliable for ~SEQ_LEN(10) steps but the MPC
+       dreams K·REPEAT(=24) -> down-weight the unreliable far horizon (consistent with the
+       uncertainty work: the error accumulates with the horizon). Terminal on the WELL-predicted dims
+       (x,y,θ,speed); NOT the predicted legs (the original leg bonus almost never fired in the dream)."""
     sh = shaping_phys(phys_traj)                                # (N, T+1)
     dsh = sh[:, 1:] - sh[:, :-1]                                # (N, T) per-step potential gain (gym shaping reward)
     fc = torch.tensor(FUEL_COST, device=device)
@@ -308,7 +309,7 @@ def dream_value(phys_traj, prim_acts, device):
 
 @torch.no_grad()
 def pid_nominal_dream(lstm, z0, mean_t, std_t, device):
-    """Roll τον PID ΜΕΣΑ στο όνειρο -> nominal macro-ακολουθία + dream-value της (warm-start & shield)."""
+    """Roll the PID INSIDE the dream -> the nominal macro sequence + its dream value (warm start & shield)."""
     z = z0.clone()
     hidden = lstm.init_hidden(1, device)
     macro = []
@@ -326,11 +327,11 @@ def pid_nominal_dream(lstm, z0, mean_t, std_t, device):
 
 @torch.no_grad()
 def cem_plan(lstm, z0, nominal_macro, mean_t, std_t, device, rng):
-    """PID-guided Cross-Entropy Method πάνω σε per-step categorical actions.
-       Warm-start γύρω από το PID-nominal -> in-distribution. -> (first_action, best_dream_value)."""
+    """PID-guided Cross-Entropy Method over per-step categorical actions.
+       Warm-started around the PID nominal -> in-distribution. -> (first_action, best_dream_value)."""
     K = MPC_HORIZON
     probs = np.full((K, N_ACTIONS), (1.0 - PID_BIAS) / N_ACTIONS)
-    probs[np.arange(K), nominal_macro] += PID_BIAS                      # μάζα στο PID action ανά βήμα
+    probs[np.arange(K), nominal_macro] += PID_BIAS                      # mass on the PID action per step
     best_v, best_a0 = -1e18, int(nominal_macro[0])
 
     for _ in range(CEM_ITERS):
@@ -351,12 +352,12 @@ def cem_plan(lstm, z0, nominal_macro, mean_t, std_t, device, rng):
         if sc[top] > best_v:
             best_v, best_a0 = float(sc[top]), int(samples[top, 0])
 
-    a0 = int(np.argmax(probs[0]))                                      # mode της refined κατανομής
+    a0 = int(np.argmax(probs[0]))                                      # the mode of the refined distribution
     return a0, best_v
 
 
 # ---------------------------------------------------------------------------
-# ΠΑΛΙΟ random-shooting MPC (baseline «πριν») — absolute shaping, uniform actions
+# The OLD random-shooting MPC (the "before" baseline) — absolute shaping, uniform actions
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def mpc_plan_random(lstm, z_t, mean_t, std_t, device, rng):
@@ -370,7 +371,7 @@ def mpc_plan_random(lstm, z_t, mean_t, std_t, device, rng):
         a = seqs[:, k]
         z, hidden = lstm.step(z, F.one_hot(a, N_ACTIONS).float(), hidden)
         phys = z[:, :N_SUP] * std_t[:N_SUP] + mean_t[:N_SUP]
-        score += shaping_phys(phys) - FUEL_W * fc[a]               # absolute shaping (το «λάθος»)
+        score += shaping_phys(phys) - FUEL_W * fc[a]               # absolute shaping (the "mistake")
     return int(seqs[int(torch.argmax(score).item()), 0].item())
 
 
@@ -399,7 +400,7 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, mpc_
             dist_log.append(est.resid)
         phys_est = to_phys(fused_mu[0, :N_SUP], mean_t, std_t).cpu().numpy()
 
-        # --- επιλογή ενέργειας ανά controller ---
+        # --- action selection per controller ---
         if controller == "true_pid":
             a = heuristic_control(obs)
         elif controller == "enc_pid":
@@ -409,12 +410,12 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, mpc_
         elif controller == "guided_mpc":
             a_pid = heuristic_control(phys_est)
             if USE_SHIELD and est.resid > est.trust_threshold():
-                a = a_pid                                         # μοντέλο αναξιόπιστο (wind/OOD) -> PID
+                a = a_pid                                         # the model is unreliable (wind/OOD) -> PID
             else:
                 nominal_macro, v_pid = pid_nominal_dream(lstm, fused_mu, mean_t, std_t, device)
                 a_mpc, v_mpc = cem_plan(lstm, fused_mu, nominal_macro, mean_t, std_t, device, mpc_rng)
                 n_mpc += 1
-                if v_mpc > v_pid + MPC_MARGIN:                    # override μόνο αν σαφώς καλύτερο
+                if v_mpc > v_pid + MPC_MARGIN:                    # override only if clearly better
                     a = a_mpc
                     n_override += int(a_mpc != a_pid)
                 else:
@@ -500,7 +501,7 @@ def main():
     plt.axhline(200, color="g", ls="--", lw=1, label="solved (≥200)")
     plt.axhline(0, color="0.6", lw=0.8)
     plt.ylabel("episode return")
-    plt.title(f"Closed-loop control (ALT) — return ανά controller (model={MODEL}, wind={ENABLE_WIND})")
+    plt.title(f"Closed-loop control (ALT) — return per controller (model={MODEL}, wind={ENABLE_WIND})")
     plt.grid(alpha=0.3, axis="y"); plt.legend()
     plt.tight_layout()
     p1 = os.path.join(SAVE_DIR, f"ext4alt_{MODEL}_returns.png")

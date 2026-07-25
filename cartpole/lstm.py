@@ -1,20 +1,20 @@
 """
-lstm.py — LSTM predictor εκπαιδευμένο σε ENCODED mode (CartPole Baseline).
+lstm.py — LSTM predictor trained in ENCODED mode (CartPole baseline).
 
-Διαφορά από lstm_baseline.py (hybrid):
-  * ΚΑΝΕΝΑ hybrid-gt injection: seed & teacher-forcing targets χρησιμοποιούν
-    ΑΠΟΚΛΕΙΣΤΙΚΑ τα VAE-encoded latents (z), ΟΧΙ τα GT physical states.
-  * Αυτό σημαίνει ότι κατά το training ο LSTM μαθαίνει πάνω στα ΠΡΑΓΜΑΤΙΚΑ
-    latents που θα δει στο inference (encoded mode), χωρίς κανένα GT "βοήθημα".
-  * Ο αξιολόγηση γίνεται πάντα end-to-end: z_0 από VAE -> LSTM rollout ->
-    σύγκριση πρόβλεψης[:4] με GT physical state (σε standardized μονάδες).
+Difference from lstm_baseline.py (hybrid):
+  * NO hybrid-gt injection: seed & teacher-forcing targets use
+    EXCLUSIVELY the VAE-encoded latents (z), NOT the GT physical states.
+  * This means that during training the LSTM learns on the ACTUAL
+    latents it will see at inference (encoded mode), with no GT "help".
+  * Evaluation is always end-to-end: z_0 from the VAE -> LSTM rollout ->
+    compare prediction[:4] against the GT physical state (in standardized units).
 
-ΓΙΑΤΙ:
-  * Στο inference ΔΕΝ υπάρχει GT -> ο LSTM πρέπει να δουλεύει μόνο με VAE latents.
-  * Ο hybrid-trained LSTM (lstm_baseline.py) αξιολογείται OOD στο encoded mode,
-    αφού ποτέ δεν είδε πραγματικά VAE-encoded physical dims κατά την εκπαίδευση.
-  * Αυτό το script παράγει τα *_alt checkpoints που χρησιμοποιεί το
-    eval_baseline_vs_p1.py στο "encoded" seed mode.
+WHY:
+  * At inference there is NO GT -> the LSTM must work from VAE latents alone.
+  * The hybrid-trained LSTM (lstm_baseline.py) is evaluated OOD in encoded mode,
+    since it never saw real VAE-encoded physical dims during training.
+  * This script produces the *_alt checkpoints used by
+    eval_baseline_vs_p1.py in "encoded" seed mode.
 """
 import os
 import numpy as np
@@ -28,14 +28,15 @@ from tqdm.auto import tqdm
 from vae import VAE, encode_fn
 from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 
+from paths import BASELINE_VAE, DATA_ROOT, outputs
+
 #
 #  Config
 #
-DATA_ROOT = "<cartpole-dataset>"
-LATENT_ROOT = "/kaggle/working/cartpole_baseline_latents"
+LATENT_ROOT = outputs("cartpole_baseline_latents")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "<cartpole-baseline-vae>"
-SAVE_DIR = "/kaggle/working/cartpole_baseline_lstm"
+VAE_CKPT = BASELINE_VAE
+SAVE_DIR = outputs("cartpole_baseline_lstm")
 
 LATENT_SIZE = 64
 N_SUP = 4

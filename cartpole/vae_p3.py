@@ -1,31 +1,31 @@
 """
-vae_p3.py — Principle 3 (Multi-level / multi-strength supervision) VAE για CartPole.
+vae_p3.py — Principle 3 (multi-level / multi-strength supervision) VAE for CartPole.
 
-ΣΧΕΔΙΑΣΤΙΚΗ ΑΠΟΦΑΣΗ — "P3 ΜΟΝΟ ΤΟΥ" (απομονωμένο, πάνω στο baseline):
-  Όπως το paper (Fig. 3D) συγκρίνει ΚΑΘΕ αρχή ΞΕΧΩΡΙΣΤΑ ως ablation πάνω στο baseline,
-  κρατάμε ΑΚΡΙΒΩΣ την αρχιτεκτονική του baseline (ΕΝΑΣ monolithic encoder, 6-κάναλη
-  είσοδος stack(frame_t,frame_t+1), 64 latent, SPLIT-β KL) και αλλάζουμε ΜΟΝΟ τον ΣΤΟΧΟ
-  ΕΠΟΠΤΕΙΑΣ -> κάθε διαφορά οφείλεται καθαρά στην Αρχή 3. ΔΕΝ δανειζόμαστε τίποτα από
-  P1 (split encoder) ή P2 (in/equivariance losses).
+DESIGN DECISION — "P3 ON ITS OWN" (isolated, on top of the baseline):
+  As the paper (Fig. 3D) compares EACH principle SEPARATELY as an ablation over the baseline,
+  we keep the baseline architecture EXACTLY (ONE monolithic encoder, 6-channel
+  input stack(frame_t,frame_t+1), 64 latent, split-β KL) and change ONLY the SUPERVISION
+  TARGET -> any difference is cleanly attributable to Principle 3. We borrow nothing from
+  P1 (split encoder) or P2 (in/equivariance losses).
 
-ΑΡΧΗ 3 (paper, §3.3): ενσωμάτωσε ΠΟΛΛΑΠΛΕΣ μορφές & ισχείς εποπτείας. Για CartPole, δύο
-ρυθμίσεις πάνω στο [x, ẋ, θ, θ̇] (static=[0,2], velocity=[1,3]):
+PRINCIPLE 3 (paper, §3.3): incorporate MULTIPLE forms & strengths of supervision. For CartPole, two
+settings over [x, ẋ, θ, θ̇] (static=[0,2], velocity=[1,3]):
 
-  (1) SEMI : εποπτεύεται ΜΟΝΟ το ΣΤΑΤΙΚΟ (θέση x, γωνία θ)· οι ΤΑΧΥΤΗΤΕΣ άγνωστες
-             (dims 1,3 ΑΝΕΠΟΠΤΕΥΤΕΣ).
-  (2) WEAK : + εποπτεία ταχύτητας με ΕΚΤΙΜΗΣΗ από φυσική γνώση (finite diff):
+  (1) SEMI : ONLY the STATIC quantities are supervised (position x, angle θ); the VELOCITIES are
+             unknown (dims 1,3 UNSUPERVISED).
+  (2) WEAK : + velocity supervision from an ESTIMATE based on physical knowledge (finite diff):
              ẋ_est=(x_{t+1}-x_t)/dt , θ̇_est=(θ_{t+1}-θ_t)/dt   (dt=tau=0.02).
 
-ΑΝΑΦΟΡΑ "FULL" (εποπτεία και των 4 dims με ΑΛΗΘΙΝΑ states) = ΤΑΥΤΟΣΗΜΟ με το baseline
-(vae_baseline.py) -> χρησιμοποίησε εκείνη την καμπύλη ως reference· εδώ μόνο semi/weak.
+The "FULL" REFERENCE (all 4 dims supervised with TRUE states) is IDENTICAL to the baseline
+(vae_baseline.py) -> use that curve as the reference; here we only do semi/weak.
 
-ΕΚΤΙΜΗΣΗ ΤΑΧΥΤΗΤΑΣ & STANDARDIZATION: τα states είναι standardized. Το finite diff
-υπολογίζεται σε RAW μονάδες και ΞΑΝΑ-standardize-άρεται στις μονάδες της velocity-dim,
-ώστε ο στόχος weak να βρίσκεται στον ΙΔΙΟ χώρο με την αληθινή standardized ταχύτητα.
+VELOCITY ESTIMATE & STANDARDIZATION: the states are standardized. The finite difference is
+computed in RAW units and RE-standardized into the units of the velocity dim,
+so that the weak target lives in the SAME space as the true standardized velocity.
 
-ΣΗΜ. (2-frame): επειδή ο encoder βλέπει 2 frames, η ταχύτητα είναι ΠΑΡΑΤΗΡΗΣΙΜΗ -> η
-διαφορά semi vs weak θα είναι ΗΠΙΟΤΕΡΗ απ' ό,τι στο paper (single-frame). Συνειδητή
-επιλογή για ΚΟΙΝΟ backbone με baseline/P1/P2.
+NOTE (2-frame): because the encoder sees 2 frames, velocity is OBSERVABLE -> the
+semi vs weak difference is MILDER than in the paper (single-frame). A deliberate
+choice, so that the backbone stays SHARED with baseline/P1/P2.
 """
 import os
 import numpy as np
@@ -38,10 +38,11 @@ from tqdm.auto import tqdm
 
 from loader import VaePairDataset, load_norm_stats
 
+from paths import DATA_ROOT, outputs
+
 #
 #  Config  (same paths/hyper as baseline -> fair comparison)
 #
-DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
@@ -52,7 +53,7 @@ SHIFT = 0    # 0=clean, 2/5/10=noisy (weak supervision on the positions)
 
 # Principle 3: supervision setting
 SUPERVISION = "weak"       # "semi" (static only) | "weak" (+ estimated velocity)
-SAVE_DIR = f"/kaggle/working/cartpole_p3_{SUPERVISION}_vae"
+SAVE_DIR = outputs(f"cartpole_p3_{SUPERVISION}_vae")
 STATIC_DIMS = (0, 2)       # x, theta
 VEL_DIMS = (1, 3)          # x_dot, theta_dot
 DT = 0.02                  # gym CartPole tau -> used for the velocity estimate

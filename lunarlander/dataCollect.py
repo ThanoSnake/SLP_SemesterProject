@@ -1,6 +1,6 @@
 """
-dataCollect.py — συλλογή dataset για LunarLander (discrete), κατά το dataCollect.py.
-Απαιτεί: pip install "gymnasium[box2d]". State=8, actions=4.
+dataCollect.py — dataset collection for LunarLander (discrete), following cartpole's dataCollect.py.
+Requires: pip install "gymnasium[box2d]". State=8, actions=4.
 """
 import os
 
@@ -8,23 +8,25 @@ import gymnasium as gym
 import numpy as np
 from PIL import Image
 
+from paths import DATA_ROOT
+
 # ----------------------------------------------------------------------------
-NUM_EPISODES = 4000             # 2× cartpole (2000) -> κάλυψη της πιο σύνθετης 8D κατάστασης
-MAX_STEPS = 400                 # landings ~200-400 steps (μεγαλύτερο από cartpole)
-IMG_H, IMG_W = 80, 120          # ΙΔΙΟ με cartpole -> ίδιος VAE (encoder ÷8 -> 10x15)
+NUM_EPISODES = 4000             # 2x cartpole (2000) -> coverage of the more complex 8D state
+MAX_STEPS = 400                 # landings take ~200-400 steps (longer than cartpole)
+IMG_H, IMG_W = 80, 120          # SAME as cartpole -> the same VAE (encoder /8 -> 10x15)
 SEED = 0
 
 TRAIN_FRACTION = 0.8
 VAL_FRACTION = 0.1
 TEST_FRACTION = 0.1
 
-EPSILON = 0.20                  # ε-greedy γύρω από heuristic· χαμηλότερο από cartpole (0.5):
-                                # το LunarLander crash-άρει με πολλή τυχαιότητα
+EPSILON = 0.20                  # ε-greedy around the heuristic; lower than cartpole (0.5):
+                                # LunarLander crashes under too much randomness
 
-# Θόρυβος ΚΑΤΑΣΤΑΣΗΣ μόνο σε position/angle dims -> noisy_states_2/_5/_10 (weak supervision).
-# dims: 0=x, 1=y, 4=theta. Οι ταχύτητες (2,3,5) & legs (6,7) ΔΕΝ θορυβοποιούνται.
+# STATE noise only on the position/angle dims -> noisy_states_2/_5/_10 (weak supervision).
+# dims: 0=x, 1=y, 4=theta. The velocities (2,3,5) & legs (6,7) are NOT noised.
 NOISE_LEVELS = [(0.025, 2), (0.05, 5), (0.10, 10)]
-NOISE_REF = {0: 2.5, 1: 2.0, 4: 2.0}   # εύρος αναφοράς ανά dim
+NOISE_REF = {0: 2.5, 1: 2.0, 4: 2.0}   # reference range per dim
 
 
 def make_env():
@@ -33,7 +35,7 @@ def make_env():
             return gym.make(env_id, render_mode="rgb_array")
         except Exception:
             continue
-    raise RuntimeError("LunarLander δεν βρέθηκε (pip install 'gymnasium[box2d]').")
+    raise RuntimeError("LunarLander not found (pip install 'gymnasium[box2d]').")
 
 
 def heuristic_action(obs, action_space, rng):
@@ -112,7 +114,7 @@ def compute_and_save_norm_stats(train_dir, out_path):
 if __name__ == '__main__':
     assert abs(TRAIN_FRACTION + VAL_FRACTION + TEST_FRACTION - 1.0) < 1e-6
 
-    base_dir = "/kaggle/working/lunarlander_data"
+    base_dir = DATA_ROOT   # where the training scripts read it back from
     dirs = {s: os.path.join(base_dir, s) for s in ("train", "val", "test")}
     for d in dirs.values():
         os.makedirs(d, exist_ok=True)
@@ -124,16 +126,16 @@ if __name__ == '__main__':
     lengths = []
     for i in range(NUM_EPISODES):
         if i % 100 == 0:
-            print(f"Συλλογή επεισοδίου: {i}/{NUM_EPISODES}")
+            print(f"Collecting episode: {i}/{NUM_EPISODES}")
         imgs, acts, states = collect_episode(env, rng, ep_seed=SEED + i)
         split = choose_split(rng)
         lengths.append(save_episode(dirs[split], i, imgs, acts, states, rng))
     env.close()
 
     lengths = np.array(lengths)
-    print(f"\nΕπεισόδια: {len(lengths)} | mean={lengths.mean():.1f} "
+    print(f"\nEpisodes: {len(lengths)} | mean={lengths.mean():.1f} "
           f"median={np.median(lengths):.0f} min={lengths.min()} max={lengths.max()} "
-          f"| % που φτάνουν MAX_STEPS: {(lengths >= MAX_STEPS).mean() * 100:.1f}%")
+          f"| % reaching MAX_STEPS: {(lengths >= MAX_STEPS).mean() * 100:.1f}%")
 
     compute_and_save_norm_stats(dirs["train"], os.path.join(base_dir, "norm_stats.npz"))
-    print("Η συλλογή δεδομένων ολοκληρώθηκε επιτυχώς!")
+    print("Data collection finished successfully!")

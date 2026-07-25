@@ -1,12 +1,12 @@
 """
-lstm_p3.py — ENCODED-mode LSTM για το WEAK-SUP baseline VAE (ΤΟΠΙΚΑ / MPS).
+lstm_p3.py — ENCODED-mode LSTM for the WEAK-SUP baseline VAE (LOCAL / MPS).
 
-ENCODED (όχι hybrid): seed/target = VAE latent, ΚΑΜΙΑ GT injection -> η ποιότητα της
-αναπαράστασης του VAE προπαγανδίζεται στον ορίζοντα -> φαίνεται το gap baseline vs P1/P2/P3
-(paper Fig 3A, end-to-end). eval: free-run, preds[:,:8] vs CLEAN state (η μόνη χρήση clean).
+ENCODED (not hybrid): seed/target = VAE latent, NO GT injection -> the quality of the VAE's
+representation propagates along the horizon -> the baseline vs P1/P2/P3 gap becomes visible
+(paper Fig 3A, end-to-end). eval: free-run, preds[:,:8] vs the CLEAN state (the only use of clean).
 
-Self-contained: VAE κλάση από το LunarVaeBaseline_alt· LatentPredictor inline· import μόνο
-από LunarLoader. MPS auto-detect, num_workers=0, paths κάτω από ~/lunar_local_runs.
+Self-contained: the VAE class comes from LunarVaeBaseline_alt; LatentPredictor is inline; the only import is
+from LunarLoader. MPS auto-detect, num_workers=0, paths under ~/lunar_local_runs.
 """
 import os
 import numpy as np
@@ -20,23 +20,23 @@ from tqdm.auto import tqdm
 from vae_p3 import VAE_P3, encode_fn
 from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 
+from paths import DATA_ROOT, P3_SEMI_VAE, P3_WEAK_VAE, outputs
+
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
 SUPERVISION = "weak"
-DATA_ROOT = "<lunarlander-dataset>"
-LATENT_ROOT = f"/kaggle/working/lunarlander_p3_{SUPERVISION}_latents"
+LATENT_ROOT = outputs(f"lunarlander_p3_{SUPERVISION}_latents")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-# Literal placeholders (both present) so the notebook's textual CONFIG_PATHS patch
-# can fill them in; an f-string would not contain the literal token at patch time.
-VAE_CKPTS = {"semi": "<lunarlander-p3-semi-vae>", "weak": "<lunarlander-p3-weak-vae>"}
+# Both checkpoints listed so SUPERVISION selects one without touching the paths.
+VAE_CKPTS = {"semi": P3_SEMI_VAE, "weak": P3_WEAK_VAE}
 VAE_CKPT = VAE_CKPTS[SUPERVISION]
-SAVE_DIR = f"/kaggle/working/lunarlander_p3_{SUPERVISION}_lstm"
+SAVE_DIR = outputs(f"lunarlander_p3_{SUPERVISION}_lstm")
 
 LATENT_SIZE = 64
 N_SUP = 8
 N_ACTIONS = 4
-SHIFT = 0                  # encoded mode ΔΕΝ χρησιμοποιεί το x (το latent είναι ήδη weak-sup)
+SHIFT = 0                  # encoded mode does NOT use x (the latent is already weak-sup)
 
 SEQ_LEN = 30
 STRIDE = 5
@@ -47,7 +47,7 @@ LAYERS = 2
 EPOCHS = 50
 LR = 1e-3
 CLIP = 1.0
-W_PHYS = 1.0               # επιπλέον βάρος στα N_SUP physical dims του latent target
+W_PHYS = 1.0               # extra weight on the N_SUP physical dims of the latent target
 
 P_START, P_END, P_DECAY_EPOCHS = 1.0, 0.3, 40     # scheduled sampling
 L_START, CURRICULUM_EPOCHS = 5, 15                # horizon curriculum
@@ -75,7 +75,7 @@ def get_device():
 
 
 # ---------------------------------------------------------------------------
-# Model — residual latent predictor (zero-init -> ξεκινά identity)
+# Model — residual latent predictor (zero-init -> starts as the identity)
 # ---------------------------------------------------------------------------
 class LatentPredictor(nn.Module):
     def __init__(self, latent=64, action_dim=4, hidden=64, layers=2):
@@ -96,7 +96,7 @@ class LatentPredictor(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Rollout — ENCODED (seed/target = VAE latent· ΚΑΜΙΑ GT injection)
+# Rollout — ENCODED (seed/target = VAE latent; NO GT injection)
 # ---------------------------------------------------------------------------
 def rollout(model, batch, p_tf, n_actions, free_running=False, max_len=None):
     z_t, action, z_tp1, state_t, state_tp1 = batch
@@ -104,7 +104,7 @@ def rollout(model, batch, p_tf, n_actions, free_running=False, max_len=None):
     B = z_t.shape[0]
     device = z_t.device
 
-    z_in = z_t[:, 0]                          # ENCODED seed: latent του VAE (όχι GT)
+    z_in = z_t[:, 0]                          # ENCODED seed: the VAE's latent (not GT)
     z_gt = z_tp1[:, :L]                       # target: latent trajectory
 
     hidden = model.init_hidden(B, device)
@@ -143,7 +143,7 @@ def train_epoch(model, loader, optimizer, device, p_tf, cur_len, desc=""):
 
 @torch.no_grad()
 def eval_epoch(model, loader, device, std_phys, desc=""):
-    """ FREE-RUNNING στο ΠΛΗΡΕΣ SEQ_LEN -> physical MSE ανά ορίζοντα, vs CLEAN state. """
+    """ FREE-RUNNING at the FULL SEQ_LEN -> physical MSE per horizon, vs the CLEAN state. """
     model.eval()
     se, n = None, 0
     for batch in tqdm(loader, desc=desc, leave=False):
@@ -157,7 +157,7 @@ def eval_epoch(model, loader, device, std_phys, desc=""):
 
 
 def build_vae(device):
-    """ Φορτώνει τον παγωμένο weak-sup VAE (override σε P1/P2/P3 variants). """
+    """ Loads the frozen weak-sup VAE (override for the P1/P2/P3 variants). """
     vae = VAE_P3(latent_size=LATENT_SIZE).to(device)
     vae.load_state_dict(torch.load(VAE_CKPT, map_location=device)); vae.eval()
     return vae
@@ -221,7 +221,7 @@ if __name__ == "__main__":
         else:
             bad += 1
             if bad >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}."); break
+                print(f"Early stopping at epoch {epoch}."); break
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "lstm_last.pth"))
     print("Best val phys-MSE:", best)

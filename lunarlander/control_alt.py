@@ -1,27 +1,27 @@
 """
-control.py — Λύνει το LunarLander ΑΠΟ PIXELS και αναδεικνύει το ΟΦΕΛΟΣ του world model έναντι
-κλασικού ελέγχου (PID). Future Direction E του paper: world-model components ΣΥΜΠΛΗΡΩΜΑΤΙΚΑ στην
-κλασική αυτονομία.
+control.py — Solves LunarLander FROM PIXELS and brings out the BENEFIT of the world model over
+classical control (PID). Future Direction E of the paper: world-model components COMPLEMENTARY to
+classical autonomy.
 
-Όλοι οι controllers χρησιμοποιούν την ΙΔΙΑ αντίληψη (P1 VAE encoder -> physical state mu[:8]) ώστε
-η μόνη διαφορά να είναι αν αξιοποιούν τη ΔΥΝΑΜΙΚΗ ΓΝΩΣΗ του LSTM:
+All the controllers use the SAME perception (P1 VAE encoder -> physical state mu[:8]) so that
+the only difference is whether they exploit the LSTM's DYNAMICS KNOWLEDGE:
 
-  true_pid    : PD πάνω στο ΑΛΗΘΙΝΟ obs                         (upper bound του ίδιου του heuristic)
-  enc_pid     : PD πάνω στην ΕΚΤΙΜΗΣΗ του encoder              (κλασικός έλεγχος, ΙΔΙΑ αντίληψη)
-  mpc_cem     : ΕΛΕΥΘΕΡΟ MPC (PID-guided CEM)                  (NAIVE — αποτυγχάνει, βλ. κάτω)
-  rollout     : PID base policy + model 1-step lookahead       (Η ΔΙΟΡΘΩΣΗ — αξιοποιεί σωστά το μοντέλο)
+  true_pid    : PD on the TRUE obs                              (upper bound of the heuristic itself)
+  enc_pid     : PD on the encoder's ESTIMATE                    (classical control, SAME perception)
+  mpc_cem     : FREE MPC (PID-guided CEM)                       (NAIVE — it fails, see below)
+  rollout     : PID base policy + a model 1-step lookahead      (THE FIX — uses the model correctly)
 
-ΕΥΡΗΜΑ (control_diag.py): το μοντέλο/encoder είναι ΚΑΛΑ (dream RMSE@h10≈0.35, encoder R²>0.97 στις
-ταχύτητες), αλλά το ΕΛΕΥΘΕΡΟ MPC αποτυγχάνει λόγω OPTIMIZER'S CURSE: το argmax πάνω σε εκατοντάδες
-ακολουθίες επιλέγει συστηματικά αυτές που το μοντέλο ΥΠΕΡ-εκτιμά (corr dream-vs-real μόλις +0.45) ->
-σε closed-loop συσσωρεύεται σε καταστροφή. ΛΥΣΗ: rollout/policy-improvement — μόνο 4 candidates με
-PID-continuation (in-distribution) -> αποδεδειγμένα ≥ PID όταν το μοντέλο είναι ακριβές.
+FINDING (control_diag.py): the model/encoder are GOOD (dream RMSE@h10~0.35, encoder R²>0.97 on the
+velocities), but FREE MPC fails because of the OPTIMIZER'S CURSE: the argmax over hundreds of
+sequences systematically picks the ones the model OVER-estimates (dream-vs-real corr only +0.45) ->
+in closed loop this compounds into catastrophe. THE FIX: rollout/policy improvement — only 4 candidates with
+a PID continuation (in-distribution) -> provably >= PID when the model is accurate.
 
-COST: telescoping potential-DIFFERENCE shaping + terminal landing/crash − fuel (gym-faithful βάρη·
-D4 έδειξε ότι οι ταχύτητες κωδικοποιούνται εξαιρετικά, οπότε ΧΩΡΙΣ down-weighting).
+COST: telescoping potential-DIFFERENCE shaping + terminal landing/crash − fuel (gym-faithful weights;
+D4 showed that the velocities are encoded excellently, so NO down-weighting).
 
-Αξιολόγηση: ίδια seeds, ΜΕ & ΧΩΡΙΣ άνεμο. Imports από τα canonical modules· cwd: lunarlander/.
-Run:  !python3 lunarlander/control.py   (απαιτεί gymnasium[box2d])
+Evaluation: the same seeds, WITH & WITHOUT wind. Imports from the canonical modules; cwd: lunarlander/.
+Run:  !python3 lunarlander/control.py   (requires gymnasium[box2d])
 """
 import os
 import numpy as np
@@ -30,37 +30,38 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
 import gymnasium as gym
-from dataCollect import resize_frame                 # ΙΔΙΟ frame-pipeline με το training
+from dataCollect import resize_frame                 # the SAME frame pipeline as training
 from vae_p1 import VAE_P1
 from lstm import LatentPredictor
 
+from paths import CONTROL_LSTM, CONTROL_VAE, DATA_ROOT, outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG — placeholders <...> patched by kaggle-run.ipynb
+# CONFIG  (paths from config.py via paths.py)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "<lunarlander-vae-tubano>"               # P1 VAE (decoupled encoders)
-LSTM_CKPT = "<lunarlander-lstm-tubano>"             # LSTM στο ΝΕΟ μεγάλο dataset (δείξε εδώ το νέο .pth)
-SAVE_DIR = "/kaggle/working/lunarlander_control"
+VAE_CKPT = CONTROL_VAE               # P1 VAE (decoupled encoders)
+LSTM_CKPT = CONTROL_LSTM             # LSTM on the NEW large dataset (point this at the new .pth)
+SAVE_DIR = outputs("lunarlander_control")
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
 N_ACTIONS, HIDDEN, LAYERS = 4, 64, 2
 IMG_H, IMG_W = 80, 120
 
-N_EPISODES = 20                  # επεισόδια ανά (controller, wind) — ίδια seeds
+N_EPISODES = 20                  # episodes per (controller, wind) — the same seeds
 MAX_STEPS = 400
 SEED = 0
-CONTROLLERS = ["true_pid", "enc_pid", "mpc_cem", "rollout"]   # mpc_cem = naive (αποτυγχάνει)· rollout = η διόρθωση
+CONTROLLERS = ["true_pid", "enc_pid", "mpc_cem", "rollout"]   # mpc_cem = naive (fails); rollout = the fix
 WIND_CONDITIONS = [("no_wind", False), ("wind", True)]
-WIND_POWER, TURBULENCE_POWER = 10.0, 1.0         # μέτριος άνεμος (PID παλεύει αλλά λειτουργεί)
+WIND_POWER, TURBULENCE_POWER = 10.0, 1.0         # moderate wind (the PID struggles but works)
 
 RECORD_GIF = True
 GIF_FPS = 30
 
-# --- MPC (κοινά) ---
+# --- MPC (shared) ---
 MPC_SEED = 0
 # random shooting
-RS_HORIZON = 10                  # μήκος τυχαίας ακολουθίας (η ιδέα σου)
+RS_HORIZON = 10                  # length of the random sequence
 RS_SAMPLES = 512
 # PID-guided CEM
 CEM_HORIZON = 8                  # macro decisions
@@ -69,18 +70,18 @@ CEM_SAMPLES = 256
 CEM_ITERS = 3
 CEM_ELITE = 32
 CEM_LR = 0.7
-PID_BIAS = 0.5                   # warm-start μάζα στο PID action ανά macro-step
+PID_BIAS = 0.5                   # warm-start mass on the PID action per macro-step
 
-# --- COST weights — gym-faithful (D4: ο encoder είναι εξαιρετικός στις ταχύτητες, R²>0.97· ΧΩΡΙΣ down-weight) ---
+# --- COST weights — gym-faithful (D4: the encoder is excellent on the velocities, R²>0.97; NO down-weighting) ---
 W_POS, W_VEL, W_ANG, W_LEG = 100.0, 100.0, 100.0, 10.0
 FUEL_W = 0.30
 TERM_W, LAND_LEG, LAND_CRASH, SAFE_SPEED = 1.0, 20.0, 100.0, 0.5   # terminal landing/crash proxy
 
-# --- rollout corrector (PID base policy + model 1-step lookahead· βλ. control_diag) ---
-# Αντί ελεύθερου MPC (που πέφτει στο optimizer's curse), αξιολογούμε «candidate action τώρα, μετά
-# ΑΚΟΛΟΥΘΗΣΕ τον PID» -> μόνο 4 candidates, in-distribution συνέχεια, ≥ PID αν το μοντέλο είναι ακριβές.
-ROLLOUT_HORIZON = 30             # βήματα PID-continuation στο όνειρο (το μοντέλο αξιόπιστο ως ~h24)
-ROLLOUT_MARGIN = 2.0             # override τον PID μόνο αν σαφώς καλύτερο (αποφυγή θορυβωδών flips)
+# --- rollout corrector (PID base policy + model 1-step lookahead; see control_diag) ---
+# Instead of free MPC (which falls into the optimizer's curse), we evaluate "candidate action now, then
+# FOLLOW the PID" -> only 4 candidates, an in-distribution continuation, >= PID if the model is accurate.
+ROLLOUT_HORIZON = 30             # steps of PID continuation in the dream (the model is reliable to ~h24)
+ROLLOUT_MARGIN = 2.0             # override the PID only if clearly better (avoids noisy flips)
 
 FUEL_COST = [0.0, 0.03, 0.30, 0.03]
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
@@ -104,14 +105,14 @@ def make_env(enable_wind):
             return gym.make(env_id, **kw)
         except Exception as e:
             last_err = e
-    raise RuntimeError(f"LunarLander δεν βρέθηκε (pip install 'gymnasium[box2d]'). {last_err}")
+    raise RuntimeError(f"LunarLander not found (pip install 'gymnasium[box2d]'). {last_err}")
 
 
 # ---------------------------------------------------------------------------
-# Κλασικός controller — standard LunarLander PD heuristic (ίδιο με dataCollect)
+# Classical controller — the standard LunarLander PD heuristic (same as dataCollect)
 # ---------------------------------------------------------------------------
 def heuristic_control(s):
-    """ s = [x,y,vx,vy,theta,omega,leg1,leg2] (φυσικές μονάδες) -> action ∈ {0,1,2,3}. """
+    """ s = [x,y,vx,vy,theta,omega,leg1,leg2] (physical units) -> action ∈ {0,1,2,3}. """
     x, y, vx, vy, theta, omega = float(s[0]), float(s[1]), float(s[2]), float(s[3]), float(s[4]), float(s[5])
     leg1, leg2 = float(s[6]) > 0.5, float(s[7]) > 0.5
     angle_targ = float(np.clip(x * 0.5 + vx * 1.0, -0.4, 0.4))
@@ -138,8 +139,8 @@ def _to_tensor(frame, device):
 
 @torch.no_grad()
 def encode_pair(vae, f_prev, f_cur, device):
-    """stack(f_prev, f_cur) -> mu (1,64). mu[:8] = εκτιμώμενη φυσική κατάσταση (standardized).
-    ΣΗΜ.: λόγω σύμβασης training, αντιστοιχεί ~στο f_prev (1-step lag· ίδιο για ΟΛΟΥΣ -> δίκαιο)."""
+    """stack(f_prev, f_cur) -> mu (1,64). mu[:8] = the estimated physical state (standardized).
+    NOTE: by the training convention this corresponds ~to f_prev (1-step lag; the same for ALL -> fair)."""
     x = torch.cat([_to_tensor(f_prev, device), _to_tensor(f_cur, device)], dim=1)
     mu, _ = vae.encode(x)
     return mu
@@ -159,10 +160,10 @@ def save_gif(frames, path, fps=GIF_FPS):
 
 
 # ---------------------------------------------------------------------------
-# Dream rollout & COST (telescoping shaping + terminal − fuel, down-weighted ταχύτητες)
+# Dream rollout & COST (telescoping shaping + terminal − fuel, down-weighted velocities)
 # ---------------------------------------------------------------------------
 def shaping_w(phys):
-    """phys (...,8) φυσικές -> weighted potential (...). Ταχύτητες DOWN-WEIGHTED (W_VEL<W_POS)."""
+    """phys (...,8) physical -> weighted potential (...). Velocities DOWN-WEIGHTED (W_VEL<W_POS)."""
     x, y, vx, vy, th = phys[..., 0], phys[..., 1], phys[..., 2], phys[..., 3], phys[..., 4]
     l1, l2 = phys[..., 6].clamp(0, 1), phys[..., 7].clamp(0, 1)
     return (-W_POS * torch.sqrt(x * x + y * y + 1e-8)
@@ -172,7 +173,7 @@ def shaping_w(phys):
 
 @torch.no_grad()
 def dream_rollout(lstm, z0, prim, mean_t, std_t, device):
-    """z0 (1,64)· prim (N,H) primitive actions. -> phys_traj (N,H+1,8) σε φυσικές μονάδες."""
+    """z0 (1,64); prim (N,H) primitive actions. -> phys_traj (N,H+1,8) in physical units."""
     N, H = prim.shape
     z = z0.expand(N, -1).contiguous()
     hidden = lstm.init_hidden(N, device)
@@ -201,7 +202,7 @@ def dream_value(phys_traj, prim, device):
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def mpc_random(lstm, z0, mean_t, std_t, device, rng):
-    """Random shooting: RS_SAMPLES τυχαίες ακολουθίες μήκους RS_HORIZON. -> (first_action, best_value)."""
+    """Random shooting: RS_SAMPLES random sequences of length RS_HORIZON. -> (first_action, best_value)."""
     prim = torch.from_numpy(rng.integers(0, N_ACTIONS, size=(RS_SAMPLES, RS_HORIZON))).long().to(device)
     pt = dream_rollout(lstm, z0, prim, mean_t, std_t, device)
     sc = dream_value(pt, prim, device)
@@ -211,7 +212,7 @@ def mpc_random(lstm, z0, mean_t, std_t, device, rng):
 
 @torch.no_grad()
 def pid_nominal_dream(lstm, z0, mean_t, std_t, device):
-    """Roll τον PID ΜΕΣΑ στο όνειρο -> (nominal macro-ακολουθία, dream-value)."""
+    """Roll the PID INSIDE the dream -> (nominal macro sequence, dream value)."""
     z = z0.clone()
     hidden = lstm.init_hidden(1, device)
     macro = []
@@ -251,13 +252,13 @@ def mpc_cem(lstm, z0, nominal_macro, mean_t, std_t, device, rng):
 
 
 # ---------------------------------------------------------------------------
-# Rollout corrector — base policy = PID, model κάνει 1-step lookahead improvement
+# Rollout corrector — base policy = PID, the model does a 1-step lookahead improvement
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def mpc_rollout(lstm, z0, mean_t, std_t, device):
-    """Για κάθε candidate first action a∈{0..3}: ονειρέψου «a τώρα, μετά ΠΙΔ» για ROLLOUT_HORIZON
-    βήματα και βαθμολόγησε. -> (best_first_action, best_value, pid_first_value).
-    Μόνο 4 candidates + in-distribution PID-continuation -> κανένα optimizer's curse / exploitation."""
+    """For each candidate first action a∈{0..3}: dream "a now, then the PID" for ROLLOUT_HORIZON
+    steps and score it. -> (best_first_action, best_value, pid_first_value).
+    Only 4 candidates + an in-distribution PID continuation -> no optimizer's curse / exploitation."""
     H = ROLLOUT_HORIZON
     a_pid0 = heuristic_control(to_phys(z0[0, :N_SUP], mean_t, std_t).cpu().numpy())
     vals = np.zeros(N_ACTIONS)
@@ -270,7 +271,7 @@ def mpc_rollout(lstm, z0, mean_t, std_t, device):
             z, hidden = lstm.step(z, F.one_hot(torch.tensor([a], device=device), N_ACTIONS).float(), hidden)
             cur = z[0, :N_SUP] * std_t[:N_SUP] + mean_t[:N_SUP]
             phys.append(cur); acts.append(a)
-            a = heuristic_control(cur.cpu().numpy())           # συνέχεια = PID base policy
+            a = heuristic_control(cur.cpu().numpy())           # continuation = the PID base policy
         traj = torch.stack(phys).unsqueeze(0)                  # (1,H+1,8)
         prim = torch.tensor(acts, device=device).unsqueeze(0)  # (1,H)
         vals[a0] = float(dream_value(traj, prim, device)[0].item())
@@ -387,7 +388,7 @@ def main():
             print(f"{wind_tag:<9}{c:<13}{R.mean():>13.1f}{succ:>11.0f}{crash:>9.0f}{fu:>11.1f}{ov_s}")
     print("=" * 86)
 
-    # ---- plot: returns ανά controller, ένα subplot ανά wind ----
+    # ---- plot: returns per controller, one subplot per wind setting ----
     fig, axes = plt.subplots(1, len(WIND_CONDITIONS), figsize=(7.0 * len(WIND_CONDITIONS), 5.0), squeeze=False)
     for j, (wind_tag, _) in enumerate(WIND_CONDITIONS):
         ax = axes[0][j]

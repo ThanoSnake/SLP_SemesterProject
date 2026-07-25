@@ -24,18 +24,18 @@ from tqdm.auto import tqdm
 from vae_p3 import VAE, encode_fn
 from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 
+from paths import DATA_ROOT, P3_SEMI_VAE, P3_WEAK_VAE, outputs
+
 #
 #  Config
 #
 SUPERVISION = "weak"
-DATA_ROOT = "<cartpole-dataset>"
-LATENT_ROOT = f"/kaggle/working/cartpole_p3_{SUPERVISION}_latents"
+LATENT_ROOT = outputs(f"cartpole_p3_{SUPERVISION}_latents")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-# Literal placeholders (both present) so the notebook's textual CONFIG_PATHS patch
-# can fill them in; an f-string would not contain the literal token at patch time.
-VAE_CKPTS = {"semi": "<cartpole-p3-semi-vae>", "weak": "<cartpole-p3-weak-vae>"}
+# Both checkpoints listed so SUPERVISION selects one without touching the paths.
+VAE_CKPTS = {"semi": P3_SEMI_VAE, "weak": P3_WEAK_VAE}
 VAE_CKPT = VAE_CKPTS[SUPERVISION]
-SAVE_DIR = f"/kaggle/working/cartpole_p3_{SUPERVISION}_lstm"
+SAVE_DIR = outputs(f"cartpole_p3_{SUPERVISION}_lstm")
 
 LATENT_SIZE = 64
 N_SUP = 4

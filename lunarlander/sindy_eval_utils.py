@@ -1,28 +1,28 @@
 """
-sindy_eval_utils.py — Κοινά helpers για όλα τα SINDy eval/fusion scripts (LunarLander).
+sindy_eval_utils.py — Shared helpers for all the SINDy eval/fusion scripts (LunarLander).
 
-ΤΙ ΠΡΟΣΦΕΡΕΙ (ώστε να ΜΗΝ επαναλαμβάνεται κώδικας στα test_sindy_* / fusion_*):
-  * make_noise_fn            : gaussian/salt-pepper θόρυβος σε [0,1] εικόνες (ίδιο με test_p1/p3)
-  * encode_split / ensure_encoded : φορτώνουν το (frozen) baseline VAE και κωδικοποιούν splits σε
-                               latent .npz dir (z, acts, states, x) — ΙΔΙΟ format/indexing με το
-                               loader.precompute_latents -> τα windows ευθυγραμμίζονται 1-1 με το
-                               sindy_core.assemble_windows ΚΑΙ το LatentSequenceDataset.
-  * lstm_free_run_dir        : ENCODED free-running rollout του baseline LSTM (+ optional seed override)
-  * encoded_measurements / seed_context : per-frame encoded z[:8] ανά window — «μέτρηση» για το
-                               Kalman filtering + το seed-denoise.
-  * sq_err_standardized / destandardize : κοινή σύμβαση μετρικής (standardized) όπως τα test_pX.
+WHAT IT PROVIDES (so that code is NOT repeated across test_sindy_* / fusion_*):
+  * make_noise_fn            : gaussian/salt-pepper noise on [0,1] images (same as test_p1/p3)
+  * encode_split / ensure_encoded : load the (frozen) baseline VAE and encode splits into a
+                               latent .npz dir (z, acts, states, x) — SAME format/indexing as
+                               loader.precompute_latents -> the windows line up 1-1 with
+                               sindy_core.assemble_windows AND with LatentSequenceDataset.
+  * lstm_free_run_dir        : ENCODED free-running rollout of the baseline LSTM (+ optional seed override)
+  * encoded_measurements / seed_context : per-frame encoded z[:8] per window — the "measurement" for
+                               Kalman filtering + seed-denoise.
+  * sq_err_standardized / destandardize : the shared (standardized) metric convention, as in test_pX.
 
-ΣΥΜΒΑΣΗ ΘΟΡΥΒΟΥ (συνεπής με test_p1/p3): ο θόρυβος εφαρμόζεται ΜΟΝΟ στο test encoding (πριν τον
-encoder)· το SINDy/LSTM fit μένει ΠΑΝΤΑ σε CLEAN train encodings.
+NOISE CONVENTION (consistent with test_p1/p3): noise is applied ONLY to the test encoding (before the
+encoder); the SINDy/LSTM fit ALWAYS stays on CLEAN train encodings.
 
-ΣΗΜ. (run convention): module που γίνεται import από τα standalone SINDy scripts
-(`!python3 lunarlander/extra/<file>.py`). Τα αρχεία ζουν στο lunarlander/extra/ (subfolder)· το
-`from sindy_core import ...` κάνει path-bootstrap που βάζει τον ΓΟΝΙΚΟ φάκελο (lunarlander/) στο
-sys.path -> γίνονται importable τα vae/lstm/loader. Τα torch/vae/lstm/loader imports μένουν LAZY
-(μέσα στις συναρτήσεις) ώστε οι καθαρά-numpy helpers να δουλεύουν ΧΩΡΙΣ torch.
+NOTE (run convention): a module imported by the standalone SINDy scripts
+(`!python3 lunarlander/extra/<file>.py`). Those files live in lunarlander/extra/ (a subfolder);
+`from sindy_core import ...` does the path bootstrap that puts the PARENT folder (lunarlander/) on
+sys.path -> vae/lstm/loader become importable. The torch/vae/lstm/loader imports stay LAZY
+(inside the functions) so that the pure-numpy helpers work WITHOUT torch.
 
-ΑΥΤΟ ΕΙΝΑΙ ENV-SPECIFIC αρχείο (constants + config). Τα consumer scripts (test_sindy_*, fusion_*)
-είναι env-AGNOSTIC και ΙΔΙΑ με του cartpole — τα τραβούν από εδώ μέσω `from sindy_eval_utils import *`.
+THIS IS THE ENV-SPECIFIC file (constants + config). The consumer scripts (test_sindy_*, fusion_*)
+are env-AGNOSTIC and identical to cartpole's — they pull from here via `from sindy_eval_utils import *`.
 """
 import os
 
@@ -30,9 +30,11 @@ import numpy as np
 
 from sindy_core import list_npz, N_SUP, DIM_NAMES  # + path-bootstrap (vae/lstm/loader importable)
 
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, outputs
+
 
 # ---------------------------------------------------------------------------
-# Σταθερές αρχιτεκτονικής (LunarLander baseline)
+# Architecture constants (LunarLander baseline)
 # ---------------------------------------------------------------------------
 LATENT_SIZE = 64
 N_ACTIONS = 4                      # {0:noop, 1:left, 2:main, 3:right}
@@ -43,32 +45,30 @@ TEST_STRIDE = 1
 BATCH = 128
 
 # ---------------------------------------------------------------------------
-# ENV-SPECIFIC CONFIG — ΕΔΩ ζει όλο το per-environment config (placeholders + labels + params).
-# Τα consumer scripts είναι env-AGNOSTIC και τα τραβούν από εδώ μέσω `from sindy_eval_utils import *`.
-# ΜΟΝΟ αυτό το αρχείο + το sindy_core αλλάζουν ανά environment.
-# Ο patcher του kaggle-run αντικαθιστά τα <...> placeholders εδώ.
+# ENV-SPECIFIC CONFIG — ALL the per-environment config lives here (paths + labels + params).
+# The consumer scripts are env-AGNOSTIC and pull from here via `from sindy_eval_utils import *`.
+# ONLY this file + sindy_core change per environment.
 # ---------------------------------------------------------------------------
 ENV_TAG = "lunarlander"
-DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "<lunarlander-baseline-vae>"
-LSTM_CKPT = "<lunarlander-baseline-lstm>"
-LATENT_ROOT = f"/kaggle/working/sindy_{ENV_TAG}_latents"          # κοινό cache encoded splits
+VAE_CKPT = BASELINE_VAE
+LSTM_CKPT = BASELINE_LSTM
+LATENT_ROOT = outputs(f"sindy_{ENV_TAG}_latents")          # shared cache of encoded splits
 
 FEATURE_MODE = "physics"          # "physics" (LunarLander-aware library) | "poly2" (generic ablation)
-THRESHOLD, RIDGE = 0.02, 1e-6     # STLSQ (threshold σε normalized columns· tunable)
+THRESHOLD, RIDGE = 0.02, 1e-6     # STLSQ (threshold on normalized columns; tunable)
 
-NOISE_CONDS = [("gaussian", 0.0), ("gaussian", 0.05), ("gaussian", 0.10)]  # θόρυβος μόνο στο test
+NOISE_CONDS = [("gaussian", 0.0), ("gaussian", 0.05), ("gaussian", 0.10)]  # noise on test only
 NOISE_SEED = 42
 N_BOOT, BOOT_SEED = 1000, 0
 
 DIM_LABELS = ["x", "y", r"$v_x$", r"$v_y$", r"$\theta$", r"$\omega$", "leg1", "leg2"]   # plot labels
 DIM_UNITS = ["(pos x)", "(pos y)", "(vel x)", "(vel y)", "[rad]", "[rad/s]", "(contact)", "(contact)"]
-HS = [h for h in (1, 10, 20, 30) if h <= SEQ_LEN]                          # horizons στο summary
+HS = [h for h in (1, 10, 20, 30) if h <= SEQ_LEN]                          # horizons in the summary
 
 
 # ---------------------------------------------------------------------------
-# Noise injection — float [0,1] image tensors (αντιγραφή από test_p1/p3)
+# Noise injection — float [0,1] image tensors (copied from test_p1/p3)
 # ---------------------------------------------------------------------------
 def add_gaussian_noise(img_tensor, std, rng_gen):
     import torch
@@ -125,12 +125,12 @@ def load_lstm(ckpt, device):
 
 
 # ---------------------------------------------------------------------------
-# Encode ένα split -> latent .npz dir (clean ή noisy)
+# Encode one split -> latent .npz dir (clean or noisy)
 # ---------------------------------------------------------------------------
 def encode_split(vae, src_dir, out_dir, device, noise_fn=None, shift=0, batch=256):
-    """Κωδικοποιεί κάθε επεισόδιο του src_dir με τον (frozen) vae σε .npz ΙΔΙΟΥ format με
+    """Encodes every episode of src_dir with the (frozen) vae into .npz of the SAME format as
     loader.precompute_latents: z (T-1,64), acts (T-1), states (T-1,8 RAW), x (T-1,8 RAW).
-    noise_fn: αν δοθεί, εφαρμόζεται σε ΟΛΑ τα frames ΠΡΙΝ το encoding (test-time noise)."""
+    noise_fn: if given, applied to ALL frames BEFORE encoding (test-time noise)."""
     import torch
     os.makedirs(out_dir, exist_ok=True)
     vae.eval()
@@ -160,8 +160,8 @@ def encode_split(vae, src_dir, out_dir, device, noise_fn=None, shift=0, batch=25
 
 def ensure_encoded(vae_ckpt, data_root, out_root, device, noise_fn=None,
                    splits=("train", "test"), shift=0, force=False):
-    """Κωδικοποιεί τα ζητούμενα splits σε <out_root>/<split>. Επιστρέφει dict split->dir.
-       Παρακάμπτει split αν υπάρχει ήδη (εκτός force). Ο θόρυβος εφαρμόζεται ΜΟΝΟ στο test."""
+    """Encodes the requested splits into <out_root>/<split>. Returns dict split->dir.
+       Skips a split if it already exists (unless force). Noise is applied ONLY to test."""
     import torch
     dirs, vae = {}, None
     for sp in splits:
@@ -176,7 +176,7 @@ def ensure_encoded(vae_ckpt, data_root, out_root, device, noise_fn=None,
             continue
         if vae is None:
             vae = load_vae(vae_ckpt, device)
-        nf = noise_fn if sp == "test" else None      # noise μόνο στο test· train/val μένουν clean
+        nf = noise_fn if sp == "test" else None      # noise only on test; train/val stay clean
         print(f"  encoding '{sp}' -> {out}" + (" (noisy)" if nf else " (clean)"))
         encode_split(vae, src, out, device, noise_fn=nf, shift=shift)
     if vae is not None:
@@ -187,10 +187,10 @@ def ensure_encoded(vae_ckpt, data_root, out_root, device, noise_fn=None,
 
 
 # ---------------------------------------------------------------------------
-# LSTM ENCODED free-running rollout (ίδιο με test_p1/p3 free_run)
+# LSTM ENCODED free-running rollout (same as the test_p1/p3 free_run)
 # ---------------------------------------------------------------------------
 def _free_run(model, batch, seed_phys=None):
-    """seed_phys: (B,8) standardized override για τις dims[:8] του seed (None -> ως έχει)."""
+    """seed_phys: (B,8) standardized override for the seed's dims[:8] (None -> leave as is)."""
     import torch
     import torch.nn.functional as F
     z_t, action, z_tp1, state_t, state_tp1 = batch
@@ -211,11 +211,11 @@ def _free_run(model, batch, seed_phys=None):
 def lstm_free_run_dir(lstm, latent_dir, mean, std, device,
                       seq_len=SEQ_LEN, stride=TEST_STRIDE, batch=BATCH,
                       full_latent=False, seed_phys_std=None):
-    """ENCODED free-running rollout πάνω σε latent_dir (ΙΔΙΑ windows με assemble_windows).
+    """ENCODED free-running rollout over latent_dir (SAME windows as assemble_windows).
        -> (pred (N,L,8) standardized phys, gt (N,L,8) standardized phys).
-       full_latent=True   -> επιστρέφει ΕΠΙΣΗΣ pred_full (N,L,64) για παραγωγικά fusion.
-       seed_phys_std (N,8) -> standardized override των seed dims[:8] (για το seed-denoise).
-       ΣΗΜ.: shuffle=False ώστε η σειρά των windows να ταυτίζεται με assemble_windows."""
+       full_latent=True   -> ALSO returns pred_full (N,L,64) for generative fusion.
+       seed_phys_std (N,8) -> standardized override of the seed dims[:8] (for seed-denoise).
+       NOTE: shuffle=False so that the window order matches assemble_windows."""
     import torch
     from torch.utils.data import DataLoader
     from loader import LatentSequenceDataset
@@ -246,17 +246,17 @@ def lstm_free_run_dir(lstm, latent_dir, mean, std, device,
 
 
 # ---------------------------------------------------------------------------
-# Per-frame encoded z[:8] ανά window — numpy-only (μέτρηση για Kalman / seed-denoise)
-# (ίδιο indexing με assemble_windows: window s -> frames s+1 .. s+L)
+# Per-frame encoded z[:8] per window — numpy-only (the measurement for Kalman / seed-denoise)
+# (same indexing as assemble_windows: window s -> frames s+1 .. s+L)
 # ---------------------------------------------------------------------------
 def seed_context(latent_dir, mean, std, seq_len=SEQ_LEN, stride=TEST_STRIDE):
-    """Per-window context του seed για το SINDy seed-denoising (F). Αλιγναρισμένο ΘΕΣΗ-ΘΕΣΗ με
+    """Per-window context of the seed for SINDy seed-denoising (F). Aligned POSITION-BY-POSITION with
        sindy_core.assemble_windows. -> dict:
          enc_seed_raw (N,8): de-standardized encoded z[s,:8]
-         prev_raw     (N,8): de-standardized encoded z[s-1,:8] (=enc_seed αν s==0)
-         prev_act     (N,)  : action u[s-1] (αδιάφορο όπου has_prev=False)
-         has_prev     (N,)  : bool — αν υπάρχει προηγούμενο frame (s>0)
-       physics-predicted seed = sindy_step(prev_raw, prev_act) -> ΜΟΝΟ παρελθούσα πληροφορία."""
+         prev_raw     (N,8): de-standardized encoded z[s-1,:8] (=enc_seed if s==0)
+         prev_act     (N,)  : action u[s-1] (irrelevant wherever has_prev=False)
+         has_prev     (N,)  : bool — whether a previous frame exists (s>0)
+       physics-predicted seed = sindy_step(prev_raw, prev_act) -> uses ONLY past information."""
     mean8 = np.asarray(mean[:N_SUP], np.float64)
     std8 = np.asarray(std[:N_SUP], np.float64)
     enc, prev, pact, hp = [], [], [], []
@@ -278,10 +278,10 @@ def seed_context(latent_dir, mean, std, seq_len=SEQ_LEN, stride=TEST_STRIDE):
 
 
 def encoded_measurements(latent_dir, mean, std, seq_len=SEQ_LEN, stride=TEST_STRIDE):
-    """ -> (meas_raw (N,L,8), seed_raw (N,8)) σε RAW physical units.
-       meas_raw[w,k] = de-standardized encoded z[:8] στο frame s+k+1  (k=0..L-1)
-       seed_raw[w]   = de-standardized encoded z[:8] στο seed frame s.
-       Ταυτίζεται θέση-θέση με τα windows του sindy_core.assemble_windows."""
+    """ -> (meas_raw (N,L,8), seed_raw (N,8)) in RAW physical units.
+       meas_raw[w,k] = de-standardized encoded z[:8] at frame s+k+1  (k=0..L-1)
+       seed_raw[w]   = de-standardized encoded z[:8] at the seed frame s.
+       Matches position-by-position the windows of sindy_core.assemble_windows."""
     mean8 = np.asarray(mean[:N_SUP], np.float64)
     std8 = np.asarray(std[:N_SUP], np.float64)
     seeds, meas = [], []
@@ -299,10 +299,10 @@ def encoded_measurements(latent_dir, mean, std, seq_len=SEQ_LEN, stride=TEST_STR
 
 
 # ---------------------------------------------------------------------------
-# Μετρική: standardized squared error (N,L,8) — κοινή σύμβαση για ΟΛΕΣ τις μεθόδους
+# Metric: standardized squared error (N,L,8) — the shared convention for ALL methods
 # ---------------------------------------------------------------------------
 def sq_err_standardized(pred_raw, gt_raw, std):
-    """RAW preds/gt -> (N,L,8) standardized squared error (όπως test_pX)."""
+    """RAW preds/gt -> (N,L,8) standardized squared error (as in test_pX)."""
     std8 = np.asarray(std[:N_SUP], np.float64)
     return (((np.asarray(pred_raw, np.float64) - np.asarray(gt_raw, np.float64)) / std8) ** 2)
 

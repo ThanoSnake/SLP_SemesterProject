@@ -1,17 +1,17 @@
 """
-lstm.py — ENCODED-mode LSTM για το WEAK-SUP baseline VAE (LunarLander).
+lstm.py — ENCODED-mode LSTM for the WEAK-SUP baseline VAE (LunarLander).
 
-ΓΙΑΤΙ ENCODED (όχι hybrid): η διαφορά baseline-vs-P1 ζει στην ΑΝΑΠΑΡΑΣΤΑΣΗ του VAE. Το
-hybrid-GT injection εγχέει το physical state στα πρώτα 8 latent dims -> παρακάμπτει το VAE
-encoding -> baseline≈P1 (αυτό έδειξε το Check D σε hybrid). ENCODED = pure VAE-latent rollout
--> η ποιότητα του latent προπαγανδίζεται -> φαίνεται το gap (paper Fig 3A = end-to-end).
+WHY ENCODED (not hybrid): the baseline-vs-P1 difference lives in the VAE's REPRESENTATION. The
+hybrid GT injection injects the physical state into the first 8 latent dims -> it bypasses the VAE
+encoding -> baseline~P1 (that is what Check D showed on hybrid). ENCODED = a pure VAE-latent rollout
+-> the latent's quality propagates -> the gap becomes visible (paper Fig 3A = end-to-end).
 
-ΔΙΑΦΟΡΕΣ από LunarLstmBaseline.py:
-  * φορτώνει το WEAK-SUP baseline VAE (vae_baseline_alt_out).
-  * rollout ENCODED: seed = z_t[:,0] (latent), target = z_tp1 (latent), ΚΑΜΙΑ GT injection.
-  * eval: free-run, μετράει preds[:,:8] vs CLEAN state_tp1 (η ΜΟΝΗ χρήση clean -> τίμια μέτρηση).
-  * ξεχωριστά paths (latents_baseline_alt, lstm_baseline_alt_out).
-Υπόλοιπη μηχανική (residual predictor, scheduled sampling, curriculum) ΙΔΙΑ.
+DIFFERENCES from LunarLstmBaseline.py:
+  * loads the WEAK-SUP baseline VAE (vae_baseline_alt_out).
+  * ENCODED rollout: seed = z_t[:,0] (latent), target = z_tp1 (latent), NO GT injection.
+  * eval: free-run, measures preds[:,:8] vs the CLEAN state_tp1 (the ONLY use of clean -> an honest metric).
+  * separate paths (latents_baseline_alt, lstm_baseline_alt_out).
+The rest of the machinery (residual predictor, scheduled sampling, curriculum) is IDENTICAL.
 """
 import os
 import numpy as np
@@ -25,20 +25,21 @@ from tqdm.auto import tqdm
 from vae import VAE, encode_fn
 from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 
+from paths import BASELINE_VAE, DATA_ROOT, outputs
+
 
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
-LATENT_ROOT = "/kaggle/working/lunarlander_baseline_latents"
+LATENT_ROOT = outputs("lunarlander_baseline_latents")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT  = "<lunarlander-baseline-vae>"   # Option A: full path to the trained baseline VAE .pth
-SAVE_DIR  = "/kaggle/working/lunarlander_baseline_lstm"
+VAE_CKPT  = BASELINE_VAE   # Option A: full path to the trained baseline VAE .pth
+SAVE_DIR  = outputs("lunarlander_baseline_lstm")
 
 LATENT_SIZE = 64
 N_SUP = 8
 N_ACTIONS = 4
-SHIFT = 0                  # encoded mode ΔΕΝ χρησιμοποιεί το x -> SHIFT άσχετο (το latent είναι ήδη weak-sup)
+SHIFT = 0                  # encoded mode does NOT use x -> SHIFT is irrelevant (the latent is already weak-sup)
 
 SEQ_LEN = 30
 STRIDE = 5
@@ -47,10 +48,10 @@ BATCH = 64
 HIDDEN = 64
 LAYERS = 2
 
-EPOCHS = 60                # ΙΔΙΟ με P1_alt (τίμια σύγκριση)
+EPOCHS = 60                # SAME as P1_alt (fair comparison)
 LR = 1e-3
 CLIP = 1.0
-W_PHYS = 1.0               # επιπλέον βάρος στα N_SUP physical dims του latent target
+W_PHYS = 1.0               # extra weight on the N_SUP physical dims of the latent target
 
 P_START, P_END, P_DECAY_EPOCHS = 1.0, 0.3, 40     # scheduled sampling
 L_START, CURRICULUM_EPOCHS = 5, 15                # horizon curriculum
@@ -88,7 +89,7 @@ class LatentPredictor(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Rollout — ENCODED (seed/target = VAE latent· ΚΑΜΙΑ GT injection)
+# Rollout — ENCODED (seed/target = VAE latent; NO GT injection)
 # ---------------------------------------------------------------------------
 def rollout(model, batch, p_tf, n_actions, free_running=False, max_len=None):
     z_t, action, z_tp1, state_t, state_tp1 = batch
@@ -96,8 +97,8 @@ def rollout(model, batch, p_tf, n_actions, free_running=False, max_len=None):
     B = z_t.shape[0]
     device = z_t.device
 
-    z_in = z_t[:, 0]                          # ENCODED seed: latent του VAE (όχι GT)
-    z_gt = z_tp1[:, :L]                       # target: latent trajectory (όχι GT injection)
+    z_in = z_t[:, 0]                          # ENCODED seed: the VAE's latent (not GT)
+    z_gt = z_tp1[:, :L]                       # target: the latent trajectory (no GT injection)
 
     hidden = model.init_hidden(B, device)
     preds = []
@@ -138,7 +139,7 @@ def train_epoch(model, loader, optimizer, device, p_tf, cur_len, desc=""):
 
 @torch.no_grad()
 def eval_epoch(model, loader, device, std_phys, desc=""):
-    """ FREE-RUNNING στο ΠΛΗΡΕΣ SEQ_LEN -> physical MSE ανά ορίζοντα, vs CLEAN state. """
+    """ FREE-RUNNING at the FULL SEQ_LEN -> physical MSE per horizon, vs the CLEAN state. """
     model.eval()
     se, n = None, 0
     for batch in tqdm(loader, desc=desc, leave=False):
@@ -148,7 +149,7 @@ def eval_epoch(model, loader, device, std_phys, desc=""):
         s = (err ** 2).sum(dim=0)                              # (L, n_sup)
         se = s if se is None else se + s
         n += preds.size(0)
-    return (se / n).mean(dim=1).cpu().numpy()                  # (L,) physical MSE ανά ορίζοντα
+    return (se / n).mean(dim=1).cpu().numpy()                  # (L,) physical MSE per horizon
 
 '''
 # ---------------------------------------------------------------------------
@@ -213,7 +214,7 @@ if __name__ == "__main__":
         else:
             bad += 1
             if bad >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}.")
+                print(f"Early stopping at epoch {epoch}.")
                 break
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "lstm_baseline_alt_last.pth"))

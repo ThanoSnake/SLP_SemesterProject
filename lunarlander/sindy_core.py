@@ -1,22 +1,22 @@
 """
-sindy_core.py — Shared SINDy backbone (from-scratch, numpy-only) για το LunarLander world model.
+sindy_core.py — Shared SINDy backbone (from-scratch, numpy-only) for the LunarLander world model.
 
-Τι κάνει: μαθαίνει ΕΡΜΗΝΕΥΣΙΜΗ δυναμική στο 8-dim physical state [x, y, vx, vy, θ, ω, leg1, leg2]
-με αραιή παλινδρόμηση (STLSQ), σε DISCRETE next-state / DELTA μορφή:
-        x_{t+1} = x_t + Θ(x_t, u_t) · Ξ          (Ξ αραιό -> λίγες, διαβάσιμες εξισώσεις)
-Αυτό είναι το dyn_phys: ℝ⁸ → ℝ⁸ της Definition 2 του paper — ο φυσικός αντίστοιχος του LSTM.
+What it does: learns INTERPRETABLE dynamics on the 8-dim physical state [x, y, vx, vy, θ, ω, leg1, leg2]
+with sparse regression (STLSQ), in DISCRETE next-state / DELTA form:
+        x_{t+1} = x_t + Θ(x_t, u_t) · Ξ          (Ξ sparse -> few, readable equations)
+This is the dyn_phys: ℝ⁸ → ℝ⁸ of the paper's Definition 2 — the physical counterpart of the LSTM.
 
-ΔΙΑΦΟΡΕΣ από το CartPole core (γιατί χρειάζεται ξεχωριστό αρχείο):
-  * N_SUP = 8 (αντί 4) — πλήρης κατάσταση LunarLander.
-  * 4 ΔΙΑΚΡΙΤΕΣ ενέργειες (αντί 2): {0:noop, 1:left, 2:main, 3:right}. ΔΕΝ υπάρχει signed «force»·
-    αντ' αυτού χρησιμοποιούμε δείκτες ώσης (a_main, a_left, a_right) ως features.
-  * Feature library «physics» ειδική για LunarLander: κινηματική (vx,vy,ω), βαρύτητα (σταθερά),
-    ώση κύριου κινητήρα προβαλλόμενη στους άξονες (a_main·sinθ, a_main·cosθ), πλευρικοί κινητήρες.
+DIFFERENCES from the CartPole core (why it needs its own file):
+  * N_SUP = 8 (instead of 4) — the full LunarLander state.
+  * 4 DISCRETE actions (instead of 2): {0:noop, 1:left, 2:main, 3:right}. There is no signed "force";
+    instead we use thrust indicators (a_main, a_left, a_right) as features.
+  * A "physics" feature library specific to LunarLander: kinematics (vx,vy,ω), gravity (constant),
+    main-engine thrust projected onto the axes (a_main·sinθ, a_main·cosθ), side engines.
 
-Τα generic κομμάτια (STLSQ, fit, rollout, windowing, μετρικές) είναι ίδιας λογικής με το CartPole
-core — απλώς παραμετροποιημένα στο N_SUP/feature_library/actions αυτού του environment.
+The generic parts (STLSQ, fit, rollout, windowing, metrics) follow the same logic as the CartPole
+core — just parameterized on this environment's N_SUP/feature_library/actions.
 
-numpy-only (κανένα torch/pysindy) -> τρέχει παντού, πλήρως διάφανο.
+numpy-only (no torch/pysindy) -> runs anywhere, fully transparent.
 """
 import os
 import sys
@@ -24,9 +24,9 @@ import sys
 import numpy as np
 from itertools import combinations_with_replacement
 
-# --- path bootstrap (robust): βάλε στο sys.path τον φάκελο των SINDy siblings ΚΑΙ τον φάκελο που
-#     περιέχει τα vae/lstm/loader — δουλεύει είτε flat (vae δίπλα) είτε σε subfolder (vae σε γονικό,
-#     π.χ. lunarlander/extra/ -> vae στο lunarlander/) ---
+# --- path bootstrap (robust): put on sys.path both the SINDy siblings' folder AND the folder that
+#     contains vae/lstm/loader — works either flat (vae alongside) or in a subfolder (vae in the parent,
+#     e.g. lunarlander/extra/ -> vae in lunarlander/) ---
 try:
     _HERE = os.path.dirname(os.path.abspath(__file__))
 except NameError:
@@ -45,13 +45,13 @@ for _ in range(4):
 
 N_SUP = 8
 N_ACTIONS = 4
-DT = 0.02                                   # LunarLander tau (το dt απορροφάται στο Ξ)
+DT = 0.02                                   # LunarLander tau (dt is absorbed into Ξ)
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
 BASE_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2", "a_main", "a_left", "a_right"]
 
 
 # ---------------------------------------------------------------------------
-# IO helpers (numpy-only — ίδια με το CartPole core)
+# IO helpers (numpy-only — same as the CartPole core)
 # ---------------------------------------------------------------------------
 def load_norm_stats(path):
     z = np.load(path)
@@ -70,8 +70,8 @@ def list_npz(root):
 
 
 def action_indicators(u):
-    """action {0:noop,1:left,2:main,3:right} -> (a_main, a_left, a_right), καθένα (N,) ∈ {0,1}.
-    Το μέγεθος της ώσης μαθαίνεται στο Ξ· οι ενέργειες μπαίνουν ως δείκτες (όχι signed scalar)."""
+    """action {0:noop,1:left,2:main,3:right} -> (a_main, a_left, a_right), each (N,) ∈ {0,1}.
+    The thrust magnitude is learned in Ξ; the actions enter as indicators (not a signed scalar)."""
     u = np.asarray(u, np.float64).reshape(-1)
     return (u == 2).astype(np.float64), (u == 1).astype(np.float64), (u == 3).astype(np.float64)
 
@@ -80,7 +80,7 @@ def action_indicators(u):
 # Feature library  Θ(x, u)  — LunarLander-aware
 # ---------------------------------------------------------------------------
 def feature_library(X, U, mode="physics"):
-    """X: (N,8) raw [x,y,vx,vy,θ,ω,leg1,leg2]· U: (N,) raw action. -> (Θ (N,n_feat), names)."""
+    """X: (N,8) raw [x,y,vx,vy,θ,ω,leg1,leg2]; U: (N,) raw action. -> (Θ (N,n_feat), names)."""
     X = np.atleast_2d(np.asarray(X, np.float64))
     x, y, vx, vy = X[:, 0], X[:, 1], X[:, 2], X[:, 3]
     th, om, l1, l2 = X[:, 4], X[:, 5], X[:, 6], X[:, 7]
@@ -94,7 +94,7 @@ def feature_library(X, U, mode="physics"):
             "theta": th, "omega": om, "leg1": l1, "leg2": l2,
             "sin": s, "cos": c,
             "a_main": am, "a_left": al, "a_right": ar,
-            "a_main*sin": am * s, "a_main*cos": am * c,   # κύρια ώση προβαλλόμενη στους άξονες
+            "a_main*sin": am * s, "a_main*cos": am * c,   # main thrust projected onto the axes
         }
         names = list(feats.keys())
         Theta = np.stack([feats[n] for n in names], axis=1)
@@ -114,7 +114,7 @@ def feature_library(X, U, mode="physics"):
 
 
 # ---------------------------------------------------------------------------
-# STLSQ — sequentially thresholded least squares (με column-normalization)
+# STLSQ — sequentially thresholded least squares (with column normalization)
 # ---------------------------------------------------------------------------
 def _ridge_solve(A, b, ridge):
     AtA = A.T @ A + ridge * np.eye(A.shape[1])
@@ -122,7 +122,7 @@ def _ridge_solve(A, b, ridge):
 
 
 def stlsq(Theta, dX, threshold=0.02, ridge=1e-6, n_iter=10):
-    """dX: (N,8) = x_{t+1}-x_t. -> Ξ (n_feat,8). Threshold σε NORMALIZED columns (scale-invariant)."""
+    """dX: (N,8) = x_{t+1}-x_t. -> Ξ (n_feat,8). Threshold on NORMALIZED columns (scale-invariant)."""
     scale = np.linalg.norm(Theta, axis=0)
     scale[scale == 0] = 1.0
     Tn = Theta / scale
@@ -139,7 +139,7 @@ def stlsq(Theta, dX, threshold=0.02, ridge=1e-6, n_iter=10):
 
 
 def fit_sindy(X, U, X_next, mode="physics", threshold=0.02, ridge=1e-6):
-    """ -> (Ξ (n_feat,8), names). Μαθαίνει το DELTA dX = X_next - X."""
+    """ -> (Ξ (n_feat,8), names). Learns the DELTA dX = X_next - X."""
     Theta, names = feature_library(X, U, mode)
     Xi = stlsq(Theta, (X_next - X).astype(np.float64), threshold, ridge)
     return Xi, names
@@ -149,7 +149,7 @@ def fit_sindy(X, U, X_next, mode="physics", threshold=0.02, ridge=1e-6):
 # Rollout (discrete map)
 # ---------------------------------------------------------------------------
 def sindy_step(x, u, Xi, mode="physics"):
-    """x: (B,8)· u: (B,) raw action. -> x_next (B,8) = x + Θ(x,u)·Ξ."""
+    """x: (B,8); u: (B,) raw action. -> x_next (B,8) = x + Θ(x,u)·Ξ."""
     Theta, _ = feature_library(x, u, mode)
     return x + Theta @ Xi
 
@@ -168,11 +168,11 @@ def sindy_rollout(x0, U_seq, Xi, mode="physics"):
 
 
 # ---------------------------------------------------------------------------
-# Data assembly από precomputed latent dirs (z, acts, states[RAW], x)
+# Data assembly from precomputed latent dirs (z, acts, states[RAW], x)
 # ---------------------------------------------------------------------------
 def assemble_fit_data(latent_dir, which, mean, std):
-    """which ∈ {'encoded','gt'}. -> (X (M,8), U (M,), X_next (M,8)) σε RAW physical units.
-       U = RAW actions (όχι signed force — οι δείκτες ώσης φτιάχνονται στο feature_library).
+    """which ∈ {'encoded','gt'}. -> (X (M,8), U (M,), X_next (M,8)) in RAW physical units.
+       U = RAW actions (not a signed force — the thrust indicators are built in feature_library).
        encoded: z[:, :8]*std+mean (raw)·  gt: states (raw clean GT)."""
     mean8 = np.asarray(mean[:N_SUP], np.float64)
     std8 = np.asarray(std[:N_SUP], np.float64)
@@ -190,9 +190,9 @@ def assemble_fit_data(latent_dir, which, mean, std):
 
 
 def assemble_windows(latent_dir, mean, std, seq_len=30, stride=1, which_seed="encoded"):
-    """Windows ΙΔΙΑΣ ΛΟΓΙΚΗΣ με το LatentSequenceDataset (ίδιο count/indexing).
-       -> (seed_raw (N,8), U (N,L) RAW actions, gt_raw (N,L,8)) σε RAW physical units.
-       seed: encoded z[s,:8] (raw) ή GT states[s]·  gt: RAW states[s+1 : s+L+1]."""
+    """Windows with the SAME LOGIC as LatentSequenceDataset (same count/indexing).
+       -> (seed_raw (N,8), U (N,L) RAW actions, gt_raw (N,L,8)) in RAW physical units.
+       seed: encoded z[s,:8] (raw) or GT states[s];  gt: RAW states[s+1 : s+L+1]."""
     mean8 = np.asarray(mean[:N_SUP], np.float64)
     std8 = np.asarray(std[:N_SUP], np.float64)
     seeds, Us, gts = [], [], []
@@ -211,7 +211,7 @@ def assemble_windows(latent_dir, mean, std, seq_len=30, stride=1, which_seed="en
 
 
 # ---------------------------------------------------------------------------
-# Metric helpers (standardized, ίδια σύμβαση με τα test_pX)
+# Metric helpers (standardized, same convention as the test_pX scripts)
 # ---------------------------------------------------------------------------
 def standardized_sq_err(pred_raw, gt_raw, std):
     """pred_raw, gt_raw: (N,L,8) RAW. -> (N,L,8) STANDARDIZED squared error (÷ std8)."""
@@ -238,7 +238,7 @@ def bootstrap_paired(diff, n_boot, rng):
 # Pretty-print discovered equations (interpretability!)
 # ---------------------------------------------------------------------------
 def format_equations(Xi, names, tol=1e-8):
-    """ -> list of strings: 'Δ<dim> = c1*feat1 + ...' (μόνο μη-μηδενικοί όροι)."""
+    """ -> list of strings: 'Δ<dim> = c1*feat1 + ...' (non-zero terms only)."""
     lines = []
     for j, dim in enumerate(DIM_NAMES):
         terms = [f"{Xi[i, j]:+.4g}*{names[i]}" for i in range(len(names)) if abs(Xi[i, j]) > tol]

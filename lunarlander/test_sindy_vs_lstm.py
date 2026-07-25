@@ -1,42 +1,44 @@
 """
 test_sindy_vs_lstm.py — Head-to-head: SINDy vs baseline LSTM vs GT (env-agnostic: CartPole/LunarLander).
 
-ΙΔΕΑ: στα ΙΔΙΑ test windows, με ΙΔΙΟ seed/actions, συγκρίνουμε δύο εκδοχές του dyn_phys:
-  * LSTM  = v(dyn(z))      (η implicit, μαθημένη δυναμική του baseline world model)
-  * SINDy = dyn_phys(v(z)) (η ρητή, αραιή δυναμική)
-Αυτό είναι ΑΚΡΙΒΩΣ το τεστ της συνθήκης (ii) της Definition 2 του paper: πόσο κοντά
-«μετατίθενται» (commute) οι δύο δυναμικές προς το πραγματικό GT.
+IDEA: on the SAME test windows, with the SAME seed/actions, we compare two versions of dyn_phys:
+  * LSTM  = v(dyn(z))      (the implicit, learned dynamics of the baseline world model)
+  * SINDy = dyn_phys(v(z)) (the explicit, sparse dynamics)
+This is EXACTLY the test of condition (ii) of the paper's Definition 2: how closely
+the two dynamics "commute" toward the true GT.
 
-ΠΑΡΑΓΟΜΕΝΑ (ίδια μετρική/σύμβαση με τα test_pX):
-  (1) Overall median+IQR state-MSE ανά horizon — LSTM vs SINDy (+ προαιρ. GT-fit SINDy ref)
-  (2) Per-dim median+IQR state-MSE ανά horizon
-  (3) Paired Δ (LSTM − SINDy) median + 95% bootstrap CI  (>0 ⇒ SINDy καλύτερο σε αυτόν τον ορίζοντα)
-  (4) Trajectory ενός ΤΥΧΑΙΟΥ test window: GT vs LSTM vs SINDy (physical units)
-  Όλα σε clean ΚΑΙ noisy-image conditions.
+OUTPUTS (same metric/convention as the test_pX scripts):
+  (1) Overall median+IQR state-MSE per horizon — LSTM vs SINDy (+ optional GT-fit SINDy ref)
+  (2) Per-dim median+IQR state-MSE per horizon
+  (3) Paired Δ (LSTM − SINDy) median + 95% bootstrap CI  (>0 => SINDy better at that horizon)
+  (4) Trajectory of a RANDOM test window: GT vs LSTM vs SINDy (physical units)
+  All of it on clean AND noisy-image conditions.
 
-ΑΝΑΜΕΝΟΜΕΝΗ ΙΣΤΟΡΙΑ: το SINDy εκτείνεται καλύτερα σε μακρύ ορίζοντα (σταθερή φυσική, δεν
-συσσωρεύει error όπως το NN)· το LSTM πιάνει λεπτομέρειες/μη-μοντελοποιημένα κομμάτια κοντά.
+EXPECTED STORY: SINDy extrapolates better at long horizons (stable physics, it does not
+accumulate error the way the NN does); the LSTM catches details/unmodelled parts near the start.
 
-ENV-AGNOSTIC: ΙΔΙΟ αρχείο για cartpole & lunarlander· environment από sindy_core/sindy_eval_utils.
-Τρέξε: !python3 <env-folder>/test_sindy_vs_lstm.py
+ENV-AGNOSTIC: the SAME file for cartpole & lunarlander; the environment comes from sindy_core/sindy_eval_utils.
+Run: !python3 <env-folder>/test_sindy_vs_lstm.py
 """
 import os
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sindy_core import *          # SINDy core (numpy) + path-bootstrap για vae/lstm/loader
+from sindy_core import *          # SINDy core (numpy) + path bootstrap for vae/lstm/loader
 from sindy_eval_utils import *    # VAE encode / LSTM rollout / noise / measurement helpers
 
+from paths import outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG — env-agnostic· το per-environment config έρχεται από sindy_eval_utils/sindy_core (import *).
+# CONFIG — env-agnostic; the per-environment config comes from sindy_eval_utils/sindy_core (import *).
 # ---------------------------------------------------------------------------
-SAVE_DIR = f"/kaggle/working/sindy_{ENV_TAG}_vs_lstm_out"
-INCLUDE_GT_REF = True          # προσθέτει faint «SINDy (GT fit)» ref στο overall plot
+SAVE_DIR = outputs(f"sindy_{ENV_TAG}_vs_lstm_out")
+INCLUDE_GT_REF = True          # adds a faint "SINDy (GT fit)" ref to the overall plot
 
 # Trajectory plot
-TRAJ_SEED = None               # None -> γνήσια τυχαίο window· int -> reproducible
-TRAJ_WINDOW = None             # None -> τυχαίο· ή ακέραιος index
+TRAJ_SEED = None               # None -> genuinely random window; int -> reproducible
+TRAJ_WINDOW = None             # None -> random; or an integer index
 N_TRAJ_WINDOWS = 1
 
 LOG_Y = True
@@ -44,12 +46,12 @@ C_LSTM, C_SINDY, C_GTREF = "C0", "C2", "C7"
 
 
 # ---------------------------------------------------------------------------
-# Evaluation σε ένα noise condition -> err dicts + raw arrays για trajectory
+# Evaluation on one noise condition -> err dicts + raw arrays for the trajectory
 # ---------------------------------------------------------------------------
 def evaluate_condition(lstm, test_dir, Xi_e, Xi_g, mean, std, device):
     # LSTM rollout (standardized phys)
     pred_lstm, gt_std = lstm_free_run_dir(lstm, test_dir, mean, std, device)
-    # SINDy rollout (raw) στα ΙΔΙΑ windows (encoded seed)
+    # SINDy rollout (raw) on the SAME windows (encoded seed)
     seed_enc, U, gt_raw = assemble_windows(test_dir, mean, std, seq_len=SEQ_LEN,
                                               stride=TEST_STRIDE, which_seed="encoded")
     pred_sindy = sindy_rollout(seed_enc, U, Xi_e, mode=FEATURE_MODE)
@@ -125,7 +127,7 @@ def plot_perdim(err, tag, label, save_dir):
 
 
 def plot_paired(err, tag, label, save_dir, rng):
-    """Paired Δ (LSTM − SINDy): >0 ⇒ SINDy καλύτερο σε αυτόν τον ορίζοντα."""
+    """Paired Δ (LSTM − SINDy): >0 => SINDy better at that horizon."""
     diff = err["LSTM"].mean(axis=2) - err["SINDy"].mean(axis=2)
     med, lo, hi = bootstrap_paired(diff, N_BOOT, rng)
     horizons = np.arange(1, SEQ_LEN + 1)
@@ -147,14 +149,14 @@ def plot_trajectory(raw, tag, label, save_dir, rng):
     gt = raw["gt"]; N, L, _ = gt.shape
     horizons = np.arange(1, L + 1)
     
-    # 1. Υπολογισμός δυναμικού αριθμού γραμμών ώστε να χωράνε όλα τα N_SUP
+    # 1. Work out the number of rows needed to fit all N_SUP dims
     num_rows = (N_SUP + 1) // 2
     
     for _ in range(N_TRAJ_WINDOWS):
         w = TRAJ_WINDOW if TRAJ_WINDOW is not None else int(rng.integers(0, N))
         
-        # 2. Αλλαγή του subplots για να παίρνει το num_rows 
-        #    και προσθήκη squeeze=False για να λειτουργεί πάντα το διπλό indexing (axes[x][y])
+        # 2. Pass num_rows to subplots and add squeeze=False so the double
+        #    indexing (axes[x][y]) always works
         fig, axes = plt.subplots(num_rows, 2, figsize=(12, 3 * num_rows), squeeze=False)
         
         for d in range(N_SUP):
@@ -186,7 +188,7 @@ def main():
     rng = np.random.default_rng(BOOT_SEED)
     traj_rng = np.random.default_rng(TRAJ_SEED)
 
-    # ---- fit SINDy στο CLEAN encoded train (+ GT ref) ----
+    # ---- fit SINDy on the CLEAN encoded train split (+ GT ref) ----
     train_dir = ensure_encoded(VAE_CKPT, DATA_ROOT,
                                    os.path.join(LATENT_ROOT, "clean"),
                                    device, noise_fn=None, splits=("train",))["train"]

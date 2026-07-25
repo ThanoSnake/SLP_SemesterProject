@@ -1,20 +1,20 @@
 """
-extension_main_shield_emergency_relaxed.py — Επέκταση 4: πιο χαλαρή ΠΡΟΣΘΕΤΗ κάθετη ασπίδα.
+extension_main_shield_emergency_relaxed_grid_search.py — Extension 4: a looser ADDITIVE vertical shield.
 
-ΓΙΑΤΙ: το διαγνωστικό (mpc_model_sanity.py) έδειξε ότι το world-model προβλέπει ΑΞΙΟΠΙΣΤΑ τη
-σχέση main→vy (κάθετα), αλλά έχει ~ΝΕΚΡΟ action-conditioning στα πλευρικά engines (left/right→vx).
-Άρα ΔΕΝ κάνουμε full MPC. Αντ' αυτού:
-  * PID  -> οριζόντιος/γωνιακός έλεγχος (left/right/noop) — δουλεύει (enc_pid ~80% landing).
-  * MPC  -> ΜΟΝΟ το main (κάθετο), στο 1-D υποπρόβλημα όπου το μοντέλο είναι έμπιστο.
+WHY: the diagnostic (mpc_model_sanity.py) showed that the world model predicts the main->vy
+relation (vertical) RELIABLY, but has ~DEAD action conditioning on the side engines (left/right->vx).
+So we do NOT do full MPC. Instead:
+  * PID  -> horizontal/angular control (left/right/noop) — it works (enc_pid ~80% landing).
+  * MPC  -> ONLY the main engine (vertical), on the 1-D subproblem where the model is trustworthy.
 
-Έλεγχος main = additive crash shield: ο enc_pid παραμένει ο default ελεγκτής. Αν ο PID ζητά main,
-το κρατάμε πάντα. Αν ΔΕΝ ζητά main, τότε το world-model δοκιμάζει «ξεκίνα main από βήμα j»
-(j=0..K), κάνει vertical dream στο LSTM, και μπορεί ΜΟΝΟ να προσθέσει emergency main σε
-πολύ συγκεκριμένες καταστάσεις: PID noop, χαμηλά, γρήγορη κάθοδος.
+Main control = an additive crash shield: enc_pid stays the default controller. If the PID asks for main,
+we always keep it. If it does NOT, the world model tries "start main at step j"
+(j=0..K), runs a vertical dream through the LSTM, and may ONLY add an emergency main in
+very specific states: PID noop, low altitude, fast descent.
 
-Arbitration: το MPC δεν καταστέλλει ποτέ main του PID και δεν αντικαθιστά ποτέ side engines.
+Arbitration: the MPC never suppresses the PID's main and never replaces the side engines.
 
-Imports από canonical modules· cwd: lunarlander/. Απαιτεί gymnasium[box2d].
+Imports from the canonical modules; cwd: lunarlander/. Requires gymnasium[box2d].
 """
 import os
 import csv
@@ -34,23 +34,24 @@ from vae_p3 import VAE_P3
 from lstm import LatentPredictor
 from loader import load_norm_stats
 
+from paths import BASELINE_LSTM, BASELINE_VAE, CONTROL_LSTM, DATA_ROOT, P1_VAE, P2_LSTM, P2_VAE, P3_SEMI_LSTM, P3_SEMI_VAE, P3_WEAK_LSTM, P3_WEAK_VAE, outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG — placeholders <...> τα συμπληρώνει ο patcher
+# CONFIG  (paths from config.py via paths.py)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_ext4_main_shield_emergency_relaxed"
+SAVE_DIR = outputs("lunarlander_ext4_main_shield_emergency_relaxed")
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
 N_ACTIONS, HIDDEN, LAYERS = 4, 64, 2
 
 MODEL = "p1"
 MODEL_REGISTRY = {
-    "baseline": (lambda: VAE(latent_size=LATENT_SIZE),    "<lunarlander-baseline-vae>", "<lunarlander-baseline-lstm>"),
-    "p1":       (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG), "<lunarlander-p1-vae>",       "<lunarlander-lstm-tubano>"),
-    "p2":       (lambda: VAE_P2(latent_size=LATENT_SIZE),  "<lunarlander-p2-vae>",       "<lunarlander-p2-lstm>"),
-    "p3_semi":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  "<lunarlander-p3-semi-vae>",  "<lunarlander-p3-semi-lstm>"),
-    "p3_weak":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  "<lunarlander-p3-weak-vae>",  "<lunarlander-p3-weak-lstm>"),
+    "baseline": (lambda: VAE(latent_size=LATENT_SIZE),    BASELINE_VAE, BASELINE_LSTM),
+    "p1":       (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG), P1_VAE,       CONTROL_LSTM),
+    "p2":       (lambda: VAE_P2(latent_size=LATENT_SIZE),  P2_VAE,       P2_LSTM),
+    "p3_semi":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  P3_SEMI_VAE,  P3_SEMI_LSTM),
+    "p3_weak":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  P3_WEAK_VAE,  P3_WEAK_LSTM),
 }
 
 N_EPISODES = 20
@@ -64,20 +65,20 @@ RECORD_GIF = False
 GIF_FPS = 30
 
 # --- Vertical MPC (main-only additive shield): default/fallback values ---
-VERT_HORIZON = 10                 # ≤ train window (το μοντέλο είναι αξιόπιστο ~10 βήματα)
-Y_GROUND_SCALE = 0.60             # πιο proactive από 0.40, αλλά ακόμα near-ground focused
-VERT_FUEL_W = 0.02                # χαμηλότερη ποινή fuel ώστε να μη μπλοκάρει emergency braking
-EMERGENCY_Y_MAX = 1.20            # πιο χαλαρό: δώσε περισσότερο χρόνο στο main πριν το έδαφος
-EMERGENCY_VY_MAX = -0.10          # πιο χαλαρό: πιάσε πιο νωρίς καθοδική τάση
-EMERGENCY_COST_MARGIN = 0.00      # δέξου οποιοδήποτε predicted gain, αφού ήδη έχουμε gate
+VERT_HORIZON = 10                 # <= the train window (the model is reliable for ~10 steps)
+Y_GROUND_SCALE = 0.60             # more proactive than 0.40, but still near-ground focused
+VERT_FUEL_W = 0.02                # lower fuel penalty so it does not block emergency braking
+EMERGENCY_Y_MAX = 1.20            # looser: give main more time before the ground
+EMERGENCY_VY_MAX = -0.10          # looser: catch the downward trend earlier
+EMERGENCY_COST_MARGIN = 0.00      # accept any predicted gain, since we already have a gate
 
-# --- Grid search γύρω από την περιοχή που φάνηκε καλύτερη από τα προηγούμενα runs ---
+# --- Grid search around the region that looked best in the previous runs ---
 Y_GROUND_SCALE_GRID = [0.60]
 VERT_FUEL_W_GRID = [0.02, 0.05]
 EMERGENCY_Y_MAX_GRID = [0.90, 1.00, 1.10]
 EMERGENCY_VY_MAX_GRID = [-0.25, -0.20, -0.15]
 EMERGENCY_COST_MARGIN_GRID = [0.00, 0.01, 0.02, 0.04]
-ADD_PCT_TARGET_MAX = 15.0         # πάνω από αυτό το shield αρχίζει να γίνεται controller
+ADD_PCT_TARGET_MAX = 15.0         # above this the shield starts becoming the controller
 
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
 
@@ -98,11 +99,11 @@ def make_env():
             return gym.make(env_id, **kw)
         except Exception as e:
             last_err = e
-    raise RuntimeError(f"LunarLander δεν βρέθηκε (pip install 'gymnasium[box2d]'). {last_err}")
+    raise RuntimeError(f"LunarLander not found (pip install 'gymnasium[box2d]'). {last_err}")
 
 
 # ---------------------------------------------------------------------------
-# PD heuristic (ίδιο με dataCollect) + encoder helpers
+# PD heuristic (same as dataCollect) + encoder helpers
 # ---------------------------------------------------------------------------
 def heuristic_control(s):
     x, y, vx, vy, theta, omega = float(s[0]), float(s[1]), float(s[2]), float(s[3]), float(s[4]), float(s[5])
@@ -147,16 +148,16 @@ def save_gif(frames, path, fps=GIF_FPS):
 
 
 # ---------------------------------------------------------------------------
-# Vertical MPC (main-only) — additive emergency-main enumeration στο αξιόπιστο main→vy
+# Vertical MPC (main-only) — additive emergency-main enumeration on the reliable main->vy axis
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def vertical_main_decision(lstm, z0, mean_t, std_t, device, cfg):
-    """ Δοκιμάζει 'ξεκίνα main από βήμα j' (j=0..K· j=K -> ποτέ). Vertical dream -> ποινή
-    Σ w_ground(y)·vy² + fuel. Επιστρέφει 1η ενέργεια και improvement έναντι no-main. """
+    """ Tries 'start main at step j' (j=0..K; j=K -> never). Vertical dream -> penalty
+    Σ w_ground(y)·vy² + fuel. Returns the first action and the improvement over no-main. """
     K = int(cfg["horizon"])
     seqs = torch.zeros(K + 1, K, dtype=torch.long, device=device)        # (K+1, K)
     for j in range(K + 1):
-        seqs[j, j:] = 2                                                  # main από j και μετά
+        seqs[j, j:] = 2                                                  # main from j onwards
     N = K + 1
     z = z0.expand(N, -1).contiguous()
     hid = lstm.init_hidden(N, device)
@@ -168,7 +169,7 @@ def vertical_main_decision(lstm, z0, mean_t, std_t, device, cfg):
         z, hid = lstm.step(z, F.one_hot(a, N_ACTIONS).float(), hid)
         phys = z[:, :N_SUP] * std8 + mean8
         y, vy = phys[:, 1], phys[:, 3]
-        w_ground = torch.exp(-torch.relu(y) / cfg["y_ground_scale"])     # ~1 κοντά στο έδαφος
+        w_ground = torch.exp(-torch.relu(y) / cfg["y_ground_scale"])     # ~1 close to the ground
         cost += w_ground * (vy * vy) + cfg["fuel_w"] * fc[a]
     best = int(torch.argmin(cost).item())
     no_main_cost = cost[-1]
@@ -210,14 +211,14 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, reco
                 raise ValueError("emergency_shield_relaxed requires a cfg")
             a_pid = heuristic_control(phys)
             if a_pid == 2:
-                a = 2                                                     # ποτέ suppress PID-main
+                a = 2                                                     # never suppress the PID's main
                 n_pid_main += 1
             elif a_pid in (1, 3):
-                a = a_pid                                                 # ποτέ override σε side engines
+                a = a_pid                                                 # never override the side engines
             else:
-                n_add_opportunities += 1                                  # μόνο PID-noop μπορεί να γίνει emergency main
+                n_add_opportunities += 1                                  # only a PID noop can become an emergency main
                 if not emergency_gate(phys, cfg):
-                    a = a_pid                                             # noop, αλλά όχι πραγματικό emergency
+                    a = a_pid                                             # noop, but not a real emergency
                 else:
                     n_gate_pass += 1
                     a_vert, gain = vertical_main_decision(lstm, mu, mean_t, std_t, device, cfg)
@@ -225,7 +226,7 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, reco
                         a = 2
                         n_add_main += 1
                     else:
-                        a = a_pid                                         # κράτα noop του PID
+                        a = a_pid                                         # keep the PID's noop
         else:
             raise ValueError(controller)
 

@@ -1,20 +1,20 @@
 """
-test_p3.py — Αξιολόγηση Baseline vs P3-semi vs P3-weak με ΘΟΡΥΒΩΔΕΙΣ εικόνες (CartPole).
+test_p3.py — Evaluation of Baseline vs P3-semi vs P3-weak on NOISY images (CartPole).
 
-ΕΣΤΙΑΣΜΕΝΗ ΕΚΔΟΣΗ (single-setting) — ίδια δομή/διαγράμματα με test_p1/test_p2, αλλά με ΤΡΙΑ
-μοντέλα (Baseline, P3 semi, P3 weak· ίδιο monolithic VAE, διαφέρει μόνο η ΕΠΟΠΤΕΙΑ):
-  * ΜΟΝΟ μικρός gaussian θόρυβος σ=0.05.
-  * ΜΟΝΟ "encoded" seed mode (z_0 από VAE -> LSTM rollout).
-  * Ο θόρυβος εφαρμόζεται ΑΠΟΚΛΕΙΣΤΙΚΑ στη φάση encoding (precompute_latents), πριν τον encoder.
+FOCUSED VERSION (single setting) — same structure/plots as test_p1/test_p2, but with THREE
+models (Baseline, P3 semi, P3 weak; same monolithic VAE, only the SUPERVISION differs):
+  * ONLY a small gaussian noise σ=0.05.
+  * ONLY "encoded" seed mode (z_0 from the VAE -> LSTM rollout).
+  * Noise is applied EXCLUSIVELY at the encoding stage (precompute_latents), before the encoder.
 
-ΠΑΡΑΓΟΜΕΝΑ:
-  (1) Overall median+IQR state-MSE ανά horizon (mean over dims) — 3 καμπύλες   [standardized]
-  (2) Per-dim median+IQR state-MSE ανά horizon — 3 καμπύλες                    [standardized]
-  (3) Paired Δ (Baseline − semi) και (Baseline − weak) + 95% bootstrap CI
-  (4) ΦΥΣΙΚΑ ΜΕΓΕΘΗ ενός ΤΥΧΑΙΟΥ test window: GT vs baseline vs semi vs weak    [physical units]
+OUTPUTS:
+  (1) Overall median+IQR state-MSE per horizon (mean over dims) — 3 curves   [standardized]
+  (2) Per-dim median+IQR state-MSE per horizon — 3 curves                    [standardized]
+  (3) Paired Δ (Baseline − semi) and (Baseline − weak) + 95% bootstrap CI
+  (4) PHYSICAL QUANTITIES of a RANDOM test window: GT vs baseline vs semi vs weak  [physical units]
 
-ΣΗΜ. μονάδες: οι καμπύλες MSE (1–3) είναι STANDARDIZED (όπως τα υπόλοιπα test_pX). Το
-trajectory (4) είναι σε PHYSICAL units (de-standardized).
+NOTE on units: the MSE curves (1–3) are STANDARDIZED (as in the other test_pX). The
+trajectory (4) is in PHYSICAL units (de-standardized).
 """
 import os
 import numpy as np
@@ -27,12 +27,13 @@ from vae import VAE
 from lstm import LatentPredictor
 from loader import LatentSequenceDataset, load_norm_stats, list_npz
 
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, P3_SEMI_LSTM, P3_SEMI_VAE, P3_WEAK_LSTM, P3_WEAK_VAE, outputs
+
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/cartpole_p3_out"
+SAVE_DIR = outputs("cartpole_p3_out")
 
 SHIFT = 0
 LATENT_SIZE, N_SUP, N_IMG = 64, 4, 60
@@ -47,37 +48,37 @@ BOOT_SEED = 0
 LOG_Y = True
 
 # ---------------------------------------------------------------------------
-# NOISE CONFIG — μοναδικό setting: μικρός gaussian σ=0.05
+# NOISE CONFIG — a single setting: small gaussian σ=0.05
 # ---------------------------------------------------------------------------
 NOISE_TYPE = "gaussian"           # "gaussian" | "salt_pepper"
-NOISE_SIGMA = 0.05                # std (gaussian) πάνω σε [0,1] εικόνα
+NOISE_SIGMA = 0.05                # std (gaussian) on a [0,1] image
 NOISE_SEED = 42                   # reproducible noise
 
-# Trajectory plot (4): τυχαίο test window
-TRAJ_SEED = None                  # None -> ΓΝΗΣΙΑ τυχαίο (διαφορετικό window κάθε τρέξιμο)· int -> reproducible
-TRAJ_WINDOW = None                # None -> τυχαίο· ή ακέραιος index για συγκεκριμένο window
+# Trajectory plot (4): a random test window
+TRAJ_SEED = None                  # None -> GENUINELY random (a different window every run); int -> reproducible
+TRAJ_WINDOW = None                # None -> random; or an integer index for a specific window
 N_TRAJ_WINDOWS = 1
 
 # ---------------------------------------------------------------------------
 # Model definitions — Baseline vs P3 semi vs P3 weak
-# (ΙΔΙΟ monolithic VAE class· διαφέρει μόνο η εποπτεία -> διαφορετικά checkpoints)
+# (the SAME monolithic VAE class; only the supervision differs -> different checkpoints)
 # ---------------------------------------------------------------------------
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<cartpole-baseline-vae>",
-     "lstm_ckpt": "<cartpole-baseline-lstm>",
-     "latent_root": "/kaggle/working/cartpole_p3_latents/baseline"},
+     "vae_ckpt": BASELINE_VAE,
+     "lstm_ckpt": BASELINE_LSTM,
+     "latent_root": outputs("cartpole_p3_latents/baseline")},
     {"label": "P3 semi", "color": "C1",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<cartpole-p3-semi-vae>",
-     "lstm_ckpt": "<cartpole-p3-semi-lstm>",
-     "latent_root": "/kaggle/working/cartpole_p3_latents/p3_semi"},
+     "vae_ckpt": P3_SEMI_VAE,
+     "lstm_ckpt": P3_SEMI_LSTM,
+     "latent_root": outputs("cartpole_p3_latents/p3_semi")},
     {"label": "P3 weak", "color": "C3",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<cartpole-p3-weak-vae>",
-     "lstm_ckpt": "<cartpole-p3-weak-lstm>",
-     "latent_root": "/kaggle/working/cartpole_p3_latents/p3_weak"},
+     "vae_ckpt": P3_WEAK_VAE,
+     "lstm_ckpt": P3_WEAK_LSTM,
+     "latent_root": outputs("cartpole_p3_latents/p3_weak")},
 ]
 
 
@@ -110,7 +111,7 @@ def make_noise_fn(noise_type, level, seed, device):
 
 
 # ---------------------------------------------------------------------------
-# NOISY precompute_latents — εφαρμόζει noise ΠΡΙΝ το encoding
+# NOISY precompute_latents — applies the noise BEFORE encoding
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def precompute_latents_noisy(encode_fn, root, out_root, noise_fn,
@@ -126,7 +127,7 @@ def precompute_latents_noisy(encode_fn, root, out_root, noise_fn,
             x = (d[f"noisy_states_{shift}"] if shift in (2, 5, 10)
                  else d["states"]).astype(np.float32)
 
-        imgs = noise_fn(imgs.to(device))                       # noise σε ΟΛΑ τα frames πριν το encoding
+        imgs = noise_fn(imgs.to(device))                       # noise on ALL frames before encoding
         img_t, img_tp1 = imgs[:-1], imgs[1:]
         zs = []
         for b in range(0, img_t.shape[0], batch):
@@ -239,7 +240,7 @@ def evaluate_model_noisy(m, device, mean_s, std_s):
 # Plots
 # ---------------------------------------------------------------------------
 def plot_median_iqr(err, save_dir):
-    """(1) Overall median+IQR state-MSE (mean over dims) — όλα τα μοντέλα."""
+    """(1) Overall median+IQR state-MSE (mean over dims) — all models."""
     horizons = np.arange(1, SEQ_LEN + 1)
     plt.figure(figsize=(6.8, 4.8))
     for m in MODELS:
@@ -259,7 +260,7 @@ def plot_median_iqr(err, save_dir):
 
 
 def plot_perdim(err, save_dir):
-    """(2) Per-dim median+IQR state-MSE — όλα τα μοντέλα."""
+    """(2) Per-dim median+IQR state-MSE — all models."""
     horizons = np.arange(1, SEQ_LEN + 1)
     fig, axes = plt.subplots(1, N_SUP, figsize=(4.2 * N_SUP, 4.0), squeeze=False)
     for d in range(N_SUP):
@@ -282,7 +283,7 @@ def plot_perdim(err, save_dir):
 
 
 def plot_paired(err, save_dir, rng):
-    """(3) Paired Δ (Baseline − variant) median + 95% bootstrap CI, για κάθε variant."""
+    """(3) Paired Δ (Baseline − variant) median + 95% bootstrap CI, for each variant."""
     base = MODELS[0]["label"]
     variants = MODELS[1:]
     horizons = np.arange(1, SEQ_LEN + 1)
@@ -307,17 +308,17 @@ def plot_paired(err, save_dir, rng):
 
 
 def plot_trajectory(data, mean_s, std_s, save_dir, rng):
-    """(4) Physical trajectory ενός ΤΥΧΑΙΟΥ window: GT vs baseline vs semi vs weak."""
+    """(4) Physical trajectory of a RANDOM window: GT vs baseline vs semi vs weak."""
     base = MODELS[0]["label"]
     mean4 = np.asarray(mean_s[:N_SUP], np.float64)
     std4 = np.asarray(std_s[:N_SUP], np.float64)
-    gt_all = data[base]["gt"]                                  # (N,L,4) standardized (κοινό GT)
+    gt_all = data[base]["gt"]                                  # (N,L,4) standardized (shared GT)
     N, L, _ = gt_all.shape
     horizons = np.arange(1, L + 1)
 
     for wi in range(N_TRAJ_WINDOWS):
         w = TRAJ_WINDOW if TRAJ_WINDOW is not None else int(rng.integers(0, N))
-        for m in MODELS[1:]:                                   # GT πρέπει να ταυτίζεται μεταξύ μοντέλων
+        for m in MODELS[1:]:                                   # GT must be identical across models
             if not np.allclose(data[base]["gt"][w], data[m["label"]]["gt"][w], atol=1e-4):
                 print(f"[warn] window {w}: GT differs ({base} vs {m['label']}) — window alignment?")
 
@@ -359,7 +360,7 @@ def main():
     print(f"\n{'='*60}\n  NOISE: {NOISE_TYPE} σ={NOISE_SIGMA:.2f} | encoded mode\n{'='*60}")
     data = {m["label"]: evaluate_model_noisy(m, device, mean_s, std_s) for m in MODELS}
 
-    # Align window counts across ALL models (same windows -> κοινό GT)
+    # Align window counts across ALL models (same windows -> shared GT)
     n = min(data[m["label"]]["pred"].shape[0] for m in MODELS)
     if any(data[m["label"]]["pred"].shape[0] != n for m in MODELS):
         counts = {m["label"]: data[m["label"]]["pred"].shape[0] for m in MODELS}

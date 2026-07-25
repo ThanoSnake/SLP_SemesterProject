@@ -1,107 +1,117 @@
-# Four Principles for Physically Interpretable World Models
+# Physically Interpretable World Models (PIWM)
 
-This repository contains the source code for this paper: https://arxiv.org/abs/2503.02143
+**Reproducing Four PIWM Principles and Extensions to Dynamics, Uncertainty and Control**
 
-## Prerequisites
+---
 
-```python
+## Overview
+
+A world model learns to compress observations into a latent vector and to predict how that latent evolves over time, so control and planning can be done "in the imagination". The problem with standard world models is that the latent space is a black box, no dimension corresponds to a measurable physical quantity, which blocks generalization, safe reuse by a controller, and formal verification.
+
+This project reproduces and systematically implements the four principles for Physically Interpretable World Models (PIWM), originally proposed by Peper et al., on two environments, CartPole and LunarLander. The paper leaves most architectural and training choices unspecified, a large part of the work is covering those ambiguities with well-justified design decisions (two-frame input, split-β KL, residual LSTM, teacher forcing with decaying *p*, curriculum horizon) so that the benefit of the principles becomes visible and measurable.
+
+Beyond the reproduction, we add three extensions :
+
+1. **SINDy** explicit dynamics with : replacing and hybridizing the neural LSTM with sparse, readable difference equations.
+
+2. **Uncertainty** quantification : aleatoric (VAE `logvar`) and epistemic (MC-Dropout) uncertainty directly on the physical dimensions, in real units.
+
+3. **Control** of LunarLander from pixels : the interpretable encoder feeds a classic PID, and the model's "dream" acts as a targeted safety shield.
+
+---
+
+## Setup
+
+```bash
 pip install -r requirements.txt
 ```
 
-# Getting Started
+Every path is resolved by [`config.py`](config.py) and re-exported to the scripts through `cartpole/paths.py` and `lunarlander/paths.py`. Scripts are run from the repository root and write everything under `OUTPUT_DIR`.
 
-This repository implements our framework for building **Physically Interpretable World Models**, following the principles described in our paper.
+### Data collection
 
-We provide scripts to collect data, train foundational models (VAE and LSTM), and run experiments for each of the three core principles.
+Only needed to regenerate the datasets from scratch.
+
+```bash
+python cartpole/dataCollect.py
+python lunarlander/dataCollect.py
+```
+
+### Baseline
+
+```bash
+python cartpole/vae.py
+python cartpole/lstm.py       
+python cartpole/test_baseline.py
+```
+
+### The Four Principles
+
+```bash
+python cartpole/vae_p1.py
+python cartpole/lstm_p1.py 
+python cartpole/test_p1.py
+```
+
+```bash
+python cartpole/vae_p2.py 
+python cartpole/lstm_p2.py 
+python cartpole/test_p2.py
+```
+
+```bash
+python cartpole/vae_p3.py 
+python cartpole/lstm_p3.py 
+python cartpole/test_p3.py
+```
+
+`test_p3.py` compares baseline / semi / weak, so run `vae_p3.py` and `lstm_p3.py` once per
+setting — set `SUPERVISION = "semi"` then `"weak"` at the top of both files.
+
+```bash
+python cartpole/vae_p4.py 
+python cartpole/test_p4.py
+```
+
+### Extensions
+
+Uncertainty :
+
+```bash
+python cartpole/uncertainty.py
+```
+
+Dynamics with SINDy :
+
+```bash
+python cartpole/sindy.py                
+python cartpole/test_sindy_vs_lstm.py    
+python cartpole/fusion_kalman.py         
+```
+
+Control :
+
+```bash
+python lunarlander/control.py                             
+python lunarlander/extension_main_shield_emergency_relaxed.py
+```
+
+Both need the encoder/LSTM retrained on the coverage-oriented control dataset
+(`LUNARLANDER_CONTROL_VAE` / `LUNARLANDER_CONTROL_LSTM`), which are not in `weights/` — collect
+the dataset with `lunar_data_collect_control.py` and retrain with `vae_p1_control.py` and
+`lstm_p1_control.py`, or point the two variables at your own checkpoints.
 
 ---
 
-## 1. Data Collection
-
-To generate datasets for training, validation, and testing:
-
-```bash
-python dataCollect.py
-```
-
-This script collects observation-action pairs and organizes them into train, val, and test splits.
-
----
-
-## 2. Standard VAE Training
-
-**Train a Variational Autoencoder (VAE)**
-
-```bash
-python vae.py
-```
-
-This trains a VAE to compress high-dimensional observations into latent representations.
-
-**Train an LSTM for Prediction**
-
-```bash
-python lstm.py
-```
-
-This LSTM model is used across all principles to perform temporal prediction in latent space.
-
----
-
-## 3. Experiments for Interpretability Principles
-
-### Principle 1: Structuring Latent Representations
-
-To encode observations into modular latent components (e.g., physical state, image features):
-
-```bash
-python seperate_encoding.py
-```
-
-This script implements separate encoding branches for each latent subspace.
-
----
-
-### Principle 2: Invariant and Equivariant Representations
-
-To train the VAE with alignment constraints (e.g., transformations and their expected effects):
-
-```bash
-python translation_loss.py
-```
-
-This loss promotes latent invariance/equivariance aligned with physical transformations.
-
----
-
-### Principle 3: Multi-Level Supervision
-
-To incorporate mixed supervision signals during training (fully labeled, weakly labeled, and unlabeled):
-
-```bash
-python partial_supervision.py
-```
-
-This script uses weak supervision techniques (e.g., temporal smoothness) to improve interpretability.
-
-To compare results with and without access to velocity estimation, run:
-
-```bash
-python vel_estimation.py
-```
-
----
-
-## Citation
-
-If you use this repository in your work, please cite:
+## Citations
 
 ```bibtex
-@article{sutera2025piwm,
+@inproceedings{peper2025piwm,
   title={Four Principles for Physically Interpretable World Models},
-  author={Sutera, A. and Mao, P. and Geng, M. and Pan, T. and Ruchkin, I.},
-  journal={arXiv preprint arXiv:2503.02143},
+  author={Peper, Jordan and Mao, Zhenjiang and Geng, Yuang and Pan, Siyu and Ruchkin, Ivan},
+  booktitle={Proceedings of the 2nd International Conference on Neuro-symbolic Systems (NeuS)},
+  series={Proceedings of Machine Learning Research},
+  volume={288},
   year={2025}
 }
 ```
-

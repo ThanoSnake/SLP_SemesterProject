@@ -1,32 +1,32 @@
 """
 uncertainty_alt.py — Corrected/expanded interpretable uncertainty for the CartPole world model.
 
-Βασισμένο στο uncertainty.py. ΙΔΙΕΣ δύο μέθοδοι (καμία νέα — όχι ensembles):
-    * MC Dropout  -> EPISTEMIC (model/OOD) αβεβαιότητα (dropout-VAE perception, dropout-LSTM dynamics)
-    * VAE logvar  -> ALEATORIC (input/measurement) αβεβαιότητα
-αλλά διορθωμένες & σωστά καλιμπραρισμένες/οργανωμένες:
+Based on uncertainty.py. The SAME two methods (nothing new — no ensembles):
+    * MC Dropout  -> EPISTEMIC (model/OOD) uncertainty (dropout-VAE perception, dropout-LSTM dynamics)
+    * VAE logvar  -> ALEATORIC (input/measurement) uncertainty
+but fixed & properly calibrated/organized:
 
-ΔΙΟΡΘΩΣΕΙΣ vs uncertainty.py
-  (1) LOCKED (per-rollout) dropout στο LSTM. Το παλιό ξαναδειγμάτιζε mask ΚΑΘΕ βήμα -> ασυσχέτιστο,
-      υπερ-διεσταλμένο band (χρειαζόταν s_cal≈0.27). Εδώ ΕΝΑ mask ανά rollout (variational dropout
-      a la Gal & Ghahramani), και στο TRAINING ΚΑΙ στο MC -> συνεπές, σωστό epistemic.
-  (2) PER-DIM recalibration (διάνυσμα s[dim]) αντί ενός global scalar. Θέση & ταχύτητα έχουν
-      διαφορετική κλίμακα σφάλματος· ένα scalar δεν καλιμπράρει και τα δύο.
-  (3) PROPER metrics: Gaussian NLL + per-level coverage (reliability diagram) + sharpness, ΟΧΙ
-      μόνο coverage (ένα τεράστιο band καλύπτει trivially).
-  (4) TOTAL uncertainty που ΑΝΤΙΔΡΑ σε perception-OOD: ο seed z0 της δυναμικής διαταράσσεται με
-      σ_perc = sqrt(aleatoric² + epistemic_perception²) (μετρημένα από το VAE). Έτσι το dynamics
-      band μεγαλώνει υπό θόρυβο (το παλιό ΔΕΝ το έκανε). Decomposition: dynamics-only vs total.
-  (5) Headline ΟΠΤΙΚΟΠΟΙΗΣΕΙΣ: «umbrella» band σε CALM vs OOD (near-failure) window, όχι τυχαίο.
+FIXES vs uncertainty.py
+  (1) LOCKED (per-rollout) dropout in the LSTM. The old one resampled the mask at EVERY step -> uncorrelated,
+      over-dispersed band (it needed s_cal~0.27). Here ONE mask per rollout (variational dropout
+      a la Gal & Ghahramani), both in TRAINING and in MC -> consistent, correct epistemic.
+  (2) PER-DIM recalibration (a vector s[dim]) instead of one global scalar. Position & velocity have
+      different error scales; a single scalar cannot calibrate both.
+  (3) PROPER metrics: Gaussian NLL + per-level coverage (reliability diagram) + sharpness, NOT
+      coverage alone (a huge band covers trivially).
+  (4) TOTAL uncertainty that REACTS to perception OOD: the dynamics seed z0 is perturbed with
+      σ_perc = sqrt(aleatoric² + epistemic_perception²) (measured from the VAE). This way the dynamics
+      band grows under noise (the old one did NOT). Decomposition: dynamics-only vs total.
+  (5) Headline VISUALIZATIONS: the "umbrella" band on a CALM vs an OOD (near-failure) window, not a random one.
 
-Epistemic vs Aleatoric (ξεχωριστά, όπου έχει νόημα):
-  * Perception epistemic = spread των T MC-dropout encodings του ΙΔΙΟΥ frame (πόσο «δεν ξέρει» ο encoder).
-  * Perception aleatoric = το logvar του VAE (θόρυβος εισόδου· εδώ αποδεικνύεται ~επίπεδο -> το λέμε τίμια).
-  * Dynamics epistemic   = spread των T locked-mask MC-dropout rollouts (πόσο «δεν ξέρει» η δυναμική).
+Epistemic vs Aleatoric (separately, where it makes sense):
+  * Perception epistemic = spread of the T MC-dropout encodings of the SAME frame (how much the encoder "does not know").
+  * Perception aleatoric = the VAE's logvar (input noise; here it turns out ~flat -> we say so honestly).
+  * Dynamics epistemic   = spread of the T locked-mask MC-dropout rollouts (how much the dynamics "does not know").
   * Total                = perception ⊕ dynamics (seed-perturbation + dropout rollout).
 
-Kaggle: placeholders <...> patched by kaggle-run.ipynb. Run:  !python3 cartpole/uncertainty_alt.py
-Set TRAIN_DROPOUT_* = False για load από τα <dropout-lstm>/<dropout-vae> checkpoints.
+Paths come from config.py (override with OUTPUT_DIR / CARTPOLE_* env vars). Run:  !python3 cartpole/uncertainty_alt.py
+Set TRAIN_DROPOUT_* = False to load from the CARTPOLE_DROPOUT_LSTM/CARTPOLE_DROPOUT_VAE checkpoints.
 """
 import os
 from os import makedirs
@@ -45,18 +45,19 @@ from loader import list_npz, LatentSequenceDataset, VaePairDataset, load_norm_st
 from vae import VAE
 from lstm import LatentPredictor          # baseline (no dropout) — imported, NOT modified
 
-# ---------------------------------------------------------------------------
-# CONFIG  (placeholders <...> patched by kaggle-run.ipynb)
-# ---------------------------------------------------------------------------
-DATA_ROOT = "<cartpole-dataset>"
-NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "<cartpole-baseline-vae>"
-BASELINE_LSTM_CKPT = "<cartpole-baseline-lstm>"
-DROPOUT_LSTM_CKPT = "<dropout-lstm>"
-DROPOUT_VAE_CKPT = "<dropout-vae>"
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, DROPOUT_LSTM, DROPOUT_VAE, outputs
 
-LATENT_ROOT = "/kaggle/working/cartpole_unc_alt_latents"
-SAVE_DIR = "/kaggle/working/cartpole_uncertainty_alt"
+# ---------------------------------------------------------------------------
+# CONFIG  (paths from config.py via paths.py)
+# ---------------------------------------------------------------------------
+NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
+VAE_CKPT = BASELINE_VAE
+BASELINE_LSTM_CKPT = BASELINE_LSTM
+DROPOUT_LSTM_CKPT = DROPOUT_LSTM
+DROPOUT_VAE_CKPT = DROPOUT_VAE
+
+LATENT_ROOT = outputs("cartpole_unc_alt_latents")
+SAVE_DIR = outputs("cartpole_uncertainty_alt")
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 4, 60
 N_ACTIONS, HIDDEN, LAYERS = 2, 64, 2
@@ -84,11 +85,11 @@ NUM_WORKERS, SEED = 2, 0
 # --- MC dropout / uncertainty ---
 T_MC = 30                    # MC passes (epistemic)
 T_SEED = 16                  # MC encodings/frame for perception-epistemic seed std (Part 3)
-RECAL_LEVEL = 0.95           # επίπεδο για το per-dim recalibration
+RECAL_LEVEL = 0.95           # level for the per-dim recalibration
 
 # --- visual-noise sweep on TEST images before encoding ---
 NOISE_TYPE = "gaussian"
-NOISE_LEVELS = [0.0, 0.10, 0.30]         # 0.0 = clean· πρέπει να περιέχει το 0.0 (fit recal/calibration)
+NOISE_LEVELS = [0.0, 0.10, 0.30]         # 0.0 = clean; must contain 0.0 (fits recal/calibration)
 NOISE_SEED = 42
 
 WINDOW_SEED = 0
@@ -138,10 +139,10 @@ def make_noise_fn(ntype, level, seed, device):
 
 
 # ---------------------------------------------------------------------------
-# Metrics & calibration  (gt/mean/std σε STANDARDIZED μονάδες· shapes (N,L,D) ή (N,D))
+# Metrics & calibration  (gt/mean/std in STANDARDIZED units; shapes (N,L,D) or (N,D))
 # ---------------------------------------------------------------------------
 def coverage(gt, mean, std, z, eps=1e-8):
-    """Κλάσμα σημείων με |gt-mean| <= z*std (scalar, overall)."""
+    """Fraction of points with |gt-mean| <= z*std (scalar, overall)."""
     return float((np.abs(gt - mean) <= z * (std + eps)).mean())
 
 
@@ -151,15 +152,15 @@ def coverage_per_dim(gt, mean, std, z, eps=1e-8):
 
 
 def gaussian_nll(gt, mean, std, eps=1e-8):
-    """Mean negative log-likelihood του gt υπό N(mean, std²). ΧΑΜΗΛΟΤΕΡΟ=καλύτερο.
-    Τιμωρεί ΚΑΙ το πολύ-φαρδύ (over-dispersed) ΚΑΙ το πολύ-στενό (over-confident) band."""
+    """Mean negative log-likelihood of gt under N(mean, std²). LOWER=better.
+    Penalizes BOTH the too-wide (over-dispersed) AND the too-narrow (over-confident) band."""
     s = std + eps
     return float((0.5 * np.log(2 * np.pi) + np.log(s) + 0.5 * ((gt - mean) / s) ** 2).mean())
 
 
 def recal_per_dim(gt, mean, std, level=RECAL_LEVEL, eps=1e-8):
-    """Per-dimension πολλαπλασιαστής s[D] ώστε το `level` interval να καλιμπράρεται ανά dim.
-    s[d] = empirical(level-quantile of |gt-mean|/std στη dim d) / Z[level]. Fit σε CLEAN."""
+    """Per-dimension multiplier s[D] so that the `level` interval is calibrated per dim.
+    s[d] = empirical(level-quantile of |gt-mean|/std in dim d) / Z[level]. Fit on CLEAN."""
     r = np.abs(gt - mean) / (std + eps)
     r2 = r.reshape(-1, r.shape[-1])
     return np.percentile(r2, 100 * level, axis=0) / Z[level]          # (D,)
@@ -170,7 +171,7 @@ def apply_recal(std, s_vec):
 
 
 def metrics_block(gt, mean, std):
-    """ -> dict με NLL, sharpness (mean std), cov@95, RMSE (standardized)."""
+    """ -> dict with NLL, sharpness (mean std), cov@95, RMSE (standardized)."""
     return {"nll": gaussian_nll(gt, mean, std),
             "sharp": float(std.mean()),
             "cov95": coverage(gt, mean, std, Z[0.95]),
@@ -178,8 +179,8 @@ def metrics_block(gt, mean, std):
 
 
 def plot_reliability(gt, mean, std, s_vec, tag, save_dir, prefix):
-    """Reliability diagram (nominal vs empirical coverage) raw + per-dim-recalibrated, ΚΑΙ
-    per-dim coverage@95 bars -> δείχνει ΠΟΥ ήταν κακο-καλιμπραρισμένο."""
+    """Reliability diagram (nominal vs empirical coverage) raw + per-dim-recalibrated, AND
+    per-dim coverage@95 bars -> shows WHERE it was mis-calibrated."""
     levels = sorted(Z.keys())
     emp = [coverage(gt, mean, std, Z[q]) for q in levels]
     std_c = apply_recal(std, s_vec)
@@ -211,7 +212,7 @@ def plot_reliability(gt, mean, std, s_vec, tag, save_dir, prefix):
 #  PERCEPTION (dropout VAE)  — epistemic (MC) vs aleatoric (logvar)
 # ===========================================================================
 class VAE_MC(nn.Module):
-    """Baseline VAE + dropout στον encoder feature vector και στα decode features."""
+    """Baseline VAE + dropout on the encoder feature vector and on the decode features."""
     def __init__(self, latent_size=64, in_channels=6, out_channels=3, p_drop=0.1):
         super().__init__()
         self.latent_size = latent_size
@@ -310,7 +311,7 @@ def _noisy_stack(img_t, img_tp1, device, noise_fn):
 
 @torch.no_grad()
 def mc_encode_collect(model, loader, device, noise_fn, T):
-    """T στοχαστικά encodings/frame -> (mu_mean, epi_std, ale_std, gt), καθένα (N, N_SUP) standardized."""
+    """T stochastic encodings/frame -> (mu_mean, epi_std, ale_std, gt), each (N, N_SUP) standardized."""
     model.eval(); enable_dropout(model)
     MU, EPI, ALE, GT = [], [], [], []
     for img_t, img_tp1, action, state_t, state_tp1 in tqdm(loader, desc="VAE MC", leave=False):
@@ -447,8 +448,8 @@ def run_perception(device, mean, std, mean4, std4_np, mc_vae):
 #  DYNAMICS (dropout LSTM, LOCKED masks)  +  TOTAL (perception ⊕ dynamics)
 # ===========================================================================
 class LatentPredictorVarMC(nn.Module):
-    """Baseline arch + ΕΝΑ locked dropout πριν το residual head. Το mask δειγματίζεται ΜΙΑ φορά
-    ανά rollout (sample_mask) και μένει σταθερό σε όλα τα βήματα -> variational/recurrent-style MC."""
+    """Baseline arch + ONE locked dropout before the residual head. The mask is sampled ONCE
+    per rollout (sample_mask) and stays fixed across all steps -> variational/recurrent-style MC."""
     def __init__(self, latent=64, action_dim=2, hidden=64, layers=2, p_drop=0.1):
         super().__init__()
         self.hidden, self.layers, self.p_drop = hidden, layers, p_drop
@@ -462,7 +463,7 @@ class LatentPredictorVarMC(nn.Module):
                 torch.zeros(self.layers, b, self.hidden, device=device))
 
     def sample_mask(self, B, device):
-        """ΕΝΑ inverted-dropout Bernoulli mask (B,hidden) για ΟΛΟ το rollout."""
+        """ONE inverted-dropout Bernoulli mask (B,hidden) for the WHOLE rollout."""
         if self.p_drop <= 0:
             self._mask = None; return
         keep = 1.0 - self.p_drop
@@ -527,7 +528,7 @@ def _eval_epoch_lstm(model, loader, device, std4):
 
 
 def train_dropout_lstm(device, mean, std, std4):
-    """Mirror lstm.py recipe, με LOCKED dropout. Pre-encode CLEAN με baseline VAE."""
+    """Mirror the lstm.py recipe, with LOCKED dropout. Pre-encode CLEAN with the baseline VAE."""
     vae = VAE(latent_size=LATENT_SIZE).to(device)
     vae.load_state_dict(torch.load(VAE_CKPT, map_location=device)); vae.eval()
     from vae import encode_fn
@@ -576,7 +577,7 @@ def train_dropout_lstm(device, mean, std, std4):
 @torch.no_grad()
 def precompute_latents_unc(base_vae, drop_vae, root, out_root, noise_fn, device, batch=256):
     """Cache per frame: z (baseline μ), zlogvar (baseline -> aleatoric), zepi (dropout-VAE MC std
-    -> perception epistemic). Image noise εφαρμόζεται ΠΡΙΝ το encoding."""
+    -> perception epistemic). Image noise is applied BEFORE encoding."""
     makedirs(out_root, exist_ok=True)
     base_vae.eval(); drop_vae.eval(); enable_dropout(drop_vae)
     for f in tqdm(list_npz(root), desc="precompute unc", leave=False):
@@ -599,7 +600,7 @@ def precompute_latents_unc(base_vae, drop_vae, root, out_root, noise_fn, device,
 
 
 class UncLatentSeq(Dataset):
-    """Όπως LatentSequenceDataset + επιστρέφει seed aleatoric (logvar0) & perception-epistemic (zepi0)."""
+    """Like LatentSequenceDataset + also returns the seed aleatoric (logvar0) & perception-epistemic (zepi0)."""
     def __init__(self, root, seq_len, stride, mean, std):
         self.seq_len = seq_len
         self.mean = np.asarray(mean, np.float32); self.std = np.asarray(std, np.float32)
@@ -631,7 +632,7 @@ class UncLatentSeq(Dataset):
 @torch.no_grad()
 def mc_collect_dynamics(model, loader, device, T, perturb_seed):
     """T locked-mask rollouts. perturb_seed=False -> DYNAMICS-only epistemic·
-    True -> TOTAL (seed z0 ~ N(z0, ale²+epi²) από το VAE). -> (mean, std, gt) (N,L,N_SUP) standardized."""
+    True -> TOTAL (seed z0 ~ N(z0, ale²+epi²) from the VAE). -> (mean, std, gt) (N,L,N_SUP) standardized."""
     model.eval()
     MEAN, STD, GT = [], [], []
     for z_t, action, zlogvar0, zepi0, state_tp1 in tqdm(loader, desc=("TOTAL" if perturb_seed else "DYN"), leave=False):
@@ -665,7 +666,7 @@ def baseline_collect(model, loader, device):
 
 
 def pick_windows(gt, mean4, std4):
-    """ -> (calm_w, ood_w): window με ΜΙΚΡΟΤΕΡΟ / ΜΕΓΑΛΥΤΕΡΟ max|θ| (physical). OOD ≈ near-failure."""
+    """ -> (calm_w, ood_w): the window with the SMALLEST / LARGEST max|θ| (physical). OOD ~ near-failure."""
     theta = gt[:, :, 2] * std4[2] + mean4[2]
     mx = np.abs(theta).max(axis=1)
     return int(np.argmin(mx)), int(np.argmax(mx))
@@ -800,7 +801,7 @@ def main():
     std4_np = np.asarray(std[:N_SUP], np.float64)
     std4 = torch.tensor(std4_np, device=device, dtype=torch.float32)
 
-    # dropout VAE: χρειάζεται ΚΑΙ από perception ΚΑΙ από total -> φτιάξ' το μία φορά
+    # dropout VAE: needed by BOTH perception AND total -> build it once
     if TRAIN_DROPOUT_VAE:
         mc_vae = train_dropout_vae(device, mean, std)
     else:

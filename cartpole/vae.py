@@ -1,13 +1,13 @@
 """
-vae.py — Physically-interpretable VAE για CartPole (baseline, notebook-ready).
+vae.py — Physically-interpretable VAE for CartPole (baseline, notebook-ready).
 
-Χαρακτηριστικά:
-  * ΕΙΣΟΔΟΣ 2 διαδοχικά frames (stack -> 6 κανάλια) -> κωδικοποίηση ταχυτήτων.
-  * SPLIT-β KL: μικρό σταθερό BETA_PHYS στις 4 φυσικές dims, beta_style annealed 0->1
-    στις υπόλοιπες 60.
-  * Supervised alignment των 4 πρώτων dims με standardized φυσικά states.
-  * Per-element mean losses· ξεχωριστά components στο log.
-  * Validation με physical RMSE ανά μέγεθος + best-model saving + EARLY STOPPING.
+Features:
+  * INPUT is 2 consecutive frames (stack -> 6 channels) -> velocities become encodable.
+  * Split-β KL: small fixed BETA_PHYS on the 4 physical dims, beta_style annealed 0->1
+    on the remaining 60.
+  * Supervised alignment of the first 4 dims with the standardized physical states.
+  * Per-element mean losses; components logged separately.
+  * Validation with physical RMSE per quantity + best-model saving + EARLY STOPPING.
 """
 import os
 import numpy as np
@@ -20,14 +20,15 @@ from tqdm.auto import tqdm
 
 from loader import VaePairDataset, load_norm_stats
 
+from paths import DATA_ROOT, outputs
+
 #
 #  Config
 #
-DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/cartpole_baseline_vae"
+SAVE_DIR = outputs("cartpole_baseline_vae")
 
 LATENT_SIZE = 64
 N_SUP = 4          # [x, x_dot, theta, theta_dot]

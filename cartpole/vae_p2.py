@@ -1,43 +1,43 @@
 """
-vae_p2.py — Principle 2 (Aligned in/equivariance) VAE για CartPole.
+vae_p2.py — Principle 2 (aligned in/equivariance) VAE for CartPole.
 
-ΣΧΕΔΙΑΣΤΙΚΗ ΑΠΟΦΑΣΗ — "P2 ΜΟΝΟ ΤΟΥ" (απομονωμένο, πάνω στο baseline):
-  Το paper (Fig. 3C/D) συγκρίνει ΚΑΘΕ αρχή ΞΕΧΩΡΙΣΤΑ ως ablation πάνω στο baseline
-  ("Baseline", "Enhancement by Principle 1", "Enhancement by Principle 2"). Άρα εδώ
-  κρατάμε ΑΚΡΙΒΩΣ την αρχιτεκτονική του baseline (ένας encoder, 6-κάναλη είσοδος
-  stack(frame_t,frame_t+1), 64 latent, supervised τα 4 πρώτα dims) και προσθέτουμε
-  ΜΟΝΟ το in/equivariance loss -> κάθε διαφορά οφείλεται καθαρά στην Αρχή 2.
+DESIGN DECISION — "P2 ON ITS OWN" (isolated, on top of the baseline):
+  The paper (Fig. 3C/D) compares EACH principle SEPARATELY as an ablation over the baseline
+  ("Baseline", "Enhancement by Principle 1", "Enhancement by Principle 2"). So here we
+  keep the baseline architecture EXACTLY (one encoder, 6-channel input
+  stack(frame_t,frame_t+1), 64 latent, first 4 dims supervised) and add
+  ONLY the in/equivariance loss -> any difference is cleanly attributable to Principle 2.
 
-ΕΝΕΡΓΟΙ ΜΕΤΑΣΧΗΜΑΤΙΣΜΟΙ (πάνω στα ερμηνεύσιμα φυσικά dims mu[:, :4]):
+ACTIVE TRANSFORMS (on the interpretable physical dims mu[:, :4]):
 
-  (A) EQUIVARIANCE ΘΕΣΗΣ (object-only translation via segmentation)  -> dim x (index 0)
-      g = οριζόντια μετατόπιση ΜΟΝΟ του ΚΙΝΟΥΜΕΝΟΥ αντικειμένου (κάρο+κοντάρι) κατά dpx
-          pixels· η ΡΑΓΑ/φόντο μένουν ΣΤΑΘΕΡΑ (φυσικά σωστό: η ράγα είναι το world frame).
-          Ίδιο pipeline με το rotation: segment -> shift μόνο του αντικειμένου -> recompose.
-          Κάρο & ράγα είναι ΚΑΙ ΤΑ ΔΥΟ μαύρα -> τα ξεχωρίζουμε γεωμετρικά: η ράγα είναι
-          full-width οριζόντια γραμμή, το κάρο τοπικό blob. Το bg ανακατασκευάζεται ως
-          λευκό + συνεχής ράγα.
-      h = μετατόπιση ΜΟΝΟ του x-dim κατά Δx_std. (x_dot/theta/theta_dot invariant:
-          ίδιο dpx και στα 2 frames -> η διαφορά=ταχύτητα δεν αλλάζει.)
-      ΚΛΙΜΑΚΑ: render 600px, world_width=4.8 -> 125 px/μονάδα· resize IMG_W=120 (×0.2)
-      -> 25 px/μονάδα -> px_to_x = 4.8/120 = 0.04 raw/px. Επειδή ο loader επιβλέπει
+  (A) POSITION EQUIVARIANCE (object-only translation via segmentation)  -> dim x (index 0)
+      g = horizontal shift of ONLY the MOVING object (cart+pole) by dpx
+          pixels; the TRACK/background stay FIXED (physically right: the track is the world frame).
+          Same pipeline as the rotation: segment -> shift only the object -> recompose.
+          Cart & track are BOTH black -> we separate them geometrically: the track is a
+          full-width horizontal line, the cart a local blob. The bg is rebuilt as
+          white + a continuous track.
+      h = shift ONLY the x-dim by Δx_std. (x_dot/theta/theta_dot invariant:
+          the same dpx in both frames -> the difference (= velocity) does not change.)
+      SCALE: render 600px, world_width=4.8 -> 125 px/unit; resize IMG_W=120 (x0.2)
+      -> 25 px/unit -> px_to_x = 4.8/120 = 0.04 raw/px. Because the loader supervises
       STANDARDIZED states: Δx_std = dpx * px_to_x / std[x].
 
-  (B) EQUIVARIANCE ΓΩΝΙΑΣ (rotation μέσω color-segmentation)  -> dim theta (index 2)
-      Το κοντάρι έχει ΣΤΑΘΕΡΟ χρώμα tan (202,152,101) -> color-mask απομονώνει ΜΟΝΟ
-      το κοντάρι (κάρο/ράγα μαύρα, φόντο λευκό). Περιστρέφουμε ΜΟΝΟ το masked κοντάρι
-      γύρω από τον άξονα (pivot = βάση του κονταριού) κατά Δθ, ΙΔΙΑ και στα 2 frames.
-      h = μετατόπιση ΜΟΝΟ του theta-dim κατά Δθ_std = Δθ_rad / std[theta]. (x/ταχύτητες
-      invariant: pivot αμετάβλητο -> x ίδιο· ίδια Δθ στα 2 frames -> theta_dot ίδιο.)
-      ΣΗΜ.: VIS_SIGN αντιστοιχεί τη ΦΥΣΙΚΗ φορά του theta στην ΟΠΤΙΚΗ φορά περιστροφής·
-      επιβεβαίωσέ την με SAVE_VIZ=True (γράφει before/after PNGs) και γύρισέ την αν χρειαστεί.
+  (B) ANGLE EQUIVARIANCE (rotation via color segmentation)  -> dim theta (index 2)
+      The pole has a CONSTANT tan color (202,152,101) -> a color mask isolates ONLY
+      the pole (cart/track black, background white). We rotate ONLY the masked pole
+      about the axle (pivot = base of the pole) by Δθ, IDENTICALLY in both frames.
+      h = shift ONLY the theta-dim by Δθ_std = Δθ_rad / std[theta]. (x/velocities
+      invariant: the pivot is unchanged -> same x; same Δθ in both frames -> same theta_dot.)
+      NOTE: VIS_SIGN maps the PHYSICAL sign of theta to the VISUAL direction of rotation;
+      confirm it with SAVE_VIZ=True (writes before/after PNGs) and flip it if needed.
 
-  (C) INVARIANCE ΦΩΤΕΙΝΟΤΗΤΑΣ (το παράδειγμα Αρχής 2 του paper)  -> όλα τα φυσικά dims
-      g = brightness/contrast jitter (ίδιο στα 2 frames). h = identity (δ=0).
+  (C) BRIGHTNESS INVARIANCE (the paper's own Principle 2 example)  -> all physical dims
+      g = brightness/contrast jitter (identical in both frames). h = identity (δ=0).
 
-  (D) REAL-PAIR difference-consistency (η προσέγγιση του original repo)  -> όλα τα dims
-      Για ζεύγη ΠΡΑΓΜΑΤΙΚΩΝ frames: latent_diff ≈ true_state_diff. Δίνει equivariance
-      σήμα ΚΑΙ στη γωνία/ταχύτητες μέσω φυσικών μεταβάσεων (όχι synthetic transform).
+  (D) REAL-PAIR difference-consistency (the original repo's approach)  -> all dims
+      For pairs of REAL frames: latent_diff ~ true_state_diff. Gives an equivariance
+      signal for the angle/velocities too, through physical transitions (not a synthetic transform).
 """
 import os
 import numpy as np
@@ -50,14 +50,15 @@ from tqdm.auto import tqdm
 
 from loader import VaePairDataset, load_norm_stats
 
+from paths import DATA_ROOT, outputs
+
 #
 #  Config  (same paths/hyper as baseline & p1 -> fair comparison)
 #
-DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/cartpole_p2_vae"
+SAVE_DIR = outputs("cartpole_p2_vae")
 
 LATENT_SIZE = 64
 N_SUP = 4    # [x, x_dot, theta, theta_dot] -> index 0=x, 2=theta

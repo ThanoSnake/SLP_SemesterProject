@@ -1,26 +1,26 @@
 """
-vae_p4.py — Principle 4 (Compositional / object-centric DECODING) VAE για LunarLander.
-Loaders/helpers από το LunarLoader.py (τρέξε εκείνο το cell πρώτα). Ανάλογο του cart_pole/principles4.
+vae_p4.py — Principle 4 (compositional / object-centric DECODING) VAE for LunarLander.
+Loaders/helpers from LunarLoader.py (run that cell first). The analogue of cart_pole/principles4.
 
-ΣΚΗΝΗ (χρώματα): μωβ διαστημόπλοιο, κίτρινες σημαίες, γκρι κοντάρια, μαύρος ουρανός, άσπρο έδαφος.
-3 DECODERS (όπως στο paper) -> 3 χρωματικές ομάδες (color segmentation):
-    dec_lander ← physical dims [0:8]   : το ΚΙΝΟΥΜΕΝΟ σκάφος (μωβ)            -> RGB + alpha
-    dec_flags  ← λίγα style dims        : στατικές σημαίες+κοντάρια (κίτρινο+γκρι) -> RGB + alpha
-    dec_bg     ← style dims             : terrain (μαύρος ουρανός + άσπρο έδαφος)   -> RGB (opaque)
+SCENE (colors): purple lander, yellow flags, grey poles, black sky, white ground.
+3 DECODERS (as in the paper) -> 3 color groups (color segmentation):
+    dec_lander <- physical dims [0:8]  : the MOVING craft (purple)               -> RGB + alpha
+    dec_flags  <- a few style dims     : static flags+poles (yellow+grey)        -> RGB + alpha
+    dec_bg     <- style dims           : terrain (black sky + white ground)      -> RGB (opaque)
 
-ΓΙΑΤΙ alpha (διαφορά από CartPole): στο CartPole το φόντο ήταν ΕΝΙΑΙΑ λευκό -> δούλευε το «sum−2»
-χωρίς alpha. Εδώ το φόντο έχει ΔΥΟ χρώματα (μαύρο/άσπρο) και τα foreground αντικείμενα ΚΡΥΒΟΥΝ
-το άσπρο έδαφος, άρα χρειάζεται κανονικό LAYERED ALPHA COMPOSITING (bg πίσω -> flags -> lander).
+WHY alpha (the difference from CartPole): in CartPole the background was UNIFORMLY white -> the "sum−2"
+trick worked without alpha. Here the background has TWO colors (black/white) and the foreground objects OCCLUDE
+the white ground, so proper LAYERED ALPHA COMPOSITING is required (bg at the back -> flags -> lander).
 
-LOSS = σταθμισμένο άθροισμα (ίδια δομή με CartPole):
+LOSS = weighted sum (same structure as CartPole):
     W_OBJ  * mean( MSE(obj_lander, img·mask_lander) + MSE(obj_flags, img·mask_flags)
-                   + MSE(rgb_bg·mask_bg, img·mask_bg) )      # ανακατασκευή ΚΑΘΕ αντικειμένου (πάνω σε μαύρο)
-  + W_FULL * MSE(composite, img)                              # ανακατασκευή ΟΛΗΣ της εικόνας
-  + LAMBDA_SUP * sup + split-β KL                             # ίδιος baseline backbone (P4-only ablation)
-  όπου obj_lander = alpha_lander · rgb_lander  (το alpha εκπαιδεύεται ΕΜΜΕΣΑ, χωρίς ξεχωριστό mask-loss).
+                   + MSE(rgb_bg·mask_bg, img·mask_bg) )      # reconstruct EACH object (on black)
+  + W_FULL * MSE(composite, img)                              # reconstruct the WHOLE image
+  + LAMBDA_SUP * sup + split-β KL                             # same baseline backbone (P4-only ablation)
+  where obj_lander = alpha_lander · rgb_lander  (the alpha is trained INDIRECTLY, with no separate mask loss).
 
-SEGMENTATION: on-the-fly (color_segment_lunar) — nearest-reference-color σε 5 χρώματα -> 3 ομάδες.
-ΑΞΙΟΛΟΓΗΣΗ (paper): full-image reconstruction MSE + SSIM + ΜΕΓΕΘΟΣ μοντέλου (eval_principle4.py).
+SEGMENTATION: on-the-fly (color_segment_lunar) — nearest reference color over 5 colors -> 3 groups.
+EVALUATION (paper): full-image reconstruction MSE + SSIM + model SIZE (eval_principle4.py).
 """
 import os
 import numpy as np
@@ -31,29 +31,30 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from loader import VaePairDataset, load_norm_stats   # ΟΛΟΙ οι loaders ζουν εδώ (VAE+LSTM)
+from loader import VaePairDataset, load_norm_stats   # ALL the loaders live there (VAE+LSTM)
+
+from paths import DATA_ROOT, outputs
 
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_p4_vae"
+SAVE_DIR = outputs("lunarlander_p4_vae")
 
 LATENT_SIZE = 64
 N_SUP = 8                  # [x, y, vx, vy, theta, omega, leg1, leg2]
 SHIFT = 0
 
-# --- ποια dims παίρνει κάθε decoder ---
+# --- which dims each decoder receives ---
 LANDER_DIMS = list(range(N_SUP))                 # [0..7] full physical (pose + legs)
-FLAGS_DIMS = list(range(N_SUP, N_SUP + 8))       # [8..15] λίγα style dims (σημαίες ~στατικές)
-# bg_dims = list(range(N_SUP, LATENT_SIZE))      # [8..63] όλα τα style (terrain) — αυτόματα
+FLAGS_DIMS = list(range(N_SUP, N_SUP + 8))       # [8..15] a few style dims (the flags are ~static)
+# bg_dims = list(range(N_SUP, LATENT_SIZE))      # [8..63] all the style dims (terrain) — automatic
 
 DEC_BASE_LANDER = 16
 DEC_BASE_FLAGS = 8
-DEC_BASE_BG = 16           # ↑ αν το terrain βγαίνει θολό· ↓ για μεγαλύτερη μείωση μεγέθους
+DEC_BASE_BG = 16           # raise if the terrain comes out blurry; lower for a bigger size reduction
 
 W_OBJ = 1.0
 W_FULL = 1.0
@@ -70,13 +71,13 @@ SCHED_PATIENCE = 3
 NUM_WORKERS = 2
 SEED = 0
 
-# --- Color-segmentation references (σε [0,1]). ΠΡΟΣΑΡΜΟΣΕ αν το render σου διαφέρει — δες visualize. ---
+# --- Color-segmentation references (in [0,1]). ADJUST if your render differs — see visualize. ---
 LUNAR_REF_COLORS = torch.tensor([
-    [0.60, 0.20, 0.80],   # 0 lander  (μωβ)
-    [0.90, 0.90, 0.10],   # 1 flag    (κίτρινο)
-    [0.55, 0.55, 0.55],   # 2 pole    (γκρι)
-    [0.00, 0.00, 0.00],   # 3 sky     (μαύρο)
-    [1.00, 1.00, 1.00],   # 4 ground  (άσπρο)
+    [0.60, 0.20, 0.80],   # 0 lander  (purple)
+    [0.90, 0.90, 0.10],   # 1 flag    (yellow)
+    [0.55, 0.55, 0.55],   # 2 pole    (grey)
+    [0.00, 0.00, 0.00],   # 3 sky     (black)
+    [1.00, 1.00, 1.00],   # 4 ground  (white)
 ], dtype=torch.float32)
 LUNAR_GROUPS = torch.tensor([0, 1, 1, 2, 2], dtype=torch.long)   # lander / flags(yellow,gray) / bg(sky,ground)
 
@@ -90,12 +91,12 @@ def _to_img(t, device):
 
 
 # ---------------------------------------------------------------------------
-# COLOR SEGMENTATION (on-the-fly, vectorized) — nearest reference color -> 3 ομάδες
+# COLOR SEGMENTATION (on-the-fly, vectorized) — nearest reference color -> 3 groups
 # ---------------------------------------------------------------------------
 def color_segment_lunar(img, refs=LUNAR_REF_COLORS, groups=LUNAR_GROUPS):
-    """ img: (B,3,H,W) σε [0,1].  Επιστρέφει (mask_lander, mask_flags, mask_bg), καθένα (B,1,H,W) float {0,1},
-    ΑΥΣΤΗΡΟ PARTITION: κάθε pixel ανατίθεται στο ΠΛΗΣΙΕΣΤΕΡΟ reference χρώμα και μετά στην ομάδα του.
-    Robust σε anti-aliasing (το nearest κερδίζει). """
+    """ img: (B,3,H,W) in [0,1].  Returns (mask_lander, mask_flags, mask_bg), each (B,1,H,W) float {0,1},
+    a STRICT PARTITION: every pixel is assigned to the NEAREST reference color and then to its group.
+    Robust to anti-aliasing (nearest wins). """
     B, C, H, W = img.shape
     refs = refs.to(img.device); groups = groups.to(img.device)
     px = img.permute(0, 2, 3, 1).reshape(-1, 3)                       # (N,3)
@@ -106,13 +107,13 @@ def color_segment_lunar(img, refs=LUNAR_REF_COLORS, groups=LUNAR_GROUPS):
 
 @torch.no_grad()
 def visualize_segmentation(npz_path, idx=0, save_path=None):
-    """ Sanity-check ΠΡΙΝ την εκπαίδευση: frame + 3 μάσκες + 3 component GT (αντικείμενο σε ΜΑΥΡΟ). """
+    """ Sanity check BEFORE training: frame + 3 masks + 3 component GTs (object on BLACK). """
     import matplotlib.pyplot as plt
     with np.load(npz_path) as d:
         frame = d["imgs"][idx]
     img = torch.from_numpy(frame).permute(2, 0, 1).unsqueeze(0).float() / 255.0
     ml, mf, mb = color_segment_lunar(img)
-    comps = [(img * m)[0].permute(1, 2, 0).numpy() for m in (ml, mf, mb)]   # object σε μαύρο
+    comps = [(img * m)[0].permute(1, 2, 0).numpy() for m in (ml, mf, mb)]   # object on black
     masks = [m[0, 0].numpy() for m in (ml, mf, mb)]
     titles = ["frame", "mask lander", "mask flags", "mask bg", "obj lander", "obj flags", "obj bg"]
     ims = [frame, masks[0], masks[1], masks[2], comps[0], comps[1], comps[2]]
@@ -121,7 +122,7 @@ def visualize_segmentation(npz_path, idx=0, save_path=None):
         a.imshow(im, cmap=("gray" if im.ndim == 2 else None), vmin=0, vmax=1)
         a.set_title(t, fontsize=9); a.axis("off")
     cover = float((ml + mf + mb).max())
-    fig.suptitle(f"partition check: max overlap = {cover:.2f} (πρέπει=1.0)", fontsize=10)
+    fig.suptitle(f"partition check: max overlap = {cover:.2f} (must be 1.0)", fontsize=10)
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=120); print("saved:", save_path)
@@ -130,8 +131,8 @@ def visualize_segmentation(npz_path, idx=0, save_path=None):
 
 
 # ---------------------------------------------------------------------------
-# DATASET / HELPERS: από LunarLoader.py (VaePairDataset 5-item, load_norm_stats, precompute_latents,
-# LatentSequenceDataset για LSTM). Οι μάσκες ΔΕΝ αποθηκεύονται — παράγονται on-the-fly.
+# DATASET / HELPERS: from LunarLoader.py (VaePairDataset 5-item, load_norm_stats, precompute_latents,
+# LatentSequenceDataset for the LSTM). The masks are NOT stored — they are produced on the fly.
 # ---------------------------------------------------------------------------
 
 
@@ -155,7 +156,7 @@ class _BaseEncoder(nn.Module):
 
 
 class TinyDecoder(nn.Module):
-    """ z -> (out_ch, 80, 120). 10x15 -> 80x120 (×8). out_ch=4 (RGB+alpha) ή 3 (RGB). """
+    """ z -> (out_ch, 80, 120). 10x15 -> 80x120 (x8). out_ch=4 (RGB+alpha) or 3 (RGB). """
     def __init__(self, in_dim, base_channels, out_ch):
         super().__init__()
         self.base = base_channels
@@ -199,11 +200,11 @@ class VAE_P4(nn.Module):
         rgb_b = torch.sigmoid(self.dec_bg(z[:, self.bg_dims]))         # opaque backdrop
         rgb_l, a_l = torch.sigmoid(ol[:, :3]), torch.sigmoid(ol[:, 3:4])
         rgb_f, a_f = torch.sigmoid(of[:, :3]), torch.sigmoid(of[:, 3:4])
-        # layered alpha compositing: bg (πίσω) -> flags -> lander (μπροστά)
+        # layered alpha compositing: bg (back) -> flags -> lander (front)
         out = rgb_b
         out = a_f * rgb_f + (1.0 - a_f) * out
         out = a_l * rgb_l + (1.0 - a_l) * out
-        # «αντικείμενο πάνω σε μαύρο» (για το per-object recon)
+        # "object on black" (for the per-object recon)
         obj_l, obj_f = a_l * rgb_l, a_f * rgb_f
         return out, (obj_l, obj_f, rgb_b)
 
@@ -260,7 +261,7 @@ def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
         img_tp1 = _to_img(img_tp1, device)
         x = torch.cat([img_t, img_tp1], dim=1)
         st = state_t.to(device, non_blocking=True)
-        masks = color_segment_lunar(img_t)                # on-the-fly στη GPU
+        masks = color_segment_lunar(img_t)                # on the fly, on the GPU
 
         with torch.set_grad_enabled(train):
             composite, mu, logvar, comps = model(x)
@@ -322,7 +323,7 @@ if __name__ == "__main__":
         else:
             bad_epochs += 1
             if bad_epochs >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}."); break
+                print(f"Early stopping at epoch {epoch}."); break
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_p4_last.pth"))
     print("Best val score:", best_val)

@@ -1,16 +1,16 @@
 """
-lstm_baseline_control.py — ENCODED-mode LSTM (baseline VAE) στο ΠΛΗΡΕΣ control+elite dataset.
+lstm_baseline_control.py — ENCODED-mode LSTM (baseline VAE) on the FULL control+elite dataset.
 
-Ανάλογο του lstm_p1_control.py, αλλά για το baseline VAE:
-  * ΞΑΝΑΧΡΗΣΙΜΟΠΟΙΕΙ το ΙΔΙΟ παγωμένο baseline VAE -> μόνο precompute latents + train LSTM.
-  * MULTI-ROOT: ενώνει control + elite (train/val/test) μέσω loader_control, χωρίς αντιγραφή.
+The counterpart of lstm_p1_control.py, but for the baseline VAE:
+  * REUSES the SAME frozen baseline VAE -> only precompute latents + train the LSTM.
+  * MULTI-ROOT: unions control + elite (train/val/test) via loader_control, without copying.
   * WIND_FILTER: 'all' (default) | 'clean' | 'wind'.
-  * Ίδιες training παράμετροι με το P1-control LSTM για τίμια baseline-vs-P1 σύγκριση.
+  * The same training parameters as the P1-control LSTM, for a fair baseline-vs-P1 comparison.
 
-ΣΗΜ. norm_stats: χρησιμοποίησε τα ΑΡΧΙΚΑ norm_stats του dataset όπου εκπαιδεύτηκε το VAE,
-όχι combined stats από control+elite. Τα mu[:8] του VAE είναι σε εκείνο το standardized space.
+NOTE on norm_stats: use the ORIGINAL norm_stats of the dataset the VAE was trained on,
+not combined stats from control+elite. The VAE's mu[:8] lives in that standardized space.
 
-Τρέξε από το SLP_SemesterProject root:
+Run from the SLP_SemesterProject root:
   python lunarlander/lstm_baseline_control.py
 """
 import os
@@ -28,9 +28,11 @@ from vae import VAE
 from lstm import LatentPredictor
 from loader_control import load_norm_stats, precompute_latents, LatentSequenceDataset
 
+from paths import NORM_STATS as DEFAULT_NORM_STATS, BASELINE_VAE, outputs
+
 
 # ===========================================================================
-# CONFIG — όλα env-overridable.
+# CONFIG — everything env-overridable.
 # ===========================================================================
 CONTROL_ROOT = os.environ.get("CONTROL_ROOT", os.path.expanduser("~/lunarlander_control_data"))
 ELITE_ROOT = os.environ.get(
@@ -39,13 +41,10 @@ ELITE_ROOT = os.environ.get(
 )
 DATA_ROOTS = [CONTROL_ROOT, ELITE_ROOT]
 
-VAE_CKPT = os.environ.get("VAE_CKPT", "<lunarlander-baseline-vae>")
-NORM_STATS = os.environ.get("NORM_STATS", "<lunarlander-dataset>/norm_stats.npz")
+VAE_CKPT = os.environ.get("VAE_CKPT", BASELINE_VAE)
+NORM_STATS = os.environ.get("NORM_STATS", DEFAULT_NORM_STATS)
 
-_OUT = os.environ.get(
-    "OUT_ROOT",
-    "/kaggle/working" if isdir("/kaggle/working") else os.path.expanduser("~/lunarlander_runs"),
-)
+_OUT = os.environ.get("OUT_ROOT", outputs())
 LATENT_ROOT = os.environ.get("LATENT_ROOT", join(_OUT, "lunarlander_baseline_control_latents"))
 SAVE_DIR = os.environ.get("SAVE_DIR", join(_OUT, "lunarlander_baseline_control_lstm"))
 
@@ -160,7 +159,7 @@ def train_epoch(model, loader, optimizer, device, p_tf, cur_len, desc=""):
 
 @torch.no_grad()
 def eval_epoch(model, loader, device, std_phys, desc=""):
-    """FREE-RUNNING στο πλήρες SEQ_LEN -> physical MSE ανά horizon vs clean state."""
+    """FREE-RUNNING at the full SEQ_LEN -> physical MSE per horizon vs the clean state."""
     model.eval()
     se, n = None, 0
     for batch in tqdm(loader, desc=desc, leave=False):
@@ -266,7 +265,7 @@ if __name__ == "__main__":
         else:
             bad += 1
             if bad >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}.")
+                print(f"Early stopping at epoch {epoch}.")
                 break
 
     torch.save(model.state_dict(), join(SAVE_DIR, "lstm_baseline_control_last.pth"))

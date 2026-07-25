@@ -1,21 +1,21 @@
 """
-extension_main_shield.py — Επέκταση 4: world-model ως ΚΑΘΕΤΗ ασπίδα (main-only MPC).
+extension_main_shield.py — Extension 4: the world model as a VERTICAL shield (main-only MPC).
 
-ΓΙΑΤΙ: το διαγνωστικό (mpc_model_sanity.py) έδειξε ότι το world-model προβλέπει ΑΞΙΟΠΙΣΤΑ τη
-σχέση main→vy (κάθετα), αλλά έχει ~ΝΕΚΡΟ action-conditioning στα πλευρικά engines (left/right→vx).
-Άρα ΔΕΝ κάνουμε full MPC. Αντ' αυτού:
-  * PID  -> οριζόντιος/γωνιακός έλεγχος (left/right/noop) — δουλεύει (enc_pid ~80% landing).
-  * MPC  -> ΜΟΝΟ το main (κάθετο), στο 1-D υποπρόβλημα όπου το μοντέλο είναι έμπιστο.
+WHY: the diagnostic (mpc_model_sanity.py) showed that the world model predicts the main->vy
+relation (vertical) RELIABLY, but has ~DEAD action conditioning on the side engines (left/right->vx).
+So we do NOT do full MPC. Instead:
+  * PID  -> horizontal/angular control (left/right/noop) — it works (enc_pid ~80% landing).
+  * MPC  -> ONLY the main engine (vertical), on the 1-D subproblem where the model is trustworthy.
 
-Έλεγχος main = "delay-the-burn": σε κάθε βήμα δοκιμάζει «ξεκίνα main από βήμα j» (j=0..K), κάνει
-vertical dream στο LSTM, και διαλέγει το profile με τη μικρότερη ΚΑΘΕΤΗ ποινή
-(vy² σταθμισμένο με εγγύτητα στο έδαφος + fuel). Εκτελεί την 1η ενέργεια (main ή noop).
+Main control = "delay-the-burn": at each step it tries "start main at step j" (j=0..K), runs a
+vertical dream through the LSTM, and picks the profile with the smallest VERTICAL penalty
+(vy² weighted by proximity to the ground + fuel). It executes the first action (main or noop).
 
-Arbitration: αν το lander είναι ΓΕΡΜΕΝΟ (|theta|/|omega| μεγάλα) και ο PID θέλει πλευρικό engine
--> προτεραιότητα στη διόρθωση γωνίας (το main σε κλίση σπρώχνει πλαγίως). Αλλιώς το MPC ελέγχει
-πλήρως το main (on ΚΑΙ off — μπορεί να καταστείλει το main του PID).
+Arbitration: if the lander is TILTED (|theta|/|omega| large) and the PID wants a side engine
+-> the angle correction takes priority (firing main while tilted pushes sideways). Otherwise the MPC has
+full control of main (on AND off — it may suppress the PID's main).
 
-Imports από canonical modules· cwd: lunarlander/. Απαιτεί gymnasium[box2d].
+Imports from the canonical modules; cwd: lunarlander/. Requires gymnasium[box2d].
 """
 import os
 import numpy as np
@@ -32,23 +32,24 @@ from vae_p3 import VAE_P3
 from lstm import LatentPredictor
 from loader import load_norm_stats
 
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, P1_LSTM, P1_VAE, P2_LSTM, P2_VAE, P3_SEMI_LSTM, P3_SEMI_VAE, P3_WEAK_LSTM, P3_WEAK_VAE, outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG — placeholders <...> τα συμπληρώνει ο patcher
+# CONFIG  (paths from config.py via paths.py)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_ext4_main_shield"
+SAVE_DIR = outputs("lunarlander_ext4_main_shield")
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
 N_ACTIONS, HIDDEN, LAYERS = 4, 64, 2
 
 MODEL = "p1"
 MODEL_REGISTRY = {
-    "baseline": (lambda: VAE(latent_size=LATENT_SIZE),    "<lunarlander-baseline-vae>", "<lunarlander-baseline-lstm>"),
-    "p1":       (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG), "<lunarlander-p1-vae>",       "<lunarlander-p1-lstm>"),
-    "p2":       (lambda: VAE_P2(latent_size=LATENT_SIZE),  "<lunarlander-p2-vae>",       "<lunarlander-p2-lstm>"),
-    "p3_semi":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  "<lunarlander-p3-semi-vae>",  "<lunarlander-p3-semi-lstm>"),
-    "p3_weak":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  "<lunarlander-p3-weak-vae>",  "<lunarlander-p3-weak-lstm>"),
+    "baseline": (lambda: VAE(latent_size=LATENT_SIZE),    BASELINE_VAE, BASELINE_LSTM),
+    "p1":       (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG), P1_VAE,       P1_LSTM),
+    "p2":       (lambda: VAE_P2(latent_size=LATENT_SIZE),  P2_VAE,       P2_LSTM),
+    "p3_semi":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  P3_SEMI_VAE,  P3_SEMI_LSTM),
+    "p3_weak":  (lambda: VAE_P3(latent_size=LATENT_SIZE),  P3_WEAK_VAE,  P3_WEAK_LSTM),
 }
 
 N_EPISODES = 20
@@ -61,10 +62,10 @@ RECORD_GIF = True
 GIF_FPS = 30
 
 # --- Vertical MPC (main-only) ---
-VERT_HORIZON = 10                 # ≤ train window (το μοντέλο είναι αξιόπιστο ~10 βήματα)
-Y_GROUND_SCALE = 0.40             # βάρος vy² ~ exp(-y/scale): μεγάλο κοντά στο έδαφος
-VERT_FUEL_W = 0.05                # ήπια ποινή καυσίμου (να μη μπλοκάρει αναγκαίο braking)
-THETA_SAFE = 0.20                 # rad: πάνω από αυτό -> "γερμένο" -> PID-γωνία προτεραιότητα
+VERT_HORIZON = 10                 # <= the train window (the model is reliable for ~10 steps)
+Y_GROUND_SCALE = 0.40             # weight vy² ~ exp(-y/scale): large close to the ground
+VERT_FUEL_W = 0.05                # mild fuel penalty (must not block necessary braking)
+THETA_SAFE = 0.20                 # rad: above this -> "tilted" -> PID angle correction takes priority
 OMEGA_SAFE = 0.40                 # rad/s
 
 DIM_NAMES = ["x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2"]
@@ -86,11 +87,11 @@ def make_env():
             return gym.make(env_id, **kw)
         except Exception as e:
             last_err = e
-    raise RuntimeError(f"LunarLander δεν βρέθηκε (pip install 'gymnasium[box2d]'). {last_err}")
+    raise RuntimeError(f"LunarLander not found (pip install 'gymnasium[box2d]'). {last_err}")
 
 
 # ---------------------------------------------------------------------------
-# PD heuristic (ίδιο με dataCollect) + encoder helpers
+# PD heuristic (same as dataCollect) + encoder helpers
 # ---------------------------------------------------------------------------
 def heuristic_control(s):
     x, y, vx, vy, theta, omega = float(s[0]), float(s[1]), float(s[2]), float(s[3]), float(s[4]), float(s[5])
@@ -135,16 +136,16 @@ def save_gif(frames, path, fps=GIF_FPS):
 
 
 # ---------------------------------------------------------------------------
-# Vertical MPC (main-only) — "delay-the-burn" enumeration στο αξιόπιστο main→vy
+# Vertical MPC (main-only) — "delay-the-burn" enumeration on the reliable main->vy axis
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def vertical_main_decision(lstm, z0, mean_t, std_t, device):
-    """ Δοκιμάζει 'ξεκίνα main από βήμα j' (j=0..K· j=K -> ποτέ). Vertical dream -> ποινή
-    Σ w_ground(y)·vy² + fuel. Επιστρέφει 1η ενέργεια του best profile: 2 (main) ή 0 (noop). """
+    """ Tries 'start main at step j' (j=0..K; j=K -> never). Vertical dream -> penalty
+    Σ w_ground(y)·vy² + fuel. Returns the first action of the best profile: 2 (main) or 0 (noop). """
     K = VERT_HORIZON
     seqs = torch.zeros(K + 1, K, dtype=torch.long, device=device)        # (K+1, K)
     for j in range(K + 1):
-        seqs[j, j:] = 2                                                  # main από j και μετά
+        seqs[j, j:] = 2                                                  # main from j onwards
     N = K + 1
     z = z0.expand(N, -1).contiguous()
     hid = lstm.init_hidden(N, device)
@@ -156,7 +157,7 @@ def vertical_main_decision(lstm, z0, mean_t, std_t, device):
         z, hid = lstm.step(z, F.one_hot(a, N_ACTIONS).float(), hid)
         phys = z[:, :N_SUP] * std8 + mean8
         y, vy = phys[:, 1], phys[:, 3]
-        w_ground = torch.exp(-torch.relu(y) / Y_GROUND_SCALE)            # ~1 κοντά στο έδαφος
+        w_ground = torch.exp(-torch.relu(y) / Y_GROUND_SCALE)            # ~1 close to the ground
         cost += w_ground * (vy * vy) + VERT_FUEL_W * fc[a]
     best = int(torch.argmin(cost).item())
     return int(seqs[best, 0].item())                                     # 2 ή 0
@@ -187,14 +188,14 @@ def run_episode(controller, env, vae, lstm, mean_t, std_t, device, ep_seed, reco
             a_pid = heuristic_control(phys)
             tilted = abs(phys[4]) > THETA_SAFE or abs(phys[5]) > OMEGA_SAFE
             if tilted and a_pid in (1, 3):
-                a = a_pid                                                # γωνία προτεραιότητα
+                a = a_pid                                                # angle correction takes priority
             else:
                 a_vert = vertical_main_decision(lstm, mu, mean_t, std_t, device)  # 2 ή 0
                 n_steps += 1
                 if a_vert == 2:
                     a = 2; n_main_mpc += 1
                 else:
-                    a = a_pid if a_pid in (1, 3) else 0                  # κράτα μικρή διόρθωση γωνίας, αλλιώς noop
+                    a = a_pid if a_pid in (1, 3) else 0                  # keep a small angle correction, else noop
         else:
             raise ValueError(controller)
 

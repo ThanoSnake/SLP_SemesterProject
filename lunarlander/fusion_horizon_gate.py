@@ -1,46 +1,48 @@
 """
 fusion_horizon_gate.py — (C) Horizon-gated blend SINDy↔LSTM (NO re-training).
 
-ΙΔΕΑ: συνδυάζουμε τις δύο προβλέψεις με βάρος που εξαρτάται από τον ορίζοντα:
+IDEA: combine the two predictions with a weight that depends on the horizon:
         pred(h) = w(h)·SINDy(h) + (1−w(h))·LSTM(h)
-Περιμένουμε w(h) να γέρνει προς LSTM σε μικρό ορίζοντα (πιάνει λεπτομέρειες/μη-μοντελοποιημένα)
-και προς SINDy σε μεγάλο (σταθερή φυσική, δεν συσσωρεύει error).
+We expect w(h) to lean toward the LSTM at short horizons (it catches details/unmodelled effects)
+and toward SINDy at long ones (stable physics, does not accumulate error).
 
-ΣΥΝΤΟΝΙΣΜΟΣ (ελάχιστο, closed-form fit στο val — καμία επανεκπαίδευση):
-  Η blended-MSE είναι ΤΕΤΡΑΓΩΝΙΚΗ ως προς w. Με a=SINDy−LSTM, b=LSTM−GT (standardized):
-        MSE(w) = E[(w·a + b)²]  ⇒  w* = −E[a·b]/E[a²],  clipped σε [0,1].
-  Υπολογίζεται ανά horizon (per-dim aggregated) στο val· εφαρμόζεται αυτούσιο στο test.
+TUNING (minimal, closed-form fit on val — no retraining):
+  The blended MSE is QUADRATIC in w. With a=SINDy−LSTM, b=LSTM−GT (standardized):
+        MSE(w) = E[(w·a + b)²]  =>  w* = −E[a·b]/E[a²],  clipped to [0,1].
+  Computed per horizon (per-dim aggregated) on val; applied verbatim on test.
 
-ΠΑΡΑΓΟΜΕΝΑ ανά noise condition:
-  (0) Το ίδιο το gate w(h) vs horizon (δείχνει το crossover LSTM→SINDy)
+OUTPUTS per noise condition:
+  (0) The gate w(h) itself vs horizon (shows the LSTM->SINDy crossover)
   (1) Overall median+IQR: LSTM vs SINDy vs Blend
-  (2) Per-dim median+IQR· (3) Paired Δ (best-single − Blend, >0 ⇒ το blend κερδίζει)
+  (2) Per-dim median+IQR; (3) Paired Δ (best-single − Blend, >0 => the blend wins)
 
-ENV-AGNOSTIC: ΙΔΙΟ αρχείο για cartpole & lunarlander· environment από sindy_core/sindy_eval_utils.
-Τρέξε: !python3 <env-folder>/fusion_horizon_gate.py
+ENV-AGNOSTIC: the SAME file for cartpole & lunarlander; the environment comes from sindy_core/sindy_eval_utils.
+Run: !python3 <env-folder>/fusion_horizon_gate.py
 """
 import os
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sindy_core import *          # SINDy core (numpy) + path-bootstrap για vae/lstm/loader
+from sindy_core import *          # SINDy core (numpy) + path bootstrap for vae/lstm/loader
 from sindy_eval_utils import *    # VAE encode / LSTM rollout / noise / measurement helpers
 
+from paths import outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG — env-agnostic· το per-environment config έρχεται από sindy_eval_utils/sindy_core (import *).
+# CONFIG — env-agnostic; the per-environment config comes from sindy_eval_utils/sindy_core (import *).
 # ---------------------------------------------------------------------------
-SAVE_DIR = f"/kaggle/working/sindy_{ENV_TAG}_horizon_gate_out"
+SAVE_DIR = outputs(f"sindy_{ENV_TAG}_horizon_gate_out")
 GATE_PERDIM = False            # False -> w(h) (per-horizon scalar)· True -> w(h,d) (ablation)
 LOG_Y = True
 C_LSTM, C_SINDY, C_BLEND = "C0", "C2", "C1"
 
 
 # ---------------------------------------------------------------------------
-# SINDy/LSTM standardized preds σε ένα latent dir (ίδια windows)
+# SINDy/LSTM standardized preds on one latent dir (same windows)
 # ---------------------------------------------------------------------------
 def get_preds_std(lstm, latent_dir, Xi, mean, std, device):
-    """ -> (sindy_std, lstm_std, gt_std) σχήμα (N,L,4), standardized phys dims."""
+    """ -> (sindy_std, lstm_std, gt_std) of shape (N,L,4), standardized phys dims."""
     mean4 = np.asarray(mean[:N_SUP], np.float64)
     std4 = np.asarray(std[:N_SUP], np.float64)
     lstm_std, gt_std = lstm_free_run_dir(lstm, latent_dir, mean, std, device)
@@ -62,7 +64,7 @@ def fit_gate(sindy_std, lstm_std, gt_std, perdim=False):
     num = (a * b).mean(axis=axes)
     den = (a * a).mean(axis=axes)
     w = -num / np.maximum(den, 1e-12)
-    return np.clip(w, 0.0, 1.0)                # (L,4) αν perdim, αλλιώς (L,)
+    return np.clip(w, 0.0, 1.0)                # (L,4) if perdim, else (L,)
 
 
 def apply_gate(sindy_std, lstm_std, w, perdim=False):
@@ -132,7 +134,7 @@ def plot_perdim(err, tag, label, save_dir):
 
 
 def plot_paired(err, tag, label, save_dir, rng):
-    """Paired Δ (best single model − Blend): >0 ⇒ το blend κερδίζει τον καλύτερο single."""
+    """Paired Δ (best single model − Blend): >0 => the blend beats the best single."""
     lstm_m = np.median(err["LSTM"].mean(axis=2), axis=0)
     sindy_m = np.median(err["SINDy"].mean(axis=2), axis=0)
     best = "LSTM" if lstm_m.mean() < sindy_m.mean() else "SINDy"
@@ -186,11 +188,11 @@ def main():
                                       device, noise_fn=nf, splits=("test",),
                                       force=(level != 0.0))["test"]
 
-        # ---- fit gate στο val ----
+        # ---- fit the gate on val ----
         sv, lv, gv = get_preds_std(lstm, val_dir, Xi_e, mean, std, device)
         w = fit_gate(sv, lv, gv, perdim=GATE_PERDIM)
 
-        # ---- apply στο test ----
+        # ---- apply on test ----
         st, lt, gt = get_preds_std(lstm, test_dir, Xi_e, mean, std, device)
         blend = apply_gate(st, lt, w, perdim=GATE_PERDIM)
         err = {"LSTM": (lt - gt) ** 2, "SINDy": (st - gt) ** 2, "Blend": (blend - gt) ** 2}

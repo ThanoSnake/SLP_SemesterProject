@@ -1,28 +1,28 @@
 # ========= Test Cartpole P2 vs Baseline =========
 """
-test_p2.py — Αξιολόγηση Baseline vs Principle 2 με BRIGHTNESS/CONTRAST jitter (CartPole).
+test_p2.py — Evaluation of Baseline vs Principle 2 under BRIGHTNESS/CONTRAST jitter (CartPole).
 
-ΕΣΤΙΑΣΜΕΝΗ ΕΚΔΟΣΗ (single-setting) — ίδια δομή/διαγράμματα με το test_p1, αλλά με το
-ΦΩΤΟΜΕΤΡΙΚΟ transform του P2 (ΟΧΙ gaussian noise):
-  * ΜΟΝΟ brightness/contrast jitter σε ΕΝΑ επίπεδο = 0.2 (το invariance target της Αρχής 2).
-  * ΜΟΝΟ "encoded" seed mode (z_0 από VAE -> LSTM rollout).
-  * Το transform εφαρμόζεται ΑΠΟΚΛΕΙΣΤΙΚΑ στη φάση encoding (precompute_latents), πριν τον
-    encoder. ΔΕΝ επηρεάζει τα ground-truth states ούτε τα LSTM checkpoints.
-  * Η ΛΟΓΙΚΗ ΥΛΟΠΟΙΗΣΗΣ του transform (apply_*, precompute_latents_transformed) είναι ΙΔΙΑ
-    με την αρχική έκδοση του test_p2 — άλλαξε μόνο η δομή εξόδου (διαγράμματα όπως το test_p1).
+FOCUSED VERSION (single setting) — same structure/plots as test_p1, but with the
+PHOTOMETRIC transform of P2 (NOT gaussian noise):
+  * ONLY brightness/contrast jitter at ONE level = 0.2 (the invariance target of Principle 2).
+  * ONLY "encoded" seed mode (z_0 from the VAE -> LSTM rollout).
+  * The transform is applied EXCLUSIVELY at the encoding stage (precompute_latents), before the
+    encoder. It affects NEITHER the ground-truth states NOR the LSTM checkpoints.
+  * The transform's IMPLEMENTATION LOGIC (apply_*, precompute_latents_transformed) is IDENTICAL
+    to the original test_p2 — only the output structure changed (plots like test_p1).
 
-ΠΑΡΑΓΟΜΕΝΑ:
-  (1) Overall median+IQR state-MSE ανά horizon (mean over dims)   [standardized]
-  (2) Per-dim median+IQR state-MSE ανά horizon                    [standardized]
-  (3) Paired Δ (baseline − p2) median + 95% bootstrap CI ανά horizon
-  (4) ΦΥΣΙΚΑ ΜΕΓΕΘΗ ενός ΤΥΧΑΙΟΥ test window: GT vs predicted-baseline vs predicted-p2 [physical]
-  (5) FRAME ENCODING CHECK: τυχαίο frame -> brightness/contrast transform -> οπτικοποίηση
-      (original | transformed) -> encode με baseline & p2 -> πρόβλεψη καθενός & διαφορά από GT.
-      (Δείχνει την INVARIANCE του P2: η φυσική του κωδικοποίηση μετατοπίζεται λιγότερο.)
+OUTPUTS:
+  (1) Overall median+IQR state-MSE per horizon (mean over dims)   [standardized]
+  (2) Per-dim median+IQR state-MSE per horizon                    [standardized]
+  (3) Paired Δ (baseline − p2) median + 95% bootstrap CI per horizon
+  (4) PHYSICAL QUANTITIES of a RANDOM test window: GT vs predicted-baseline vs predicted-p2 [physical]
+  (5) FRAME ENCODING CHECK: a random frame -> brightness/contrast transform -> visualization
+      (original | transformed) -> encode with baseline & p2 -> each one's prediction & the gap from GT.
+      (Shows P2's INVARIANCE: its physical encoding shifts less.)
 
-ΓΙΑΤΙ brightness/contrast (όχι gaussian noise): το P2 εκπαιδεύτηκε να είναι ΑΜΕΤΑΒΛΗΤΟ σε
-φωτεινότητα/αντίθεση -> αυτό το transform αναδεικνύει το πλεονέκτημά του (αλλάζει την εικόνα
-ΧΩΡΙΣ να αλλάζει το πραγματικό physical state -> ταιριάζει με «αλλάζω input, μετρώ vs clean GT»).
+WHY brightness/contrast (not gaussian noise): P2 was trained to be INVARIANT to
+brightness/contrast -> this transform is what brings out its advantage (it changes the image
+WITHOUT changing the real physical state -> matches "perturb the input, measure against clean GT").
 """
 import os
 import numpy as np
@@ -32,12 +32,17 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, P2_LSTM, P2_VAE, outputs
+from loader import LatentSequenceDataset, list_npz, load_norm_stats
+from vae import VAE
+from vae_p2 import VAE_P2
+from lstm import LatentPredictor
+
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/cartpole_p2_out"
+SAVE_DIR = outputs("cartpole_p2_out")
 
 SHIFT = 0
 LATENT_SIZE, N_SUP, N_IMG = 64, 4, 60
@@ -52,18 +57,18 @@ BOOT_SEED = 0
 LOG_Y = True
 
 # ---------------------------------------------------------------------------
-# TRANSFORM CONFIG — μοναδικό setting: brightness/contrast level=0.2 (το invariance target του P2)
+# TRANSFORM CONFIG — a single setting: brightness/contrast level=0.2 (P2's invariance target)
 # ---------------------------------------------------------------------------
 TRANSFORM_TYPE = "brightness_contrast"   # "brightness" | "contrast" | "brightness_contrast"
 TRANSFORM_LEVEL = 0.2                     # factor = 1 ± level
-TRANSFORM_SIGN = +1.0                     # +1 -> πιο φωτεινό/αντίθετο· -1 -> πιο σκούρο
+TRANSFORM_SIGN = +1.0                     # +1 -> brighter/higher contrast; -1 -> darker
 
-# Trajectory plot (4): τυχαίο test window
-TRAJ_SEED = None                  # None -> ΓΝΗΣΙΑ τυχαίο (διαφορετικό window κάθε τρέξιμο)· int -> reproducible
-TRAJ_WINDOW = None                # None -> τυχαίο· ή ακέραιος index για συγκεκριμένο window
+# Trajectory plot (4): a random test window
+TRAJ_SEED = None                  # None -> GENUINELY random (a different window every run); int -> reproducible
+TRAJ_WINDOW = None                # None -> random; or an integer index for a specific window
 N_TRAJ_WINDOWS = 1
-# Frame-encoding check (5): τυχαίο frame
-FRAME_SEED = None                 # None -> ΓΝΗΣΙΑ τυχαίο frame κάθε τρέξιμο· int -> reproducible
+# Frame-encoding check (5): a random frame
+FRAME_SEED = None                 # None -> a GENUINELY random frame every run; int -> reproducible
 
 # ---------------------------------------------------------------------------
 # Model definitions — Baseline vs P2 (clean-trained VAE + encoded LSTM)
@@ -71,19 +76,19 @@ FRAME_SEED = None                 # None -> ΓΝΗΣΙΑ τυχαίο frame κά
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<cartpole-baseline-vae>",
-     "lstm_ckpt": "<cartpole-baseline-lstm>",
-     "latent_root": "/kaggle/working/test_p2_latents/baseline"},
+     "vae_ckpt": BASELINE_VAE,
+     "lstm_ckpt": BASELINE_LSTM,
+     "latent_root": outputs("test_p2_latents/baseline")},
     {"label": "Principle 2", "color": "C2",
      "make_vae": lambda: VAE_P2(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<cartpole-p2-vae>",
-     "lstm_ckpt": "<cartpole-p2-lstm>",
-     "latent_root": "/kaggle/working/test_p2_latents/p2"},
+     "vae_ckpt": P2_VAE,
+     "lstm_ckpt": P2_LSTM,
+     "latent_root": outputs("test_p2_latents/p2")},
 ]
 
 
 # ---------------------------------------------------------------------------
-# Photometric transforms — ΙΔΙΑ ΛΟΓΙΚΗ με την αρχική έκδοση του test_p2
+# Photometric transforms — SAME LOGIC as the original test_p2
 # (float [0,1] image tensors (B/T,3,H,W))
 # ---------------------------------------------------------------------------
 def apply_brightness(img, level, sign):
@@ -92,13 +97,13 @@ def apply_brightness(img, level, sign):
 
 
 def apply_contrast(img, level, sign):
-    """Contrast γύρω από το per-frame mean: (img - m) * (1 ± level) + m."""
+    """Contrast around the per-frame mean: (img - m) * (1 ± level) + m."""
     m = img.mean(dim=(1, 2, 3), keepdim=True)
     return torch.clamp((img - m) * (1.0 + sign * level) + m, 0.0, 1.0)
 
 
 def apply_brightness_contrast(img, level, sign):
-    """Brightness + contrast μαζί (όπως το color_jitter του P2 training)."""
+    """Brightness + contrast together (like P2's training color_jitter)."""
     out = img * (1.0 + sign * level)
     m = out.mean(dim=(1, 2, 3), keepdim=True)
     return torch.clamp((out - m) * (1.0 + sign * level) + m, 0.0, 1.0)
@@ -119,8 +124,8 @@ def make_transform_fn(transform_type, level):
 
 
 # ---------------------------------------------------------------------------
-# precompute_latents_transformed — ΙΔΙΑ ΛΟΓΙΚΗ με την αρχική έκδοση του test_p2
-# (εφαρμόζει το transform ΠΡΙΝ το encoding)
+# precompute_latents_transformed — SAME LOGIC as the original test_p2
+# (applies the transform BEFORE encoding)
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def precompute_latents_transformed(encode_fn, root, out_root, transform_fn,
@@ -136,7 +141,7 @@ def precompute_latents_transformed(encode_fn, root, out_root, transform_fn,
             x = (d[f"noisy_states_{shift}"] if shift in (2, 5, 10)
                  else d["states"]).astype(np.float32)
 
-        imgs = transform_fn(imgs.to(device))                   # transform σε ΟΛΑ τα frames πριν το encoding
+        imgs = transform_fn(imgs.to(device))                   # transform on ALL frames before encoding
         img_t, img_tp1 = imgs[:-1], imgs[1:]
         zs = []
         for b in range(0, img_t.shape[0], batch):
@@ -246,7 +251,7 @@ def evaluate_model_transformed(m, device, mean_s, std_s):
 
 
 # ---------------------------------------------------------------------------
-# Plots (1)–(4): ίδια με το test_p1
+# Plots (1)–(4): same as test_p1
 # ---------------------------------------------------------------------------
 def plot_median_iqr(err, save_dir):
     """(1) Overall median+IQR state-MSE (mean over dims) — Baseline vs P2."""
@@ -353,15 +358,15 @@ def plot_trajectory(data, mean_s, std_s, save_dir, rng):
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def plot_frame_encoding(mean_s, std_s, device, save_dir, rng):
-    """Τυχαίο frame -> brightness/contrast transform -> οπτικοποίηση & encode με baseline & p2.
-    Δείχνει την πρόβλεψη του physical state καθενός (στο TRANSFORMED frame) και τη διαφορά από GT.
-    Η INVARIANCE του P2 φαίνεται ως μικρότερη μετατόπιση clean->transformed."""
+    """Random frame -> brightness/contrast transform -> visualize & encode with baseline & p2.
+    Shows each one's physical-state prediction (on the TRANSFORMED frame) and the gap from GT.
+    P2's INVARIANCE shows up as a smaller clean->transformed shift."""
     base, p2 = MODELS[0]["label"], MODELS[1]["label"]
     mean4 = np.asarray(mean_s[:N_SUP], np.float64)
     std4 = np.asarray(std_s[:N_SUP], np.float64)
     transform_fn = make_transform_fn(TRANSFORM_TYPE, TRANSFORM_LEVEL)
 
-    # --- τυχαίο επεισόδιο + frame (χρειάζεται ζεύγος t, t+1 για τον encoder) ---
+    # --- random episode + frame (the encoder needs a pair t, t+1) ---
     files = list_npz(os.path.join(DATA_ROOT, "test"))
     ep = files[int(rng.integers(0, len(files)))]
     with np.load(ep) as d:
@@ -376,7 +381,7 @@ def plot_frame_encoding(mean_s, std_s, device, save_dir, rng):
     f_t, f_tp1 = _frame(t), _frame(t + 1)
     f_t_tf, f_tp1_tf = transform_fn(f_t), transform_fn(f_tp1)
 
-    # --- encode clean & transformed με κάθε VAE ---
+    # --- encode clean & transformed with each VAE ---
     preds_clean, preds_tf = {}, {}
     for m in MODELS:
         vae = m["make_vae"]().to(device)
@@ -389,7 +394,7 @@ def plot_frame_encoding(mean_s, std_s, device, save_dir, rng):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # --- figure: original | transformed  +  per-dim bars (GT vs baseline vs p2, στο transformed) ---
+    # --- figure: original | transformed  +  per-dim bars (GT vs baseline vs p2, on the transformed) ---
     orig_np = f_t[0].permute(1, 2, 0).cpu().numpy()
     tf_np = f_t_tf[0].permute(1, 2, 0).cpu().numpy()
     fig = plt.figure(figsize=(15, 7))
@@ -419,7 +424,7 @@ def plot_frame_encoding(mean_s, std_s, device, save_dir, rng):
           f"{'shift base':>14}{'shift p2':>12}")
     for d in range(N_SUP):
         eb = abs(preds_tf[base][d] - gt[d]); ep2 = abs(preds_tf[p2][d] - gt[d])
-        sb = abs(preds_tf[base][d] - preds_clean[base][d])    # μετατόπιση clean->transformed
+        sb = abs(preds_tf[base][d] - preds_clean[base][d])    # clean->transformed shift
         sp = abs(preds_tf[p2][d] - preds_clean[p2][d])
         print(f"  {DIM_NAMES[d]:<10}{gt[d]:>10.4f}{eb:>16.4f}{ep2:>16.4f}{sb:>14.4f}{sp:>12.4f}")
     print("  (shift = |transformed - clean| encoding; smaller shift = more invariant -> P2 advantage)")
@@ -441,7 +446,7 @@ def main():
     print(f"\n{'='*60}\n  TRANSFORM: {TRANSFORM_TYPE} level={TRANSFORM_LEVEL:.2f} | encoded mode\n{'='*60}")
     data = {m["label"]: evaluate_model_transformed(m, device, mean_s, std_s) for m in MODELS}
 
-    # Align window counts (same windows -> ίδιο GT· κόβουμε στο min για paired ανάλυση)
+    # Align window counts (same windows -> same GT; truncate to the min for the paired analysis)
     n = min(data[base]["pred"].shape[0], data[p2]["pred"].shape[0])
     if data[base]["pred"].shape[0] != data[p2]["pred"].shape[0]:
         print(f"[WARN] #windows differ ({data[base]['pred'].shape[0]} vs "

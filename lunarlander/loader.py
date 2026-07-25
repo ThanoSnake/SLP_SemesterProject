@@ -1,23 +1,23 @@
 """
-loader.py — EAGER all-in-RAM loading για LunarLander (state=8D), κατά το
-loader_final.py του cartpole (καμία cache/LRU, μηδέν IO στο train).
+loader.py — EAGER all-in-RAM loading for LunarLander (state=8D), following
+cartpole's loader_final.py (no cache/LRU, zero IO during training).
 
-Φιλοσοφία (ίδια με cartpole):
-  * Όλο το dataset φορτώνεται ΜΙΑ φορά στο __init__ (progress bar). Μετά κάθε
-    __getitem__ είναι καθαρή RAM-πρόσβαση -> το γρηγορότερο δυνατό train.
-  * Οι εικόνες μένουν uint8 στη RAM· το /255 γίνεται per-sample (φθηνό). Έτσι ΔΕΝ
-    τετραπλασιάζουμε τη μνήμη (float θα ήταν 4×).
-  * Global flat index (αρχείο, θέση t) -> DataLoader(shuffle=True) δίνει αληθινό
-    ανακάτεμα ΑΝΑΜΕΣΑ σε επεισόδια (όχι το random-sampling των ερευνητών).
-  * shift in {2,5,10} -> noisy_states_{shift} (ίδια keys με LunaDataCollect.py).
-    Προαιρετικό standardize states με τα norm_stats του train.
-  * Με num_workers>0 σε Linux, το self.eps μοιράζεται μέσω fork copy-on-write
-    (δεν διπλασιάζεται η RAM). Χρησιμοποίησε persistent_workers=True.
+Rationale (same as cartpole):
+  * The whole dataset is loaded ONCE in __init__ (progress bar). After that every
+    __getitem__ is a pure RAM access -> the fastest possible training loop.
+  * Images stay uint8 in RAM; the /255 happens per sample (cheap). This way we do NOT
+    quadruple the memory (float would be 4x).
+  * Global flat index (file, position t) -> DataLoader(shuffle=True) gives true
+    shuffling ACROSS episodes (not the authors' random sampling).
+  * shift in {2,5,10} -> noisy_states_{shift} (same keys as LunaDataCollect.py).
+    Standardizing the states with the train norm_stats is optional.
+  * With num_workers>0 on Linux, self.eps is shared via fork copy-on-write
+    (RAM is not duplicated). Use persistent_workers=True.
 
-ΔΙΑΦΟΡΕΣ από cartpole: state 4D -> 8D, και το angle dim (theta) είναι το 4 (όχι 2).
+DIFFERENCES from cartpole: state 4D -> 8D, and the angle dim (theta) is 4 (not 2).
 obs = [x, y, vx, vy, theta, omega, leg1, leg2].
 
-Ροή: VaePairDataset -> (train VAE) -> precompute_latents -> LatentSequenceDataset.
+Flow: VaePairDataset -> (train VAE) -> precompute_latents -> LatentSequenceDataset.
 """
 from os import listdir, makedirs
 from os.path import join, isdir, basename
@@ -29,10 +29,10 @@ from tqdm.auto import tqdm
 
 
 # ---------------------------------------------------------------------------
-# Σταθερές ειδικές για LunarLander
+# LunarLander-specific constants
 # ---------------------------------------------------------------------------
 STATE_DIM = 8                 # [x, y, vx, vy, theta, omega, leg1, leg2]
-ANGLE_DIM = 4                 # index του theta (στο cartpole ήταν 2) -> για balancing
+ANGLE_DIM = 4                 # index of theta (it was 2 in cartpole) -> used for balancing
 
 
 # ---------------------------------------------------------------------------
@@ -59,12 +59,12 @@ def _standardize(s, mean, std):
 
 
 # ---------------------------------------------------------------------------
-# Κοινή βάση: EAGER load όλων των επεισοδίων στη RAM + flat index
+# Shared base: EAGER load of every episode into RAM + a flat index
 # ---------------------------------------------------------------------------
 class _BaseRollout(torch.utils.data.Dataset):
     def __init__(self, root, window, stride=1, shift=0,
                  state_mean=None, state_std=None, cache_size=None):
-        # cache_size: αγνοείται (κρατιέται για συμβατότητα με παλιές κλήσεις)
+        # cache_size: ignored (kept for backward compatibility with old call sites)
         self.window = window
         self.shift = shift
         self.mean = None if state_mean is None else np.asarray(state_mean, np.float32)
@@ -72,14 +72,14 @@ class _BaseRollout(torch.utils.data.Dataset):
 
         files = list_npz(root)
         if not files:
-            raise RuntimeError(f"Κανένα .npz στο: {root}")
+            raise RuntimeError(f"No .npz files in: {root}")
 
         self.eps, self.index, angles = [], [], []
         tag = basename(root.rstrip("/")) or root
         for fi, f in enumerate(tqdm(files, desc=f"loading '{tag}' -> RAM")):
             with np.load(f) as d:
                 ep = {
-                    "imgs": d["imgs"],                                  # uint8 (T,H,W,3) — μένει uint8
+                    "imgs": d["imgs"],                                  # uint8 (T,H,W,3) — kept as uint8
                     "acts": d["acts"].astype(np.float32),               # (T,)
                     "states": d["states"].astype(np.float32),           # (T,8) clean
                     "x": (d[f"noisy_states_{shift}"] if shift in (2, 5, 10)
@@ -97,18 +97,18 @@ class _BaseRollout(torch.utils.data.Dataset):
 
 
 # ---------------------------------------------------------------------------
-# VAE: 1 δείγμα = ζεύγος (t, t+1)
+# VAE: one sample = a pair (t, t+1)
 # ---------------------------------------------------------------------------
 class VaePairDataset(_BaseRollout):
-    """ Επιστρέφει: img_t, img_tp1 (3,H,W), action_t, state_t (8), state_tp1 (8). """
+    """ Returns: img_t, img_tp1 (3,H,W), action_t, state_t (8), state_tp1 (8). """
     def __init__(self, root, **kw):
         super().__init__(root, window=2, **kw)
 
     def __getitem__(self, i):
         fi, t = self.index[i]
         ep = self.eps[fi]
-        # Επιστρέφουμε uint8 (C,H,W)· το .float()/255 γίνεται στη GPU (run_epoch),
-        # ώστε να μη φορτώνεται η CPU και να μεταφέρονται 4× λιγότερα bytes στο PCIe.
+        # Return uint8 (C,H,W); the .float()/255 happens on the GPU (run_epoch),
+        # so the CPU stays idle and 4x fewer bytes cross the PCIe bus.
         img_t = torch.from_numpy(ep["imgs"][t]).permute(2, 0, 1)        # uint8
         img_tp1 = torch.from_numpy(ep["imgs"][t + 1]).permute(2, 0, 1)  # uint8
         action = torch.tensor(ep["acts"][t])
@@ -118,12 +118,12 @@ class VaePairDataset(_BaseRollout):
 
 
 # ---------------------------------------------------------------------------
-# LSTM (image-based εναλλακτική): παράθυρο seq_len ζευγών
+# LSTM (image-based alternative): a window of seq_len pairs
 # ---------------------------------------------------------------------------
 class SequenceDataset(_BaseRollout):
-    """ seq_len διαδοχικά ζεύγη (t,t+1). Για 30 βήματα -> seq_len=31.
-    Επιστρέφει: img_t (L,3,H,W), img_tp1 (L,3,H,W), actions (L,), states (L,8),
-                states_clean (L,8).  Ανακάτεψε τα ΠΑΡΑΘΥΡΑ (shuffle=True), όχι μέσα τους. """
+    """ seq_len consecutive pairs (t,t+1). For 30 steps -> seq_len=31.
+    Returns: img_t (L,3,H,W), img_tp1 (L,3,H,W), actions (L,), states (L,8),
+                states_clean (L,8).  Shuffle the WINDOWS (shuffle=True), not within them. """
     def __init__(self, root, seq_len=31, stride=1, **kw):
         self.seq_len = seq_len
         super().__init__(root, window=seq_len + 1, stride=stride, **kw)
@@ -143,11 +143,11 @@ class SequenceDataset(_BaseRollout):
 
 
 # ---------------------------------------------------------------------------
-# Pre-encoding: τρέξε τον (παγωμένο) VAE μία φορά -> z-ακολουθίες
+# Pre-encoding: run the (frozen) VAE once -> z sequences
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def precompute_latents(encode_fn, root, out_root, shift=0, batch=256, device="cuda"):
-    """ encode_fn(img_t, img_tp1) -> z. Ανά επεισόδιο σώζει .npz με z,acts,states,x (N=T-1). """
+    """ encode_fn(img_t, img_tp1) -> z. Saves one .npz per episode with z,acts,states,x (N=T-1). """
     makedirs(out_root, exist_ok=True)
     for f in tqdm(list_npz(root), desc="encoding"):
         with np.load(f) as d:
@@ -168,13 +168,13 @@ def precompute_latents(encode_fn, root, out_root, shift=0, batch=256, device="cu
 
 
 # ---------------------------------------------------------------------------
-# LSTM (συνιστώμενο): παράθυρα latents (ήδη all-in-RAM)
+# LSTM (recommended): windows of latents (already all-in-RAM)
 # ---------------------------------------------------------------------------
 class LatentSequenceDataset(torch.utils.data.Dataset):
-    """ seq_len ΜΕΤΑΒΑΣΕΙΣ latents. Για 30 βήματα -> seq_len=30.
-    Επιστρέφει: z_t (L,latent), action (L,), z_tp1 (L,latent), state_t (L,8), state_tp1 (L,8).
-      - state_t   : input state στο t  (x -> noisy αν shift), standardized
-      - state_tp1 : CLEAN state στο t+1, standardized (στόχος για physical MSE / hybrid gt) """
+    """ seq_len latent TRANSITIONS. For 30 steps -> seq_len=30.
+    Returns: z_t (L,latent), action (L,), z_tp1 (L,latent), state_t (L,8), state_tp1 (L,8).
+      - state_t   : input state at t  (x -> noisy if shift), standardized
+      - state_tp1 : CLEAN state at t+1, standardized (target for physical MSE / hybrid gt) """
     def __init__(self, root, seq_len=30, stride=1, state_mean=None, state_std=None):
         self.seq_len = seq_len
         self.mean = None if state_mean is None else np.asarray(state_mean, np.float32)
@@ -189,7 +189,7 @@ class LatentSequenceDataset(torch.utils.data.Dataset):
             for s in range(0, max(n, 0), stride):
                 self.index.append((fi, s))
         if not self.index:
-            raise RuntimeError(f"Δεν βγήκαν παράθυρα από: {root} (seq_len πολύ μεγάλο;)")
+            raise RuntimeError(f"No windows produced from: {root} (seq_len too large?)")
 
     def __len__(self):
         return len(self.index)
@@ -208,7 +208,7 @@ class LatentSequenceDataset(torch.utils.data.Dataset):
 
 
 # ---------------------------------------------------------------------------
-# Προαιρετικό: ισορρόπηση ουρών (σπάνιες γωνίες theta, dim=ANGLE_DIM)
+# Optional: rebalance the tails (rare theta angles, dim=ANGLE_DIM)
 # ---------------------------------------------------------------------------
 def angle_balanced_weights(dataset, bins=40):
     ang = dataset.angles

@@ -1,19 +1,19 @@
 """
 lstm_baseline_control_kaggle.py
 
-Kaggle entrypoint για το lstm_baseline_control.py.
+Kaggle entrypoint for lstm_baseline_control.py.
 
-Το thanasis-notebook.ipynb κάνει:
+thanasis-notebook.ipynb does:
   !git clone ...
   %cd SLP_SemesterProject
   !python3 lunarlander/<script>.py
 
-Αυτό το wrapper ταιριάζει σε αυτό το workflow:
-  * βάζει Kaggle defaults για VAE_CKPT, NORM_STATS, OUT_ROOT
-  * βρίσκει αυτόματα τα control/elite dataset roots κάτω από /kaggle/input
-  * μετά εκτελεί το κανονικό lstm_baseline_control.py
+This wrapper fits that workflow:
+  * sets Kaggle defaults for VAE_CKPT, NORM_STATS, OUT_ROOT
+  * auto-discovers the control/elite dataset roots under /kaggle/input
+  * then runs the normal lstm_baseline_control.py
 
-Αν το auto-discovery δεν βρει τα folders, δώσε τα ρητά στο notebook:
+If auto-discovery does not find the folders, pass them explicitly in the notebook:
   CONTROL_ROOT=/kaggle/input/.../lunarlander_control_data_8000 \
   ELITE_ROOT=/kaggle/input/.../lunarlander_elite_recovery_4000 \
   python3 lunarlander/lstm_baseline_control_kaggle.py

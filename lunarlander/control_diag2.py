@@ -1,20 +1,20 @@
 """
-control_diag2.py — Γιατί το rollout/override ΧΕΙΡΟΤΕΡΕΥΕΙ τον (καλό) PID; Δεδομένα, όχι εικασίες.
+control_diag2.py — Why does the rollout/override make the (good) PID WORSE? Data, not guesses.
 
-To control_diag.py έδειξε: μοντέλο/encoder ΚΑΛΑ, αλλά free-MPC = optimizer's curse. Φτιάξαμε rollout
-(policy-improvement) — ΑΛΛΑ πάλι αποτυγχάνει, με override~98% επιβλαβές. Τρία tests εδώ:
+control_diag.py showed: the model/encoder are GOOD, but free MPC = the optimizer's curse. We built rollout
+(policy improvement) — BUT it fails too, with ~98% of overrides harmful. Three tests here:
 
-  R1) OVERRIDE-vs-REALITY (το κρίσιμο). Σε πραγματικά mid-flight states (φτάνουμε με PID, ντετερμινιστικά
-      μέσω seed+replay), όπου το μοντέλο ΘΕΛΕΙ override (best_a ≠ a_pid): εκτελούμε ΣΤΗΝ ΠΡΑΓΜΑΤΙΚΟΤΗΤΑ
-      και «best_a μετά PID» ΚΑΙ «a_pid μετά PID» από το ΙΔΙΟ state, μετράμε πραγματικό return.
-      -> Βοηθάει το override ή βλάπτει; Συσχετίζεται το model-gap με την πραγματική βελτίωση;
+  R1) OVERRIDE-vs-REALITY (the critical one). At real mid-flight states (reached with the PID, deterministically
+      via seed+replay), where the model WANTS an override (best_a != a_pid): we execute IN REALITY
+      both "best_a then PID" AND "a_pid then PID" from the SAME state, and measure the real return.
+      -> Does the override help or hurt? Does the model gap correlate with the real improvement?
 
-  R2) CLOSED-LOOP DRIFT. Τρέχουμε το rollout controller και μετράμε το 1-step σφάλμα του μοντέλου
-      ΥΠΟ ΤΙΣ ΕΝΕΡΓΕΙΕΣ ΤΟΥ ROLLOUT (πιθανώς OOD) — vs το D1 (0.31 με data-policy). Μεγάλη αύξηση
-      = το rollout οδηγεί το σύστημα OOD και το μοντέλο σπάει.
+  R2) CLOSED-LOOP DRIFT. We run the rollout controller and measure the model's 1-step error
+      UNDER THE ROLLOUT'S ACTIONS (possibly OOD) — vs D1 (0.31 with the data policy). A large increase
+      = the rollout drives the system OOD and the model breaks.
 
-  R3) OVERRIDE BIAS. Ποια ενέργεια διαλέγει το override (histogram) + κατανομή του value-gap.
-      -> systematic bias (π.χ. πάντα noop/main) ή θόρυβος.
+  R3) OVERRIDE BIAS. Which action does the override pick (histogram) + the distribution of the value gap.
+      -> a systematic bias (e.g. always noop/main) or noise.
 
 Run:  !python3 lunarlander/control_diag2.py
 """
@@ -30,9 +30,9 @@ N_SUP, N_ACTIONS, SEED, MAX_STEPS = C.N_SUP, C.N_ACTIONS, C.SEED, C.MAX_STEPS
 SAVE_DIR = os.path.join(C.SAVE_DIR, "diag2")
 DIM_NAMES = C.DIM_NAMES
 
-N_OVERRIDE_CASES = 30        # πόσα override-states να δοκιμάσουμε στο R1
-MAX_TRIALS = 200             # πάνω όριο trials για να μαζέψουμε τα overrides
-BRANCH_CAP = 160             # βήματα μέχρι τερματισμό για το branch return
+N_OVERRIDE_CASES = 30        # how many override states to try in R1
+MAX_TRIALS = 200             # upper bound on trials while collecting the overrides
+BRANCH_CAP = 160             # steps until termination for the branch return
 R2_EPS = 4
 
 
@@ -53,7 +53,7 @@ def enc_pid_action(vae, f_prev, f_cur, mean_t, std_t, device):
 
 @torch.no_grad()
 def real_branch_return(env, seed, prefix_actions, first_a, vae, mean_t, std_t, device):
-    """reset(seed) -> replay prefix -> first_a -> μετά enc_pid μέχρι τερματισμό. -> cumulative reward."""
+    """reset(seed) -> replay prefix -> first_a -> then enc_pid until termination. -> cumulative reward."""
     env.reset(seed=seed)
     for a in prefix_actions:
         env.step(a)
@@ -96,21 +96,21 @@ def r1_override_vs_reality(vae, lstm, mean_t, std_t, device, enable_wind=False):
         a_pid = C.heuristic_control(C.to_phys(mu_ck[0, :N_SUP], mean_t, std_t).cpu().numpy())
         best_a, v_best, v_pid = C.mpc_rollout(lstm, mu_ck, mean_t, std_t, device)
         if best_a == a_pid:
-            continue                                    # κανένα override εδώ
+            continue                                    # no override here
         r_over = real_branch_return(env, seed, prefix, best_a, vae, mean_t, std_t, device)
         r_pid = real_branch_return(env, seed, prefix, a_pid, vae, mean_t, std_t, device)
         gaps.append(v_best - v_pid); d_real.append(r_over - r_pid); ov_acts.append(best_a)
     env.close()
     gaps, d_real, ov_acts = np.array(gaps), np.array(d_real), np.array(ov_acts)
     if len(gaps) == 0:
-        print("[R1] κανένα override case (best_a πάντα == a_pid;)"); return
+        print("[R1] no override case (is best_a always == a_pid?)"); return
 
     helped = float((d_real > 0).mean())
     corr = float(np.corrcoef(gaps, d_real)[0, 1]) if len(gaps) > 2 else float("nan")
     print(f"\n[R1] OVERRIDE-vs-REALITY  ({len(gaps)} override states, wind={enable_wind})")
-    print(f"  fraction overrides που ΒΟΗΘΗΣΑΝ (real_over>real_pid) = {helped:.2f}   (θέλουμε >0.5)")
-    print(f"  mean(real_override − real_pid) = {d_real.mean():+.1f}   (θέλουμε >0· <0 = ΒΛΑΠΤΟΥΝ)")
-    print(f"  corr(model_gap, real_improvement) = {corr:+.3f}   (~0 = το model-gap είναι ΑΧΡΗΣΤΟ)")
+    print(f"  fraction of overrides that HELPED (real_over>real_pid) = {helped:.2f}   (we want >0.5)")
+    print(f"  mean(real_override − real_pid) = {d_real.mean():+.1f}   (we want >0; <0 = THEY HURT)")
+    print(f"  corr(model_gap, real_improvement) = {corr:+.3f}   (~0 = the model gap is USELESS)")
     hist = np.bincount(ov_acts, minlength=N_ACTIONS)
     names = {0: "noop", 1: "left", 2: "MAIN", 3: "right"}
     print("  override action histogram: " + "  ".join(f"{names[i]}={hist[i]}" for i in range(N_ACTIONS)))
@@ -156,10 +156,10 @@ def r2_closed_loop_drift(vae, lstm, mean_t, std_t, std8, device, enable_wind=Fal
                 break
     env.close()
     rmse = np.sqrt(se / max(cnt, 1))
-    print(f"\n[R2] CLOSED-LOOP 1-step σφάλμα ΥΠΟ rollout actions  ({cnt} βήματα)")
+    print(f"\n[R2] CLOSED-LOOP 1-step error UNDER rollout actions  ({cnt} steps)")
     print("  dim     " + "  ".join(f"{DIM_NAMES[d][:5]:>5}" for d in range(N_SUP)))
     print("  RMSE    " + "  ".join(f"{rmse[d]:>5.2f}" for d in range(N_SUP)))
-    print(f"  MEAN = {rmse.mean():.2f}   (σύγκρινε με D1 h1≈0.31· πολύ μεγαλύτερο = OOD drift)")
+    print(f"  MEAN = {rmse.mean():.2f}   (compare with D1 h1~0.31; much larger = OOD drift)")
 
 
 def main():
@@ -176,11 +176,11 @@ def main():
     r1_override_vs_reality(vae, lstm, mean_t, std_t, device)
     r2_closed_loop_drift(vae, lstm, mean_t, std_t, std8, device)
 
-    print(f"\n{'='*70}\nΠΩΣ ΔΙΑΒΑΖΕΤΑΙ:")
-    print("  R1: αν fraction-helped < 0.5 ή mean Δ < 0 -> τα overrides ΒΛΑΠΤΟΥΝ.")
-    print("      αν corr(gap,Δreal) ~ 0 -> το cost ΔΕΝ ξεχωρίζει κοντινές πολιτικές (θόρυβος).")
-    print("      αν το histogram δείχνει 1 ενέργεια -> systematic cost bias.")
-    print("  R2: αν το 1-step RMSE >> 0.31 -> το rollout οδηγεί OOD & το μοντέλο σπάει.")
+    print(f"\n{'='*70}\nHOW TO READ IT:")
+    print("  R1: if fraction-helped < 0.5 or mean Δ < 0 -> the overrides HURT.")
+    print("      if corr(gap,Δreal) ~ 0 -> the cost does NOT separate nearby policies (noise).")
+    print("      if the histogram shows 1 action -> a systematic cost bias.")
+    print("  R2: if the 1-step RMSE >> 0.31 -> the rollout drives OOD & the model breaks.")
     print(f"{'='*70}\nsaved -> {SAVE_DIR}")
 
 

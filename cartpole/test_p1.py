@@ -1,24 +1,24 @@
 # ========= Test Cartpole Baseline vs P1 ============
 
 """
-test_p1.py — Αξιολόγηση Baseline vs Principle 1 με ΘΟΡΥΒΩΔΕΙΣ εικόνες (CartPole).
+test_p1.py — Evaluation of Baseline vs Principle 1 on NOISY images (CartPole).
 
-ΕΣΤΙΑΣΜΕΝΗ ΕΚΔΟΣΗ (single-setting):
-  * ΜΟΝΟ gaussian θόρυβος σ=0.1 (καμία sweep, κανένα clean level).
-  * ΜΟΝΟ "encoded" seed mode (z_0 από VAE -> LSTM rollout, χωρίς hybrid GT injection).
-  * Ο θόρυβος εφαρμόζεται ΑΠΟΚΛΕΙΣΤΙΚΑ στη φάση encoding (precompute_latents), πριν τον encoder.
-    ΔΕΝ επηρεάζει τα ground-truth states ούτε τα LSTM checkpoints.
+FOCUSED VERSION (single setting):
+  * ONLY gaussian noise σ=0.1 (no sweep, no clean level).
+  * ONLY "encoded" seed mode (z_0 from the VAE -> LSTM rollout, no hybrid GT injection).
+  * Noise is applied EXCLUSIVELY at the encoding stage (precompute_latents), before the encoder.
+    It affects NEITHER the ground-truth states NOR the LSTM checkpoints.
 
-ΠΑΡΑΓΟΜΕΝΑ:
-  (1) Overall median+IQR state-MSE ανά horizon (mean over dims)   [standardized]
-  (2) Per-dim median+IQR state-MSE ανά horizon                    [standardized]
-  (3) Paired Δ (baseline − p1) median + 95% bootstrap CI ανά horizon
-  (4) ΦΥΣΙΚΑ ΜΕΓΕΘΗ ενός ΤΥΧΑΙΟΥ test window: GT vs predicted-baseline vs predicted-p1
-      στη διάρκεια του ορίζοντα (2×2 subplots)                    [physical units]
+OUTPUTS:
+  (1) Overall median+IQR state-MSE per horizon (mean over dims)   [standardized]
+  (2) Per-dim median+IQR state-MSE per horizon                    [standardized]
+  (3) Paired Δ (baseline − p1) median + 95% bootstrap CI per horizon
+  (4) PHYSICAL QUANTITIES of a RANDOM test window: GT vs predicted-baseline vs predicted-p1
+      along the horizon (2×2 subplots)                            [physical units]
 
-ΣΗΜ. μονάδες: οι καμπύλες MSE (1–3) είναι STANDARDIZED (συγκρίσιμες, όπως τα υπόλοιπα test_pX
-— το squared error ΔΕΝ πολλαπλασιάζεται με std4). Το trajectory (4) είναι σε PHYSICAL units
-(de-standardized) ώστε να βλέπεις τα πραγματικά μεγέθη (x, ẋ, θ [rad], θ̇ [rad/s]).
+NOTE on units: the MSE curves (1–3) are STANDARDIZED (comparable, like the other test_pX
+— the squared error is NOT multiplied by std4). The trajectory (4) is in PHYSICAL units
+(de-standardized) so you see the real quantities (x, ẋ, θ [rad], θ̇ [rad/s]).
 """
 import os
 import numpy as np
@@ -27,13 +27,18 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, P1_LSTM, P1_VAE, outputs
+from loader import LatentSequenceDataset, list_npz, load_norm_stats
+from vae import VAE
+from vae_p1 import VAE_P1
+from lstm import LatentPredictor
+
 
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/cartpole_p1_out"
+SAVE_DIR = outputs("cartpole_p1_out")
 
 SHIFT = 0
 LATENT_SIZE, N_SUP, N_IMG = 64, 4, 60
@@ -48,16 +53,16 @@ BOOT_SEED = 0
 LOG_Y = True
 
 # ---------------------------------------------------------------------------
-# NOISE CONFIG — μοναδικό setting: gaussian σ=0.1
+# NOISE CONFIG — a single setting: gaussian σ=0.1
 # ---------------------------------------------------------------------------
 NOISE_TYPE = "gaussian"           # "gaussian" | "salt_pepper"
-NOISE_SIGMA = 0.1                 # std (gaussian) πάνω σε [0,1] εικόνα
+NOISE_SIGMA = 0.1                 # std (gaussian) on a [0,1] image
 NOISE_SEED = 42                   # reproducible noise
 
-# Trajectory plot (4): ποιο/πόσα τυχαία test windows
-TRAJ_SEED = None                  # None -> ΓΝΗΣΙΑ τυχαίο (διαφορετικό window κάθε τρέξιμο)·
-                                  #         int -> reproducible (ίδιο window κάθε φορά)
-TRAJ_WINDOW = None                # None -> τυχαίο· ή ένας ακέραιος index για συγκεκριμένο window
+# Trajectory plot (4): which/how many random test windows
+TRAJ_SEED = None                  # None -> GENUINELY random (a different window every run);
+                                  #         int -> reproducible (the same window every time)
+TRAJ_WINDOW = None                # None -> random; or an integer index for a specific window
 N_TRAJ_WINDOWS = 1
 
 # ---------------------------------------------------------------------------
@@ -66,14 +71,14 @@ N_TRAJ_WINDOWS = 1
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<cartpole-baseline-vae>",
-     "lstm_ckpt": "<cartpole-baseline-lstm>",
-     "latent_root": "/kaggle/working/cartpole_p1_latents/baseline"},
+     "vae_ckpt": BASELINE_VAE,
+     "lstm_ckpt": BASELINE_LSTM,
+     "latent_root": outputs("cartpole_p1_latents/baseline")},
     {"label": "Principle 1", "color": "C1",
      "make_vae": lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG),
-     "vae_ckpt": "<cartpole-p1-vae>",
-     "lstm_ckpt": "<cartpole-p1-lstm>",
-     "latent_root": "/kaggle/working/cartpole_p1_latents/p1"},
+     "vae_ckpt": P1_VAE,
+     "lstm_ckpt": P1_LSTM,
+     "latent_root": outputs("cartpole_p1_latents/p1")},
 ]
 
 
@@ -106,7 +111,7 @@ def make_noise_fn(noise_type, level, seed, device):
 
 
 # ---------------------------------------------------------------------------
-# NOISY precompute_latents — εφαρμόζει noise ΠΡΙΝ το encoding
+# NOISY precompute_latents — applies the noise BEFORE encoding
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def precompute_latents_noisy(encode_fn, root, out_root, noise_fn,
@@ -122,7 +127,7 @@ def precompute_latents_noisy(encode_fn, root, out_root, noise_fn,
             x = (d[f"noisy_states_{shift}"] if shift in (2, 5, 10)
                  else d["states"]).astype(np.float32)
 
-        imgs = noise_fn(imgs.to(device))                       # noise σε ΟΛΑ τα frames πριν το encoding
+        imgs = noise_fn(imgs.to(device))                       # noise on ALL frames before encoding
         img_t, img_tp1 = imgs[:-1], imgs[1:]
         zs = []
         for b in range(0, img_t.shape[0], batch):
@@ -309,7 +314,7 @@ def plot_trajectory(data, mean_s, std_s, save_dir, rng):
 
     for wi in range(N_TRAJ_WINDOWS):
         w = TRAJ_WINDOW if TRAJ_WINDOW is not None else int(rng.integers(0, N))
-        # GT πρέπει να ταυτίζεται μεταξύ μοντέλων (ίδια windows) — sanity check
+        # GT must be identical across models (same windows) — sanity check
         if not np.allclose(data[base]["gt"][w], data[p1]["gt"][w], atol=1e-4):
             print(f"[warn] window {w}: GT differs between models (window alignment?).")
 
@@ -350,7 +355,7 @@ def main():
     print(f"\n{'='*60}\n  NOISE: {NOISE_TYPE} σ={NOISE_SIGMA:.2f} | encoded mode\n{'='*60}")
     data = {m["label"]: evaluate_model_noisy(m, device, mean_s, std_s) for m in MODELS}
 
-    # Align window counts (same windows -> ίδιο GT· κόβουμε στο min για paired ανάλυση)
+    # Align window counts (same windows -> same GT; truncate to the min for the paired analysis)
     n = min(data[base]["pred"].shape[0], data[p1]["pred"].shape[0])
     if data[base]["pred"].shape[0] != data[p1]["pred"].shape[0]:
         print(f"[WARN] #windows differ ({data[base]['pred'].shape[0]} vs "
@@ -359,7 +364,7 @@ def main():
         data[label]["pred"] = data[label]["pred"][:n]
         data[label]["gt"] = data[label]["gt"][:n]
 
-    # STANDARDIZED squared error per window/horizon/dim (όπως τα υπόλοιπα test_pX)
+    # STANDARDIZED squared error per window/horizon/dim (as in the other test_pX)
     err = {label: (data[label]["pred"] - data[label]["gt"]) ** 2 for label in (base, p1)}
 
     # ---- plots ----

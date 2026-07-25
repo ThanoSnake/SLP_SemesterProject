@@ -1,51 +1,51 @@
 """
-vae_p2.py — Principle 2 (Aligned in/equivariance) VAE για LunarLander.
-Port του cart_pole/vae_principle2-2.py· state 4D -> 8D, ένας movable (το lander).
+vae_p2.py — Principle 2 (aligned in/equivariance) VAE for LunarLander.
+Port of cart_pole/vae_principle2-2.py; state 4D -> 8D, a single movable object (the lander).
 
-ΣΧΕΔΙΑΣΤΙΚΗ ΑΠΟΦΑΣΗ — "P2 ΜΟΝΟ ΤΟΥ" (απομονωμένο, πάνω στο baseline):
-  Το paper (Fig. 3C/D) συγκρίνει ΚΑΘΕ αρχή ΞΕΧΩΡΙΣΤΑ ως ablation πάνω στο baseline.
-  Άρα κρατάμε ΑΚΡΙΒΩΣ την αρχιτεκτονική του baseline (ΕΝΑΣ encoder, 6-κάναλη είσοδος
-  stack(frame_t,frame_t+1), 64 latent, supervised τα 8 πρώτα dims) και προσθέτουμε ΜΟΝΟ
-  το in/equivariance loss -> κάθε διαφορά οφείλεται καθαρά στην Αρχή 2.
+DESIGN DECISION — "P2 ON ITS OWN" (isolated, on top of the baseline):
+  The paper (Fig. 3C/D) compares EACH principle SEPARATELY as an ablation over the baseline.
+  So we keep the baseline architecture EXACTLY (ONE encoder, 6-channel input
+  stack(frame_t,frame_t+1), 64 latent, first 8 dims supervised) and add ONLY
+  the in/equivariance loss -> any difference is cleanly attributable to Principle 2.
 
-ΑΡΧΗ 2 (paper, Def. 3): enc equivariant αν enc(g_Θ(x)) =d h_Φ(enc(x)),
-με invariance την ειδική περίπτωση h=identity.  L ∝ E[ ||enc(g(x)) − h(enc(x))||² ].
+PRINCIPLE 2 (paper, Def. 3): enc is equivariant if enc(g_Θ(x)) =d h_Φ(enc(x)),
+with invariance as the special case h=identity.  L ∝ E[ ||enc(g(x)) − h(enc(x))||² ].
 
 obs = [x, y, vx, vy, theta, omega, leg1, leg2]  -> index: x=0, y=1, theta=4.
 
-SEGMENTATION (επιβεβαιωμένο από τα ΠΡΑΓΜΑΤΙΚΑ frames):
-  ουρανός=μαύρο (0,0,0) | έδαφος=λευκό/γκρι (~240) | σημαίες pad=κίτρινο (204,204,0)
-  *** LANDER = μωβ (128,102,230) *** -> διακριτικό color-mask. ΕΝΑ mask, κοινό για
-  translation ΚΑΙ rotation (το lander είναι το μοναδικό κινούμενο σώμα· έδαφος/σημαίες/
-  ουρανός = world frame, σταθερά). Background όπου σβήνουμε το lander -> ΜΑΥΡΟ (ουρανός).
+SEGMENTATION (confirmed against the ACTUAL frames):
+  sky=black (0,0,0) | ground=white/grey (~240) | pad flags=yellow (204,204,0)
+  *** LANDER = purple (128,102,230) *** -> a distinctive color mask. ONE mask, shared by
+  translation AND rotation (the lander is the only moving body; ground/flags/
+  sky = world frame, fixed). The background where we erase the lander -> BLACK (sky).
 
-ΕΝΕΡΓΟΙ ΜΕΤΑΣΧΗΜΑΤΙΣΜΟΙ (πάνω στα ερμηνεύσιμα φυσικά dims mu[:, :8]):
+ACTIVE TRANSFORMS (on the interpretable physical dims mu[:, :8]):
 
-  (A) EQUIVARIANCE ΘΕΣΗΣ — 2D object-only translation       -> x (idx 0) & y (idx 1)
-      g = μετατόπιση ΜΟΝΟ του lander (μωβ mask) κατά (dpx, dpy) px, ΙΔΙΑ στα 2 frames·
-          έδαφος/σημαίες/ουρανός ΣΤΑΘΕΡΑ (world frame). Η τρύπα που αφήνει -> ΜΑΥΡΟ.
-      h = x += dpx*scale_x, y += dpy*scale_y. (vx,vy,theta,omega invariant: ίδιο shift
-          στα 2 frames -> διαφορά=ταχύτητα αμετάβλητη· legs invariant: αέρας.)
-      ΚΛΙΜΑΚΑ: το obs x,y είναι ΚΑΝΟΝΙΚΟΠΟΙΗΜΕΝΟ ώστε ΟΛΟ το πλάτος/ύψος = εύρος 2.0
-          (x∈[-1,1] σε W, y παρόμοια σε H). render flips κάθετα (world-up=image-up):
-          shift ΚΑΤΩ (dpy>0) -> ΜΙΚΡΟΤΕΡΟ y -> Y_SIGN=-1.
+  (A) POSITION EQUIVARIANCE — 2D object-only translation     -> x (idx 0) & y (idx 1)
+      g = shift ONLY the lander (purple mask) by (dpx, dpy) px, IDENTICALLY in both frames;
+          ground/flags/sky FIXED (world frame). The hole it leaves -> BLACK.
+      h = x += dpx*scale_x, y += dpy*scale_y. (vx,vy,theta,omega invariant: the same shift
+          in both frames -> the difference (= velocity) is unchanged; legs invariant: mid-air.)
+      SCALE: the obs x,y are NORMALIZED so that the FULL width/height = a range of 2.0
+          (x∈[-1,1] over W, y similarly over H). The render flips vertically (world-up=image-up):
+          shifting DOWN (dpy>0) -> SMALLER y -> Y_SIGN=-1.
           PX_TO_X = 2/IMG_W, PX_TO_Y = 2/IMG_H. scale = (±PX_TO)/std.
 
-  (B) EQUIVARIANCE ΓΩΝΙΑΣ — rotation γύρω από το ΚΕΝΤΡΟΕΙΔΕΣ του lander  -> theta (idx 4)
-      g = περιστροφή ΜΟΝΟ του masked lander κατά Δθ γύρω από το κεντροειδές του, ΙΔΙΑ στα
-          2 frames. (Στο LunarLander obs[4]=self.lander.angle = ΑΚΑΤΕΡΓΑΣΤΑ rad.)
-      h = theta += Δθ_std = Δθ_rad / std[theta]. (x,y invariant: κεντροειδές αμετάβλητο·
-          ίδια Δθ στα 2 frames -> omega αμετάβλητο.)
-      ΣΗΜ.: VIS_SIGN αντιστοιχεί ΦΥΣΙΚΟ +θ -> ΟΠΤΙΚΗ φορά· επιβεβαίωσε με SAVE_VIZ.
+  (B) ANGLE EQUIVARIANCE — rotation about the lander's CENTROID       -> theta (idx 4)
+      g = rotate ONLY the masked lander by Δθ about its centroid, IDENTICALLY in
+          both frames. (In LunarLander obs[4]=self.lander.angle = RAW rad.)
+      h = theta += Δθ_std = Δθ_rad / std[theta]. (x,y invariant: the centroid is unchanged;
+          the same Δθ in both frames -> omega unchanged.)
+      NOTE: VIS_SIGN maps PHYSICAL +θ -> the VISUAL direction; confirm it with SAVE_VIZ.
 
-  (C) INVARIANCE ΦΩΤΕΙΝΟΤΗΤΑΣ (το παράδειγμα Αρχής 2 του paper)  -> όλα τα φυσικά dims
-      g = brightness/contrast jitter (ίδιο στα 2 frames). h = identity (δ=0).
+  (C) BRIGHTNESS INVARIANCE (the paper's own Principle 2 example)  -> all physical dims
+      g = brightness/contrast jitter (identical in both frames). h = identity (δ=0).
 
-  (D) REAL-PAIR difference-consistency (repo-style)  -> OFF (μολύνει το "P2-only" ablation·
-      ανάγεται σε reweighted supervision/Αρχή 3· βάλε True ΜΟΝΟ σκόπιμα).
+  (D) REAL-PAIR difference-consistency (repo-style)  -> OFF (it contaminates the "P2-only" ablation;
+      it reduces to reweighted supervision / Principle 3; set True only deliberately).
 
-ΣΗΜ.: σε notebook τρέξε ΠΡΩΤΑ το cell του LunarLoader. Ο encode_fn επιστρέφει mu
--> ΙΔΙΟ LSTM pipeline (precompute_latents) με baseline/P1.
+NOTE: in a notebook run the LunarLoader cell FIRST. encode_fn returns mu
+-> the SAME LSTM pipeline (precompute_latents) as baseline/P1.
 """
 import os
 import numpy as np
@@ -58,17 +58,18 @@ from tqdm.auto import tqdm
 
 from loader import VaePairDataset, load_norm_stats
 
+from paths import DATA_ROOT, outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG  (ΙΔΙΑ paths/hyper με baseline & P1 -> τίμια σύγκριση)
+# CONFIG  (SAME paths/hyper as baseline & P1 -> a fair comparison)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_p2_vae"
+SAVE_DIR = outputs("lunarlander_p2_vae")
 
 STATE_NAMES = ("x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2")
-X_DIM, Y_DIM, THETA_DIM = 0, 1, 4          # index στα supervised dims
+X_DIM, Y_DIM, THETA_DIM = 0, 1, 4          # index within the supervised dims
 
 LATENT_SIZE = 64
 N_SUP = 8                  # [x, y, vx, vy, theta, omega, leg1, leg2]
@@ -78,42 +79,42 @@ BATCH = 128
 EPOCHS = 40
 LR = 1e-3
 
-# --- SPLIT-β KL (ΤΑΥΤΟΣΗΜΟ με baseline/P1) ---
+# --- split-β KL (IDENTICAL to baseline/P1) ---
 BETA_PHYS = 0.01
 BETA_STYLE_MAX = 1.0
 KL_ANNEAL_EPOCHS = 20
 
 LAMBDA_SUP = 1.0           # P1-style supervision (per-element mean -> O(1) knob)
 
-# --- ΑΡΧΗ 2 (per-element mean losses -> O(1) knobs, ίδια κλίμακα με sup) ---
-LAMBDA_EQUIV = 1.0         # (A) equivariance θέσης (2D translation)
-LAMBDA_ROT = 1.0           # (B) equivariance γωνίας (rotation γύρω από κεντροειδές)
-LAMBDA_COLOR = 1.0         # (C) invariance φωτεινότητας/αντίθεσης
+# --- PRINCIPLE 2 (per-element mean losses -> O(1) knobs, same scale as sup) ---
+LAMBDA_EQUIV = 1.0         # (A) position equivariance (2D translation)
+LAMBDA_ROT = 1.0           # (B) angle equivariance (rotation about the centroid)
+LAMBDA_COLOR = 1.0         # (C) brightness/contrast invariance
 LAMBDA_PAIR = 1.0          # (D) real-pair difference-consistency (repo-style)
 USE_EQUIV = True
 USE_ROT = True
 USE_COLOR = True
-USE_PAIR = False           # ΟΧΙ Αρχή 2 -> OFF για καθαρό ablation (δες docstring (D))
+USE_PAIR = False           # NOT Principle 2 -> OFF for a clean ablation (see docstring (D))
 
-# --- (A) 2D translation (object-only, via μωβ mask) ---
+# --- (A) 2D translation (object-only, via the purple mask) ---
 IMG_H, IMG_W = 80, 120
-X_RANGE = 2.0                          # obs x ∈ [-1,1] -> ΟΛΟ το πλάτος = εύρος 2.0
-Y_RANGE = 2.0                          # obs y παρόμοια κανονικοποίηση -> εύρος ~2.0 σε H
-PX_TO_X = X_RANGE / IMG_W              # raw x-units ανά pixel (οριζόντια)
-PX_TO_Y = Y_RANGE / IMG_H             # raw y-units ανά pixel (κάθετα)
-Y_SIGN = -1.0                          # shift ΚΑΤΩ (dpy>0) -> ΜΙΚΡΟΤΕΡΟ y (render flipped)
+X_RANGE = 2.0                          # obs x ∈ [-1,1] -> the FULL width = a range of 2.0
+Y_RANGE = 2.0                          # obs y is normalized similarly -> range ~2.0 over H
+PX_TO_X = X_RANGE / IMG_W              # raw x-units per pixel (horizontal)
+PX_TO_Y = Y_RANGE / IMG_H             # raw y-units per pixel (vertical)
+Y_SIGN = -1.0                          # shifting DOWN (dpy>0) -> SMALLER y (render is flipped)
 MAX_SHIFT_PX = 8                       # per-sample dpx,dpy ∈ [-8, 8]
 
-# --- lander color-segmentation (επιβεβαιωμένο από τα data: μωβ (128,102,230)) ---
+# --- lander color segmentation (confirmed from the data: purple (128,102,230)) ---
 LANDER_RGB = (128 / 255.0, 102 / 255.0, 230 / 255.0)
-LANDER_TOL = 0.30                      # color-distance κατώφλι (πιάνει και σκιασμένα μωβ)
-LANDER_MIN_PX = 5                      # ελάχιστα pixels για "ανιχνεύτηκε lander" (small obj)
+LANDER_TOL = 0.30                      # color-distance threshold (also catches shaded purple)
+LANDER_MIN_PX = 5                      # minimum pixels for "lander detected" (small object)
 
-# --- (B) rotation γύρω από το κεντροειδές ---
+# --- (B) rotation about the centroid ---
 MAX_ROT_RAD = 0.15                     # per-sample Δθ ∈ [-0.15, 0.15] rad (~8.6°)
-VIS_SIGN = 1.0                         # ΦΥΣΙΚΟ +θ -> ΟΠΤΙΚΗ φορά (επιβεβαίωσε με SAVE_VIZ)
+VIS_SIGN = 1.0                         # PHYSICAL +θ -> the VISUAL direction (confirm with SAVE_VIZ)
 
-# --- (C) color jitter (ίδιο στα 2 frames) ---
+# --- (C) color jitter (identical in both frames) ---
 COLOR_BRIGHTNESS = 0.3
 COLOR_CONTRAST = 0.3
 
@@ -122,7 +123,7 @@ SCHED_PATIENCE = 3
 
 NUM_WORKERS = 2
 SEED = 0
-SAVE_VIZ = True            # γράφει λίγα before/after PNGs πριν το train (validation transforms)
+SAVE_VIZ = True            # writes a few before/after PNGs before training (validates the transforms)
 
 
 def set_seed(s):
@@ -130,17 +131,17 @@ def set_seed(s):
 
 
 def _to_img(t, device):
-    """ (B,3,H,W) -> float [0,1] στη GPU. Robust σε uint8 (loader) ή ήδη-float. """
+    """ (B,3,H,W) -> float [0,1] on the GPU. Robust to uint8 (loader) or already-float. """
     t = t.to(device, non_blocking=True)
     return t.float().div_(255.0) if t.dtype == torch.uint8 else t.float()
 
 
 # ---------------------------------------------------------------------------
-# Model — ΑΚΡΙΒΩΣ το baseline VAE (single encoder)· αλλάζει ΜΟΝΟ το loss.
+# Model — EXACTLY the baseline VAE (single encoder); only the loss changes.
 # ---------------------------------------------------------------------------
 class VAE_P2(nn.Module):
     """ encode(x): x = stack(frame_t, frame_t+1) (B,6,80,120). Decode (B,3,80,120)=frame_t.
-    latent[:, :N_SUP] = φυσικά (supervised). """
+    latent[:, :N_SUP] = physical (supervised). """
 
     def __init__(self, latent_size=64, in_channels=6, out_channels=3):
         super().__init__()
@@ -180,7 +181,7 @@ class VAE_P2(nn.Module):
 
 
 def encode_fn(model, device):
-    """ Callable για LunarLoader.precompute_latents: (img_t,img_tp1) -> mu (ντετερμινιστικό). """
+    """ Callable for LunarLoader.precompute_latents: (img_t,img_tp1) -> mu (deterministic). """
     @torch.no_grad()
     def _fn(img_t, img_tp1):
         model.eval()
@@ -191,10 +192,10 @@ def encode_fn(model, device):
 
 
 # ---------------------------------------------------------------------------
-# Lander segmentation (μωβ color-mask) — κοινό για translation & rotation
+# Lander segmentation (purple color mask) — shared by translation & rotation
 # ---------------------------------------------------------------------------
 def lander_mask(frame):
-    """ frame:(B,3,H,W) σε [0,1] -> soft mask (B,1,H,W): color-distance στο μωβ lander. """
+    """ frame:(B,3,H,W) in [0,1] -> soft mask (B,1,H,W): color distance to the purple lander. """
     c = torch.tensor(LANDER_RGB, device=frame.device).view(1, 3, 1, 1)
     dist = torch.sqrt(((frame - c) ** 2).sum(1, keepdim=True) + 1e-8)
     return (1.0 - dist / LANDER_TOL).clamp(0.0, 1.0)
@@ -205,19 +206,19 @@ def _has_lander(mask):
 
 
 def _blend(bg, frame_t, mask_t, frame_orig, has):
-    """ out = bg όπου ΟΧΙ-lander, μετασχηματισμένο-lander όπου mask_t.
-    Samples χωρίς ανιχνευμένο lander (has=0) -> no-op (κρατούν το original). """
+    """ out = bg where NOT-lander, transformed-lander where mask_t.
+    Samples with no detected lander (has=0) -> no-op (keep the original). """
     out = bg * (1 - mask_t) + frame_t * mask_t
     keep = has.view(-1, 1, 1, 1)
     return out * keep + frame_orig * (1 - keep)
 
 
 # ---------------------------------------------------------------------------
-# (A) 2D TRANSLATION (object-only) — shift ΜΟΝΟ το lander· έδαφος/σημαίες/ουρανός σταθερά
+# (A) 2D TRANSLATION (object-only) — shift ONLY the lander; ground/flags/sky stay fixed
 # ---------------------------------------------------------------------------
 def shift_image_h(x, dpx):
-    """ Per-sample οριζόντια μετατόπιση (border-replicate). x:(B,C,H,W), dpx:(B,) long.
-    dpx>0 -> περιεχόμενο ΔΕΞΙΑ. out[...,j]=x[..., clamp(j-dpx,0,W-1)]. """
+    """ Per-sample horizontal shift (border-replicate). x:(B,C,H,W), dpx:(B,) long.
+    dpx>0 -> content moves RIGHT. out[...,j]=x[..., clamp(j-dpx,0,W-1)]. """
     B, C, H, W = x.shape
     cols = (torch.arange(W, device=x.device).unsqueeze(0) - dpx.unsqueeze(1)).clamp(0, W - 1)
     idx = cols.view(B, 1, 1, W).expand(B, C, H, W)
@@ -225,7 +226,7 @@ def shift_image_h(x, dpx):
 
 
 def shift_image_v(x, dpy):
-    """ Per-sample κάθετη μετατόπιση (border-replicate). dpy>0 -> περιεχόμενο ΚΑΤΩ.
+    """ Per-sample vertical shift (border-replicate). dpy>0 -> content moves DOWN.
     out[...,i,:]=x[..., clamp(i-dpy,0,H-1), :]. """
     B, C, H, W = x.shape
     rows = (torch.arange(H, device=x.device).unsqueeze(0) - dpy.unsqueeze(1)).clamp(0, H - 1)
@@ -238,11 +239,11 @@ def _shift2d(x, dpx, dpy):
 
 
 def translate_object_frame(frame, dpx, dpy):
-    """ Μετατοπίζει ΜΟΝΟ το lander κατά (dpx,dpy)· η τρύπα -> μαύρο (ουρανός).
-    frame:(B,3,H,W)· dpx,dpy:(B,) long. Επιστρέφει (νέο frame, has(B,)). """
+    """ Shifts ONLY the lander by (dpx,dpy); the hole it leaves -> black (sky).
+    frame:(B,3,H,W); dpx,dpy:(B,) long. Returns (new frame, has(B,)). """
     mask = lander_mask(frame)
     has = _has_lander(mask)
-    bg = frame * (1 - mask)                              # σβήσε το lander -> ΜΑΥΡΟ
+    bg = frame * (1 - mask)                              # erase the lander -> BLACK
     frame_sh = _shift2d(frame, dpx, dpy)
     mask_sh = _shift2d(mask, dpx, dpy)
     return _blend(bg, frame_sh, mask_sh, frame, has), has
@@ -258,17 +259,17 @@ def equivariance_translation_loss(model, x, mu, scale_x, scale_y):
     delta = torch.zeros(B, N_SUP, device=dev)
     delta[:, X_DIM] = dpx.float() * scale_x             # Δx_std = dpx * PX_TO_X / std[x]
     delta[:, Y_DIM] = dpy.float() * scale_y             # Δy_std = dpy * Y_SIGN*PX_TO_Y / std[y]
-    w = (h0 * h1).view(B, 1)                            # μόνο όπου ανιχνεύτηκε lander στα 2 frames
+    w = (h0 * h1).view(B, 1)                            # only where the lander was detected in both frames
     diff = (mu_sh[:, :N_SUP] - (mu[:, :N_SUP] + delta)) * w
     return (diff ** 2).sum() / (w.sum() * N_SUP + 1e-6)
 
 
 # ---------------------------------------------------------------------------
-# (B) ROTATION γύρω από το κεντροειδές του lander — g(x) + γνωστό h
+# (B) ROTATION about the lander's centroid — g(x) + a known h
 # ---------------------------------------------------------------------------
 def _estimate_centroid(mask, thr=0.5):
-    """ pivot = κεντροειδές του lander (μέσο x,y των masked pixels).
-    Επιστρέφει Xc,(B,) Yc,(B,) has,(B,). """
+    """ pivot = the lander's centroid (mean x,y of the masked pixels).
+    Returns Xc,(B,) Yc,(B,) has,(B,). """
     B, _, H, W = mask.shape
     dev = mask.device
     present = (mask > thr).float()                                   # (B,1,H,W)
@@ -282,13 +283,13 @@ def _estimate_centroid(mask, thr=0.5):
 
 
 def _rotate(img, Xp, Yp, vis_ang):
-    """ Περιστρέφει το ΠΕΡΙΕΧΟΜΕΝΟ κατά +vis_ang (rad) γύρω από pivot (Xp,Yp) σε pixel-space
-    (σωστό για H≠W). img:(B,C,H,W), Xp/Yp/vis_ang:(B,). """
+    """ Rotates the CONTENT by +vis_ang (rad) about the pivot (Xp,Yp) in pixel space
+    (correct for H≠W). img:(B,C,H,W), Xp/Yp/vis_ang:(B,). """
     B, C, H, W = img.shape
     dev = img.device
     ys = torch.arange(H, device=dev).float().view(1, H, 1).expand(B, H, W)
     xs = torch.arange(W, device=dev).float().view(1, 1, W).expand(B, H, W)
-    phi = (-vis_ang).view(B, 1, 1)                                   # sample-from γωνία
+    phi = (-vis_ang).view(B, 1, 1)                                   # sample-from angle
     c, s = torch.cos(phi), torch.sin(phi)
     Xc, Yc = xs - Xp.view(B, 1, 1), ys - Yp.view(B, 1, 1)
     Xi = c * Xc - s * Yc + Xp.view(B, 1, 1)
@@ -298,11 +299,11 @@ def _rotate(img, Xp, Yp, vis_ang):
 
 
 def rotate_lander_frame(frame, vis_ang):
-    """ Περιστρέφει ΜΟΝΟ το masked lander κατά vis_ang γύρω από το κεντροειδές του.
-    frame:(B,3,H,W) σε [0,1]· vis_ang:(B,). Επιστρέφει (νέο frame, has(B,)). """
+    """ Rotates ONLY the masked lander by vis_ang about its centroid.
+    frame:(B,3,H,W) in [0,1]; vis_ang:(B,). Returns (new frame, has(B,)). """
     mask = lander_mask(frame)
     Xc, Yc, has = _estimate_centroid(mask)
-    bg = frame * (1 - mask)                                  # σβήσε το παλιό lander -> ΜΑΥΡΟ
+    bg = frame * (1 - mask)                                  # erase the old lander -> BLACK
     frame_rot = _rotate(frame, Xc, Yc, vis_ang)
     mask_rot = _rotate(mask, Xc, Yc, vis_ang)
     return _blend(bg, frame_rot, mask_rot, frame, has), has
@@ -310,13 +311,13 @@ def rotate_lander_frame(frame, vis_ang):
 
 def equivariance_rotation_loss(model, x, mu, scale_theta):
     B, dev = x.size(0), x.device
-    dtheta = (torch.rand(B, device=dev) * 2 - 1) * MAX_ROT_RAD       # ΦΥΣΙΚΟ Δθ (rad)
+    dtheta = (torch.rand(B, device=dev) * 2 - 1) * MAX_ROT_RAD       # PHYSICAL Δθ (rad)
     f0r, h0 = rotate_lander_frame(x[:, :3], VIS_SIGN * dtheta)
     f1r, h1 = rotate_lander_frame(x[:, 3:6], VIS_SIGN * dtheta)
     mu_rot, _ = model.encode(torch.cat([f0r, f1r], dim=1))
     delta = torch.zeros(B, N_SUP, device=dev)
-    delta[:, THETA_DIM] = dtheta * scale_theta                      # Δθ_std στο theta-dim
-    w = (h0 * h1).view(B, 1)                                        # μόνο όπου ανιχνεύτηκε lander
+    delta[:, THETA_DIM] = dtheta * scale_theta                      # Δθ_std on the theta-dim
+    w = (h0 * h1).view(B, 1)                                        # only where the lander was detected
     diff = (mu_rot[:, :N_SUP] - (mu[:, :N_SUP] + delta)) * w
     return (diff ** 2).sum() / (w.sum() * N_SUP + 1e-6)
 
@@ -325,7 +326,7 @@ def equivariance_rotation_loss(model, x, mu, scale_theta):
 # (C) COLOR INVARIANCE  +  (D) REAL-PAIR difference-consistency
 # ---------------------------------------------------------------------------
 def color_jitter(x):
-    """ Per-sample brightness+contrast (ΙΔΙΑ σε όλα τα κανάλια -> συνεπές στα 2 frames). """
+    """ Per-sample brightness+contrast (SAME across channels -> consistent on both frames). """
     B, dev = x.size(0), x.device
     bright = 1.0 + (torch.rand(B, 1, 1, 1, device=dev) * 2 - 1) * COLOR_BRIGHTNESS
     contrast = 1.0 + (torch.rand(B, 1, 1, 1, device=dev) * 2 - 1) * COLOR_CONTRAST
@@ -340,7 +341,7 @@ def color_invariance_loss(model, x, mu):
 
 
 def pair_equivariance_loss(mu, state_t):
-    """ 1ο vs 2ο μισό batch (τυχαία ζεύγη λόγω shuffle): latent_diff ≈ true_state_diff. """
+    """ 1st vs 2nd half of the batch (random pairs thanks to shuffle): latent_diff ≈ true_state_diff. """
     h = mu.size(0) // 2
     if h == 0:
         return mu.new_zeros(())
@@ -350,7 +351,7 @@ def pair_equivariance_loss(mu, state_t):
 
 
 # ---------------------------------------------------------------------------
-# Loss — per-element means· SPLIT-β KL (phys vs style)· + Αρχή 2 (A,B,C,D)
+# Loss — per-element means; split-β KL (phys vs style); + Principle 2 (A,B,C,D)
 # ---------------------------------------------------------------------------
 def vae_losses(model, x, target, state_t, scale_x, scale_y, scale_theta):
     recon, mu, logvar = model(x)
@@ -378,7 +379,7 @@ def weighted_total(L, beta_style):
 
 
 def p2_score(L):
-    """ Selection score: ανεξάρτητο του beta, αλλά ΜΕ τους όρους της Αρχής 2. """
+    """ Selection score: beta-independent, but WITH the Principle 2 terms. """
     return (L["recon"] + LAMBDA_SUP * L["sup"] + LAMBDA_EQUIV * L["equiv"]
             + LAMBDA_ROT * L["rot"] + LAMBDA_COLOR * L["color"] + LAMBDA_PAIR * L["pair"])
 
@@ -424,7 +425,7 @@ def run_epoch(model, loader, device, beta_style, scale_x, scale_y, scale_theta,
 
 @torch.no_grad()
 def physical_rmse(model, loader, device, std_phys):
-    """ RMSE των supervised dims σε ΦΥΣΙΚΕΣ μονάδες (αναιρεί το standardization). """
+    """ RMSE of the supervised dims in PHYSICAL units (undoes the standardization). """
     model.eval()
     se = torch.zeros(N_SUP, device=device); n = 0
     for img_t, img_tp1, action, state_t, state_tp1 in loader:
@@ -438,8 +439,8 @@ def physical_rmse(model, loader, device, std_phys):
 
 @torch.no_grad()
 def save_transform_samples(loader, device, out_dir, n=6):
-    """ Γράφει [original | translation | rotation] PNGs -> οπτική επιβεβαίωση των g(x)
-    (ποιότητα μωβ-mask, ΦΟΡΑ περιστροφής/VIS_SIGN, σωστό κάθετο πρόσημο shift). """
+    """ Writes [original | translation | rotation] PNGs -> a visual check of the g(x)
+    (purple-mask quality, rotation DIRECTION/VIS_SIGN, correct vertical shift sign). """
     from PIL import Image
     os.makedirs(out_dir, exist_ok=True)
     img_t, *_ = next(iter(loader))
@@ -466,7 +467,7 @@ if __name__ == "__main__":
     set_seed(SEED)
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("device:", device, "  (αν 'cpu' -> ενεργοποίησε GPU στην Kaggle!)")
+    print("device:", device, "  (if 'cpu' -> enable the GPU on Kaggle!)")
 
     mean, std = load_norm_stats(NORM_STATS)
     std_phys = torch.tensor(std[:N_SUP], device=device)
@@ -524,7 +525,7 @@ if __name__ == "__main__":
             bad_epochs += 1
             print(f"  (no improvement: {bad_epochs}/{EARLY_STOP_PATIENCE})")
             if bad_epochs >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}.")
+                print(f"Early stopping at epoch {epoch}.")
                 break
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_p2_last.pth"))

@@ -1,46 +1,47 @@
 """
-fusion_kalman.py — (E) Kalman/Bayesian fusion SINDy↔δεδομένα (NO re-training).
+fusion_kalman.py — (E) Kalman/Bayesian fusion of SINDy <-> data (NO re-training).
 
-Δύο variants (όπως ζητήθηκε):
+Two variants (as requested):
 
-  E1) FILTERING / STATE-ESTIMATION  [process = SINDy, measurement = encoded z[:4] κάθε frame]
-      Σε κάθε βήμα: predict (SINDy EKF) -> update με την παρατήρηση (de-std encoded z[:4]).
-      ΣΚΟΠΟΣ: denoised physical-state estimate που συνδυάζει φυσική + δεδομένα. Είναι ESTIMATION
-      task (έχουμε per-frame παρατηρήσεις) -> δείχνει το SINDy+VAE ως state estimator/denoiser
-      (απαντά στα Future Directions C & E του paper). Λάμπει σε noisy images.
+  E1) FILTERING / STATE ESTIMATION  [process = SINDy, measurement = encoded z[:4] every frame]
+      At each step: predict (SINDy EKF) -> update with the observation (de-std encoded z[:4]).
+      GOAL: a denoised physical-state estimate combining physics + data. This is an ESTIMATION
+      task (we have per-frame observations) -> shows SINDy+VAE as a state estimator/denoiser
+      (answers Future Directions C & E of the paper). It shines on noisy images.
 
-  E2) PREDICTIVE PSEUDO-MEASUREMENT  [process = SINDy, "measurement" = πρόβλεψη LSTM]
-      Μένει στο PURE-ROLLOUT task: ο SINDy κάνει predict, η πρόβλεψη του LSTM χρησιμοποιείται ως
-      θορυβώδης παρατήρηση για διόρθωση. Το R_k (αξιοπιστία του LSTM) μεγαλώνει με τον ορίζοντα
-      (compounding) -> το φίλτρο down-weight-άρει αυτόματα το LSTM μακριά: probabilistic εκδοχή
-      του horizon-gate (C), αλλά με covariance bookkeeping.
+  E2) PREDICTIVE PSEUDO-MEASUREMENT  [process = SINDy, "measurement" = the LSTM prediction]
+      Stays on the PURE-ROLLOUT task: SINDy predicts, and the LSTM's prediction is used as a
+      noisy observation for correction. R_k (the LSTM's reliability) grows with the horizon
+      (compounding) -> the filter automatically down-weights the LSTM far out: a probabilistic version
+      of the horizon gate (C), but with covariance bookkeeping.
 
-ΚΑΛΙΜΠΡΑΡΙΣΜΑ (στο val, ΜΟΝΟ calibration των covariances — καμία επανεκπαίδευση δικτύου):
-  * Q  = diag Var( SINDy one-step residual στο GT )          (process-model error)
+CALIBRATION (on val, covariances ONLY — no network retraining):
+  * Q  = diag Var( SINDy one-step residual against GT )       (process-model error)
   * R_enc = diag Var( encoded z[:4] − GT )                   (encoder measurement noise)  [E1]
-  * R_k   = diag Var( LSTM_pred(h=k) − GT ) ανά ορίζοντα k   (LSTM reliability)            [E2]
+  * R_k   = diag Var( LSTM_pred(h=k) − GT ) per horizon k     (LSTM reliability)            [E2]
 
-EKF: discrete map x_{k}=x_{k-1}+Θ(x_{k-1},F)·Ξ, με ΑΡΙΘΜΗΤΙΚΟ Jacobian (batched, vectorized).
+EKF: discrete map x_{k}=x_{k-1}+Θ(x_{k-1},F)·Ξ, with a NUMERICAL Jacobian (batched, vectorized).
 
-Τοποθεσία: flat μέσα στο cartpole/. Τρέξε: !python3 cartpole/fusion_kalman.py
+Location: flat inside cartpole/. Run: !python3 cartpole/fusion_kalman.py
 """
 import os
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sindy_core import *          # SINDy core (numpy) + path-bootstrap για vae/lstm/loader
+from sindy_core import *          # SINDy core (numpy) + path bootstrap for vae/lstm/loader
 from sindy_eval_utils import *    # VAE encode / LSTM rollout / noise / measurement helpers
+
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, outputs
 
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "<cartpole-baseline-vae>"
-LSTM_CKPT = "<cartpole-baseline-lstm>"
-LATENT_ROOT = "/kaggle/working/sindy_latents"
-SAVE_DIR = "/kaggle/working/sindy_kalman_out"
+VAE_CKPT = BASELINE_VAE
+LSTM_CKPT = BASELINE_LSTM
+LATENT_ROOT = outputs("sindy_latents")
+SAVE_DIR = outputs("sindy_kalman_out")
 
 SEQ_LEN, TEST_STRIDE, N_SUP = 30, 1, 4
 
@@ -61,10 +62,10 @@ LOG_Y = True
 
 
 # ---------------------------------------------------------------------------
-# EKF μηχανική (batched over windows)
+# EKF machinery (batched over windows)
 # ---------------------------------------------------------------------------
 def sindy_jacobian(x, u, Xi):
-    """ -> (F (N,4,4) με F[:,i,j]=∂f_i/∂x_j, xpred (N,4))."""
+    """ -> (F (N,4,4) with F[:,i,j]=∂f_i/∂x_j, xpred (N,4))."""
     base = sindy_step(x, u, Xi, FEATURE_MODE)
     N = x.shape[0]
     Fj = np.empty((N, N_SUP, N_SUP))
@@ -76,7 +77,7 @@ def sindy_jacobian(x, u, Xi):
 
 def ekf_run(seed, U, meas, Xi, Q, R, P0):
     """EKF: process = SINDy, measurement model H=I.
-       R: (4,4) σταθερό (E1) ή (L,4,4) ανά βήμα (E2). -> est (N,L,4)."""
+       R: (4,4) constant (E1) or (L,4,4) per step (E2). -> est (N,L,4)."""
     N, L, _ = meas.shape
     x = seed.astype(np.float64).copy()
     P = np.broadcast_to(np.asarray(P0, np.float64), (N, N_SUP, N_SUP)).copy()
@@ -101,7 +102,7 @@ def diag_cov(resid):
 
 
 # ---------------------------------------------------------------------------
-# Calibration των covariances στο val (GT μόνο για calibration)
+# Calibration of the covariances on val (GT used for calibration only)
 # ---------------------------------------------------------------------------
 def calibrate_Q(val_dir, Xi, mean, std):
     X, Fsig, Xn = assemble_fit_data(val_dir, "gt", mean, std)
@@ -119,7 +120,7 @@ def calibrate_R_enc(val_dir, mean, std):
 
 
 def calibrate_R_lstm(lstm, val_dir, mean, std, device):
-    """ -> R_k (L,4,4): per-horizon diag covariance του LSTM error στο val (RAW units)."""
+    """ -> R_k (L,4,4): per-horizon diag covariance of the LSTM error on val (RAW units)."""
     lstm_std, gt_std = lstm_free_run_dir(lstm, val_dir, mean, std, device)
     lstm_raw = destandardize(lstm_std, mean, std)
     gt_raw = destandardize(gt_std, mean, std)
@@ -286,7 +287,7 @@ def main():
 
     for ntype, level in NOISE_CONDS:
         tag = noise_tag(ntype, level)
-        label = "clean" if level == 0.0 else f"{ntype} σ={level:.2f}"
+        label = "clean" if level == 0.0 else f"{ntype} sigma={level:.2f}"
         print(f"\n{'='*60}\n  CONDITION: {label}\n{'='*60}")
 
         nf = make_noise_fn(ntype, level, NOISE_SEED, device)
@@ -297,7 +298,7 @@ def main():
                                       device, noise_fn=nf, splits=("test",),
                                       force=(level != 0.0))["test"]
 
-        # ---- calibrate covariances στο val ----
+        # ---- calibrate the covariances on val ----
         Q = calibrate_Q(val_dir, Xi_e, mean, std)
         R_enc = calibrate_R_enc(val_dir, mean, std)
         R_lstm = calibrate_R_lstm(lstm, val_dir, mean, std, device)

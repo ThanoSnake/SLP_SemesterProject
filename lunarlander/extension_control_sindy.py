@@ -29,13 +29,14 @@ from vae_p1 import VAE_P1
 from vae_p2 import VAE_P2
 from vae_p3 import VAE_P3
 
+from paths import BASELINE_VAE, DATA_ROOT, P1_VAE, P2_VAE, P3_SEMI_VAE, P3_WEAK_VAE, outputs
+
 
 # ---------------------------------------------------------------------------
-# CONFIG - placeholders <...> are filled by the Kaggle bootstrap patcher
+# CONFIG  (paths from config.py via paths.py)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_ext4_control_sindy"
+SAVE_DIR = outputs("lunarlander_ext4_control_sindy")
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
 N_ACTIONS = 4
@@ -44,11 +45,11 @@ IMG_H, IMG_W = 80, 120
 # P1 was better as an encoder-as-sensor; SINDy only replaces the dynamics model.
 MODEL = "baseline"
 MODEL_REGISTRY = {
-    "baseline": (lambda: VAE(latent_size=LATENT_SIZE), "<lunarlander-baseline-vae>"),
-    "p1": (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG), "<lunarlander-p1-vae>"),
-    "p2": (lambda: VAE_P2(latent_size=LATENT_SIZE), "<lunarlander-p2-vae>"),
-    "p3_semi": (lambda: VAE_P3(latent_size=LATENT_SIZE), "<lunarlander-p3-semi-vae>"),
-    "p3_weak": (lambda: VAE_P3(latent_size=LATENT_SIZE), "<lunarlander-p3-weak-vae>"),
+    "baseline": (lambda: VAE(latent_size=LATENT_SIZE), BASELINE_VAE),
+    "p1": (lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG), P1_VAE),
+    "p2": (lambda: VAE_P2(latent_size=LATENT_SIZE), P2_VAE),
+    "p3_semi": (lambda: VAE_P3(latent_size=LATENT_SIZE), P3_SEMI_VAE),
+    "p3_weak": (lambda: VAE_P3(latent_size=LATENT_SIZE), P3_WEAK_VAE),
 }
 
 N_EPISODES = 20

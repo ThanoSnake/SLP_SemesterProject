@@ -1,15 +1,15 @@
 """
-lstm_p2.py — ENCODED-mode LSTM training (Principle 2) για LunarLander, Kaggle/CUDA.
+lstm_p2.py — ENCODED-mode LSTM training (Principle 2) for LunarLander, Kaggle/CUDA.
 
-ΑΥΤΟΝΟΜΟ: VAE_P2, LatentPredictor, loader είναι ΜΕΣΑ στο αρχείο -> κανένα import. Φορτώνεις τον
-ΠΑΓΩΜΕΝΟ P2 VAE (clean, χωρίς noisy labels), κωδικοποιείς τα frames σε 64-dim latents, και
-εκπαιδεύεις το LSTM:
-  * ΕΙΣΟΔΟΣ  : 64 latent dims (z_t) + one-hot action.
-  * GROUND TRUTH (target) : το ΕΠΟΜΕΝΟ ENCODED latent z_{t+1} (όχι physical state injection).
-  * TEACHER FORCING : scheduled sampling (p_tf: 1.0 -> 0.3). Για ΚΑΘΑΡΟ teacher forcing
-    βάλε P_START = P_END = 1.0.
+SELF-CONTAINED: VAE_P2, LatentPredictor and the loader are all INSIDE this file -> no imports. You load the
+FROZEN P2 VAE (clean, no noisy labels), encode the frames into 64-dim latents, and
+train the LSTM:
+  * INPUT   : 64 latent dims (z_t) + one-hot action.
+  * GROUND TRUTH (target) : the NEXT ENCODED latent z_{t+1} (not a physical-state injection).
+  * TEACHER FORCING : scheduled sampling (p_tf: 1.0 -> 0.3). For PURE teacher forcing
+    set P_START = P_END = 1.0.
 
-(Ο P2 VAE έχει ΙΔΙΑ αρχιτεκτονική encode με το baseline — ένας encoder· η Αρχή 2 ζει στο loss.)
+(The P2 VAE has the SAME encode architecture as the baseline — one encoder; Principle 2 lives in the loss.)
 """
 import os
 from os.path import join, basename, isdir
@@ -22,19 +22,20 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
 
+from paths import DATA_ROOT, P2_VAE, outputs
+
 # ===========================================================================
-# CONFIG  — ΑΛΛΑΞΕ ΤΑ PATHS ΣΤΑ ΔΙΚΑ ΣΟΥ KAGGLE DATASETS
+# CONFIG  — POINT THE PATHS AT YOUR OWN KAGGLE DATASETS
 # ===========================================================================
 MODEL = "p2"
 
-DATA_ROOT = "<lunarlander-dataset>"
-VAE_CKPT  = "<lunarlander-p2-vae>"     # Option A: full path to the trained P2 VAE .pth
-LATENT_ROOT = "/kaggle/working/lunarlander_p2_latents"
-SAVE_DIR    = "/kaggle/working/lunarlander_p2_lstm"
+VAE_CKPT  = P2_VAE     # Option A: full path to the trained P2 VAE .pth
+LATENT_ROOT = outputs("lunarlander_p2_latents")
+SAVE_DIR    = outputs("lunarlander_p2_lstm")
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
 N_ACTIONS = 4
-SHIFT = 0                          # clean labels (χωρίς θόρυβο)
+SHIFT = 0                          # clean labels (no noise)
 
 SEQ_LEN = 30
 STRIDE = 5
@@ -74,7 +75,7 @@ def get_device():
 
 
 # ===========================================================================
-# === VAE_P2 (inline· single-encoder αρχιτεκτονική, ΙΔΙΑ με baseline) ========
+# === VAE_P2 (inline; single-encoder architecture, SAME as the baseline) ====
 # ===========================================================================
 class VAE_P2(nn.Module):
     """ encode(x): x = stack(frame_t, frame_t+1) (B,6,80,120) -> mu (64). """
@@ -193,7 +194,7 @@ class LatentSequenceDataset(Dataset):
             for s in range(0, max(n, 0), stride):
                 self.index.append((fi, s))
         if not self.index:
-            raise RuntimeError(f"Δεν βγήκαν παράθυρα από: {root}")
+            raise RuntimeError(f"No windows produced from: {root}")
 
     def __len__(self):
         return len(self.index)
@@ -210,7 +211,7 @@ class LatentSequenceDataset(Dataset):
 
 
 # ===========================================================================
-# Rollout — ENCODED (seed/target = VAE latent· teacher forcing μέσω scheduled sampling)
+# Rollout — ENCODED (seed/target = VAE latent; teacher forcing via scheduled sampling)
 # ===========================================================================
 def rollout(model, batch, p_tf, free_running=False, max_len=None):
     z_t, action, z_tp1, state_t, state_tp1 = batch
@@ -219,7 +220,7 @@ def rollout(model, batch, p_tf, free_running=False, max_len=None):
     device = z_t.device
 
     z_in = z_t[:, 0]                          # ENCODED seed
-    z_gt = z_tp1[:, :L]                       # ground truth = ΕΠΟΜΕΝΑ encoded latents
+    z_gt = z_tp1[:, :L]                       # ground truth = the NEXT encoded latents
 
     hidden = model.init_hidden(B, device)
     preds = []
@@ -257,7 +258,7 @@ def train_epoch(model, loader, optimizer, device, p_tf, cur_len, desc=""):
 
 @torch.no_grad()
 def eval_epoch(model, loader, device, std_phys, desc=""):
-    """ FREE-RUNNING στο ΠΛΗΡΕΣ SEQ_LEN -> physical MSE ανά ορίζοντα vs CLEAN state. """
+    """ FREE-RUNNING at the FULL SEQ_LEN -> physical MSE per horizon vs the CLEAN state. """
     model.eval()
     se, n = None, 0
     for batch in tqdm(loader, desc=desc, leave=False):
@@ -330,7 +331,7 @@ if __name__ == "__main__":
         else:
             bad += 1
             if bad >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}."); break
+                print(f"Early stopping at epoch {epoch}."); break
 
     torch.save(model.state_dict(), join(SAVE_DIR, f"lstm_{MODEL}_last.pth"))
     print("Best val phys-MSE:", best)

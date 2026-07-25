@@ -1,25 +1,25 @@
 """
-test_p2.py — Αξιολόγηση Baseline vs Principle 2 με BRIGHTNESS/CONTRAST jitter (LunarLander).
+test_p2.py — Evaluation of Baseline vs Principle 2 under BRIGHTNESS/CONTRAST jitter (LunarLander).
 
-Port του cart_pole/test_p2.py· state 4D -> 8D. Imports από τα canonical modules του lunarlander/.
+Port of cart_pole/test_p2.py; state 4D -> 8D. Imports from the canonical lunarlander/ modules.
 
-ΕΣΤΙΑΣΜΕΝΗ ΕΚΔΟΣΗ (single-setting) — ίδια δομή/διαγράμματα με το test_p1, αλλά με το
-ΦΩΤΟΜΕΤΡΙΚΟ transform του P2 (ΟΧΙ gaussian noise):
-  * ΜΟΝΟ brightness/contrast jitter level=0.2 (το invariance target της Αρχής 2 — color jitter).
-  * ΜΟΝΟ "encoded" seed mode (z_0 από VAE -> LSTM rollout).
-  * Το transform εφαρμόζεται ΑΠΟΚΛΕΙΣΤΙΚΑ στη φάση encoding (precompute), πριν τον encoder.
+FOCUSED VERSION (single setting) — same structure/plots as test_p1, but with the
+PHOTOMETRIC transform of P2 (NOT gaussian noise):
+  * ONLY brightness/contrast jitter level=0.2 (the invariance target of Principle 2 — color jitter).
+  * ONLY "encoded" seed mode (z_0 from the VAE -> LSTM rollout).
+  * The transform is applied EXCLUSIVELY at the encoding stage (precompute), before the encoder.
 
-ΠΑΡΑΓΟΜΕΝΑ:
-  (1) Overall median+IQR state-MSE ανά horizon (mean over dims)   [standardized]
-  (2) Per-dim median+IQR state-MSE ανά horizon (2×4)              [standardized]
-  (3) Paired Δ (baseline − p2) median + 95% bootstrap CI ανά horizon
-  (4) ΦΥΣΙΚΑ ΜΕΓΕΘΗ ενός ΤΥΧΑΙΟΥ test window: GT vs baseline vs p2 (2×4)  [physical units]
-  (5) FRAME ENCODING CHECK: τυχαίο frame -> transform -> encode με baseline & p2 -> διαφορά από GT.
-      (Δείχνει την INVARIANCE του P2: η φυσική του κωδικοποίηση μετατοπίζεται λιγότερο.)
+OUTPUTS:
+  (1) Overall median+IQR state-MSE per horizon (mean over dims)   [standardized]
+  (2) Per-dim median+IQR state-MSE per horizon (2×4)              [standardized]
+  (3) Paired Δ (baseline − p2) median + 95% bootstrap CI per horizon
+  (4) PHYSICAL QUANTITIES of a RANDOM test window: GT vs baseline vs p2 (2×4)  [physical units]
+  (5) FRAME ENCODING CHECK: a random frame -> transform -> encode with baseline & p2 -> the gap from GT.
+      (Shows P2's INVARIANCE: its physical encoding shifts less.)
 
-ΓΙΑΤΙ brightness/contrast: το P2 εκπαιδεύτηκε να είναι ΑΜΕΤΑΒΛΗΤΟ σε φωτεινότητα/αντίθεση
-(color invariance loss) -> αυτό το transform αναδεικνύει το πλεονέκτημά του (αλλάζει την
-εικόνα ΧΩΡΙΣ να αλλάζει το physical state -> «αλλάζω input, μετρώ vs clean GT»).
+WHY brightness/contrast: P2 was trained to be INVARIANT to brightness/contrast
+(color invariance loss) -> this transform is what brings out its advantage (it changes the
+image WITHOUT changing the physical state -> "perturb the input, measure against clean GT").
 """
 import os
 import numpy as np
@@ -33,12 +33,13 @@ from vae_p2 import VAE_P2
 from lstm import LatentPredictor
 from loader import LatentSequenceDataset, load_norm_stats, list_npz
 
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, P2_LSTM, P2_VAE, outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG — placeholders <...> τα συμπληρώνει το bootstrap patcher (CONFIG_PATHS)
+# CONFIG  (paths from config.py via paths.py)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_p2_out"
+SAVE_DIR = outputs("lunarlander_p2_out")
 
 SHIFT = 0
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
@@ -53,17 +54,17 @@ BOOT_SEED = 0
 LOG_Y = True
 
 # ---------------------------------------------------------------------------
-# TRANSFORM CONFIG — μοναδικό setting: brightness/contrast level=0.2
+# TRANSFORM CONFIG — a single setting: brightness/contrast level=0.2
 # ---------------------------------------------------------------------------
 TRANSFORM_TYPE = "brightness_contrast"   # "brightness" | "contrast" | "brightness_contrast"
 TRANSFORM_LEVEL = 0.1                     # factor = 1 ± level
-TRANSFORM_SIGN = +1.0                     # +1 -> πιο φωτεινό/αντίθετο· -1 -> πιο σκούρο
+TRANSFORM_SIGN = +1.0                     # +1 -> brighter/higher contrast; -1 -> darker
 
-# Trajectory plot (4): τυχαίο test window
+# Trajectory plot (4): a random test window
 TRAJ_SEED = None
 TRAJ_WINDOW = None
 N_TRAJ_WINDOWS = 1
-# Frame-encoding check (5): τυχαίο frame
+# Frame-encoding check (5): a random frame
 FRAME_SEED = None
 
 # ---------------------------------------------------------------------------
@@ -72,14 +73,14 @@ FRAME_SEED = None
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<lunarlander-baseline-vae>",
-     "lstm_ckpt": "<lunarlander-baseline-lstm>",
-     "latent_root": "/kaggle/working/lunarlander_p2_latents/baseline"},
+     "vae_ckpt": BASELINE_VAE,
+     "lstm_ckpt": BASELINE_LSTM,
+     "latent_root": outputs("lunarlander_p2_latents/baseline")},
     {"label": "Principle 2", "color": "C2",
      "make_vae": lambda: VAE_P2(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<lunarlander-p2-vae>",
-     "lstm_ckpt": "<lunarlander-p2-lstm>",
-     "latent_root": "/kaggle/working/lunarlander_p2_latents/p2"},
+     "vae_ckpt": P2_VAE,
+     "lstm_ckpt": P2_LSTM,
+     "latent_root": outputs("lunarlander_p2_latents/p2")},
 ]
 
 
@@ -92,13 +93,13 @@ def apply_brightness(img, level, sign):
 
 
 def apply_contrast(img, level, sign):
-    """Contrast γύρω από το per-frame mean: (img - m) * (1 ± level) + m."""
+    """Contrast around the per-frame mean: (img - m) * (1 ± level) + m."""
     m = img.mean(dim=(1, 2, 3), keepdim=True)
     return torch.clamp((img - m) * (1.0 + sign * level) + m, 0.0, 1.0)
 
 
 def apply_brightness_contrast(img, level, sign):
-    """Brightness + contrast μαζί (όπως το color_jitter του P2 training)."""
+    """Brightness + contrast together (like P2's training color_jitter)."""
     out = img * (1.0 + sign * level)
     m = out.mean(dim=(1, 2, 3), keepdim=True)
     return torch.clamp((out - m) * (1.0 + sign * level) + m, 0.0, 1.0)
@@ -119,7 +120,7 @@ def make_transform_fn(transform_type, level):
 
 
 # ---------------------------------------------------------------------------
-# precompute_latents_transformed — εφαρμόζει το transform ΠΡΙΝ το encoding
+# precompute_latents_transformed — applies the transform BEFORE encoding
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def precompute_latents_transformed(encode_fn, root, out_root, transform_fn,
@@ -235,7 +236,7 @@ def evaluate_model_transformed(m, device, mean_s, std_s):
 
 
 # ---------------------------------------------------------------------------
-# Plots (1)–(4): ίδια με το test_p1
+# Plots (1)–(4): same as test_p1
 # ---------------------------------------------------------------------------
 def plot_median_iqr(err, save_dir):
     """(1) Overall median+IQR state-MSE (mean over dims) — Baseline vs P2."""
@@ -303,7 +304,7 @@ def plot_paired(err, save_dir, rng):
 
 
 def plot_trajectory(data, mean_s, std_s, save_dir, rng):
-    """(4) Physical trajectory ενός ΤΥΧΑΙΟΥ window: GT vs baseline vs p2 (2×4)."""
+    """(4) Physical trajectory of a RANDOM window: GT vs baseline vs p2 (2×4)."""
     base, p2 = MODELS[0]["label"], MODELS[1]["label"]
     mean8 = np.asarray(mean_s[:N_SUP], np.float64)
     std8 = np.asarray(std_s[:N_SUP], np.float64)
@@ -343,8 +344,8 @@ def plot_trajectory(data, mean_s, std_s, save_dir, rng):
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def plot_frame_encoding(mean_s, std_s, device, save_dir, rng):
-    """Τυχαίο frame -> transform -> οπτικοποίηση & encode με baseline & p2.
-    Η INVARIANCE του P2 φαίνεται ως μικρότερη μετατόπιση clean->transformed."""
+    """Random frame -> transform -> visualize & encode with baseline & p2.
+    P2's INVARIANCE shows up as a smaller clean->transformed shift."""
     base, p2 = MODELS[0]["label"], MODELS[1]["label"]
     mean8 = np.asarray(mean_s[:N_SUP], np.float64)
     std8 = np.asarray(std_s[:N_SUP], np.float64)

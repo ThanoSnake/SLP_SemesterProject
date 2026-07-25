@@ -23,8 +23,8 @@ Two parts (each toggleable; neither touches the baseline vae.py / lstm.py):
     against the baseline VAE (which has only aleatoric). Also renders a per-pixel
     reconstruction-uncertainty heatmap.
 
-Kaggle: placeholders <...> are patched by kaggle-run.ipynb. Set TRAIN_DROPOUT_* to train+save
-fresh dropout models, or False to load from <cartpole-dropout-lstm> / <cartpole-dropout-vae>.
+Paths come from config.py (override with OUTPUT_DIR / CARTPOLE_* env vars). Set TRAIN_DROPOUT_* to train+save
+fresh dropout models, or False to load from CARTPOLE_DROPOUT_LSTM / CARTPOLE_DROPOUT_VAE.
 Run:  !python3 cartpole/uncertainty.py
 """
 import os
@@ -44,18 +44,19 @@ from loader import list_npz, precompute_latents, LatentSequenceDataset, VaePairD
 from vae import VAE, encode_fn
 from lstm import LatentPredictor          # baseline (no dropout) — imported, NOT modified
 
-# ---------------------------------------------------------------------------
-# CONFIG  (placeholders <...> patched by kaggle-run.ipynb)
-# ---------------------------------------------------------------------------
-DATA_ROOT = "<cartpole-dataset>"
-NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "<cartpole-baseline-vae>"
-BASELINE_LSTM_CKPT = "<cartpole-baseline-lstm>"
-DROPOUT_LSTM_CKPT = "<dropout-lstm>"      # NEW: add to kaggle-run.ipynb CONFIG_PATHS
-DROPOUT_VAE_CKPT = "<dropout-vae>"        # NEW: add to kaggle-run.ipynb CONFIG_PATHS
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, DROPOUT_LSTM, DROPOUT_VAE, outputs
 
-LATENT_ROOT = "/kaggle/working/cartpole_unc_latents"
-SAVE_DIR = "/kaggle/working/cartpole_uncertainty"
+# ---------------------------------------------------------------------------
+# CONFIG  (paths from config.py via paths.py)
+# ---------------------------------------------------------------------------
+NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
+VAE_CKPT = BASELINE_VAE
+BASELINE_LSTM_CKPT = BASELINE_LSTM
+DROPOUT_LSTM_CKPT = DROPOUT_LSTM
+DROPOUT_VAE_CKPT = DROPOUT_VAE
+
+LATENT_ROOT = outputs("cartpole_unc_latents")
+SAVE_DIR = outputs("cartpole_uncertainty")
 
 LATENT_SIZE, N_SUP, N_IMG = 64, 4, 60
 N_ACTIONS, HIDDEN, LAYERS = 2, 64, 2

@@ -40,6 +40,8 @@ from sindy import (
     _train_rollout,
 )
 
+from paths import HNN, outputs
+
 #
 #  Config
 #
@@ -50,8 +52,8 @@ MODEL = next(m for m in MODELS if m["label"] == "Baseline")
 H_HIDDEN = 64            # width of the Hamiltonian MLP H_theta
 G_HIDDEN = 32            # width of the input-map MLP g_theta
 DT = 1.0                 # integration step (latent frame interval; the net absorbs scaling)
-HNN_PRETRAINED_CKPT = "<cartpole-baseline-hnn>"
-SAVE_DIR = "/kaggle/working/cartpole_hnn"
+HNN_PRETRAINED_CKPT = HNN
+SAVE_DIR = outputs("cartpole_hnn")
 STATE_NAMES = ["x", "x_dot", "theta", "theta_dot"]
 EVAL_LEVEL = 0.0         # noise level used for the trajectory/energy visuals (0.0 = clean)
 TRAIN_HNN = False         # True -> train a fresh HNN (+save to HNN_CKPT); False -> load HNN_CKPT

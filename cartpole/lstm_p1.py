@@ -21,14 +21,15 @@ from tqdm.auto import tqdm
 from vae_p1 import VAE_P1, encode_fn
 from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 
+from paths import DATA_ROOT, P1_VAE, outputs
+
 #
 #  Config
 #
-DATA_ROOT = "<cartpole-dataset>"
-LATENT_ROOT = "/kaggle/working/cartpole_p1_latents"
+LATENT_ROOT = outputs("cartpole_p1_latents")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "<cartpole-p1-vae>"
-SAVE_DIR = "/kaggle/working/cartpole_p1_lstm"
+VAE_CKPT = P1_VAE
+SAVE_DIR = outputs("cartpole_p1_lstm")
 
 LATENT_SIZE = 64
 N_SUP = 4

@@ -1,17 +1,17 @@
 """
-loader_control.py — MULTI-ROOT loader για το ΣΥΝΔΥΑΣΜΕΝΟ control + elite dataset (~12k).
+loader_control.py — MULTI-ROOT loader for the COMBINED control + elite dataset (~12k).
 
-Αντίστοιχο του loader.py, αλλά:
-  * MULTI-ROOT: κάθε function/dataset δέχεται str Ή λίστα από split-dirs
-    (π.χ. [control/train, elite/train]) -> ένωση χωρίς αντιγραφή αρχείων.
-  * precompute_latents: STREAMING (ένα επεισόδιο τη φορά -> χαμηλή RAM), unique ονόματα
-    εξόδου (ep000000.npz, ...) ώστε να μη συγκρούονται μεταξύ datasets, + WIND_FILTER.
-  * WIND_FILTER ("all"|"clean"|"wind"): φιλτράρει βάσει του key 'wind_enabled' των νέων .npz.
-  * LatentSequenceDataset: multi-root, eager (latents ~MB -> ΟΚ ακόμα και για 12k).
-  * TransitionDataset: states/acts/next_states/rewards/dones (ΧΩΡΙΣ εικόνες) για reward selection.
+The counterpart of loader.py, but:
+  * MULTI-ROOT: every function/dataset accepts a str OR a list of split-dirs
+    (e.g. [control/train, elite/train]) -> a union without copying files.
+  * precompute_latents: STREAMING (one episode at a time -> low RAM), unique output
+    names (ep000000.npz, ...) so datasets do not collide, + WIND_FILTER.
+  * WIND_FILTER ("all"|"clean"|"wind"): filters on the 'wind_enabled' key of the new .npz files.
+  * LatentSequenceDataset: multi-root, eager (latents are ~MB -> fine even for 12k).
+  * TransitionDataset: states/acts/next_states/rewards/dones (NO images) for reward selection.
 
-ΣΗΜ. norm_stats: επειδή ΞΑΝΑΧΡΗΣΙΜΟΠΟΙΟΥΜΕ το ίδιο VAE, χρησιμοποίησε τα ΑΡΧΙΚΑ norm_stats
-(αυτά που εκπαιδεύτηκε το VAE) -> το mu[:8] είναι σε εκείνο το standardized space.
+NOTE on norm_stats: because we REUSE the same VAE, use the ORIGINAL norm_stats
+(the ones the VAE was trained with) -> mu[:8] lives in that standardized space.
 """
 import os
 from os import listdir, makedirs
@@ -38,7 +38,7 @@ def _as_roots(roots):
 
 
 def list_npz(roots):
-    """ΟΛΑ τα .npz κάτω από ένα ή περισσότερα roots (str ή λίστα)."""
+    """ALL the .npz files under one or more roots (str or list)."""
     files = []
     for root in _as_roots(roots):
         if not isdir(root):
@@ -73,8 +73,8 @@ def _wind_skip(d, wind_filter):
 
 
 def compute_norm_stats(roots, out_path):
-    """mean/std των states στο ΣΥΝΔΥΑΣΜΕΝΟ train (φθηνό· διαβάζει μόνο 'states').
-    ΣΗΜ.: για reuse του ίδιου VAE προτίμησε τα ΑΡΧΙΚΑ norm_stats αντί γι' αυτά."""
+    """mean/std of the states over the COMBINED train split (cheap; reads only 'states').
+    NOTE: to reuse the same VAE, prefer the ORIGINAL norm_stats over these."""
     files = list_npz(roots)
     if not files:
         raise RuntimeError(f"No .npz under {roots}")
@@ -91,12 +91,12 @@ def compute_norm_stats(roots, out_path):
 
 
 # ---------------------------------------------------------------------------
-# Pre-encoding (STREAMING) -> z-ακολουθίες. Multi-root + WIND_FILTER + unique names.
+# Pre-encoding (STREAMING) -> z sequences. Multi-root + WIND_FILTER + unique names.
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def precompute_latents(encode_fn, roots, out_root, shift=0, batch=256, device="cuda", wind_filter="all"):
-    """ encode_fn(img_t, img_tp1) -> z. Ένα επεισόδιο τη φορά (χαμηλή RAM).
-    wind_filter: 'all' (όλα) | 'clean' (μόνο χωρίς άνεμο) | 'wind' (μόνο με άνεμο). """
+    """ encode_fn(img_t, img_tp1) -> z. One episode at a time (low RAM).
+    wind_filter: 'all' | 'clean' (no wind only) | 'wind' (with wind only). """
     makedirs(out_root, exist_ok=True)
     gi, skipped = 0, 0
     for f in tqdm(list_npz(roots), desc=f"encoding ({wind_filter})"):
@@ -122,11 +122,11 @@ def precompute_latents(encode_fn, roots, out_root, shift=0, batch=256, device="c
 
 
 # ---------------------------------------------------------------------------
-# LSTM: παράθυρα latents — multi-root, eager
+# LSTM: windows of latents — multi-root, eager
 # ---------------------------------------------------------------------------
 class LatentSequenceDataset(torch.utils.data.Dataset):
-    """ seq_len ΜΕΤΑΒΑΣΕΙΣ latents. Επιστρέφει: z_t (L,latent), action (L,), z_tp1 (L,latent),
-    state_t (L,8), state_tp1 (L,8). Multi-root (str ή λίστα). """
+    """ seq_len latent TRANSITIONS. Returns: z_t (L,latent), action (L,), z_tp1 (L,latent),
+    state_t (L,8), state_tp1 (L,8). Multi-root (str or list). """
     def __init__(self, roots, seq_len=30, stride=1, state_mean=None, state_std=None):
         self.seq_len = seq_len
         self.mean = None if state_mean is None else np.asarray(state_mean, np.float32)
@@ -157,12 +157,12 @@ class LatentSequenceDataset(torch.utils.data.Dataset):
 
 
 # ---------------------------------------------------------------------------
-# Transitions (reward selection / MPC) — ΧΩΡΙΣ εικόνες -> ελάχιστη RAM
+# Transitions (reward selection / MPC) — NO images -> minimal RAM
 # ---------------------------------------------------------------------------
 class TransitionDataset(torch.utils.data.Dataset):
     """ Per-step: state_t (8), action (), next_state (8), reward (), done ().
-    Νέα keys (next_states/rewards/dones)· για παλιά αρχεία παράγει από t+1.
-    state_mean/std -> standardized, αλλιώς RAW. wind_filter όπως στο precompute. """
+    New keys (next_states/rewards/dones); for old files they are derived from t+1.
+    state_mean/std -> standardized, otherwise RAW. wind_filter as in precompute. """
     def __init__(self, roots, shift=0, state_mean=None, state_std=None, wind_filter="all"):
         self.mean = None if state_mean is None else np.asarray(state_mean, np.float32)
         self.std = None if state_std is None else np.asarray(state_std, np.float32)

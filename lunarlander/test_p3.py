@@ -1,19 +1,19 @@
 """
-test_p3.py — Αξιολόγηση Baseline vs P3-semi vs P3-weak με ΘΟΡΥΒΩΔΕΙΣ εικόνες (LunarLander).
+test_p3.py — Evaluation of Baseline vs P3-semi vs P3-weak on NOISY images (LunarLander).
 
-Port του cart_pole/test_p3.py· state 4D -> 8D. Imports από τα canonical modules του lunarlander/.
+Port of cart_pole/test_p3.py; state 4D -> 8D. Imports from the canonical lunarlander/ modules.
 
-ΕΣΤΙΑΣΜΕΝΗ ΕΚΔΟΣΗ (single-setting) — ίδια δομή/διαγράμματα με test_p1/test_p2, αλλά με ΤΡΙΑ
-μοντέλα (Baseline, P3 semi, P3 weak· ίδια monolithic αρχιτεκτονική VAE, διαφέρει μόνο η ΕΠΟΠΤΕΙΑ):
-  * ΜΟΝΟ μικρός gaussian θόρυβος σ=0.05.
-  * ΜΟΝΟ "encoded" seed mode (z_0 από VAE -> LSTM rollout).
-  * Ο θόρυβος εφαρμόζεται ΑΠΟΚΛΕΙΣΤΙΚΑ στη φάση encoding (precompute), πριν τον encoder.
+FOCUSED VERSION (single setting) — same structure/plots as test_p1/test_p2, but with THREE
+models (Baseline, P3 semi, P3 weak; the same monolithic VAE architecture, only the SUPERVISION differs):
+  * ONLY a small gaussian noise σ=0.05.
+  * ONLY "encoded" seed mode (z_0 from the VAE -> LSTM rollout).
+  * Noise is applied EXCLUSIVELY at the encoding stage (precompute), before the encoder.
 
-ΠΑΡΑΓΟΜΕΝΑ:
-  (1) Overall median+IQR state-MSE ανά horizon (mean over dims) — 3 καμπύλες   [standardized]
-  (2) Per-dim median+IQR state-MSE ανά horizon (2×4) — 3 καμπύλες              [standardized]
-  (3) Paired Δ (Baseline − semi) και (Baseline − weak) + 95% bootstrap CI
-  (4) ΦΥΣΙΚΑ ΜΕΓΕΘΗ ενός ΤΥΧΑΙΟΥ test window: GT vs baseline vs semi vs weak (2×4)  [physical units]
+OUTPUTS:
+  (1) Overall median+IQR state-MSE per horizon (mean over dims) — 3 curves   [standardized]
+  (2) Per-dim median+IQR state-MSE per horizon (2×4) — 3 curves              [standardized]
+  (3) Paired Δ (Baseline − semi) and (Baseline − weak) + 95% bootstrap CI
+  (4) PHYSICAL QUANTITIES of a RANDOM test window: GT vs baseline vs semi vs weak (2×4)  [physical units]
 """
 import os
 import numpy as np
@@ -27,12 +27,13 @@ from vae_p3 import VAE_P3
 from lstm import LatentPredictor
 from loader import LatentSequenceDataset, load_norm_stats, list_npz
 
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, P3_SEMI_LSTM, P3_SEMI_VAE, P3_WEAK_LSTM, P3_WEAK_VAE, outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG — placeholders <...> τα συμπληρώνει το bootstrap patcher (CONFIG_PATHS)
+# CONFIG  (paths from config.py via paths.py)
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_p3_out"
+SAVE_DIR = outputs("lunarlander_p3_out")
 
 SHIFT = 0
 LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
@@ -47,38 +48,38 @@ BOOT_SEED = 0
 LOG_Y = True
 
 # ---------------------------------------------------------------------------
-# NOISE CONFIG — SWEEP πολλαπλών επιπέδων gaussian θορύβου
+# NOISE CONFIG — a SWEEP over several gaussian noise levels
 # ---------------------------------------------------------------------------
 NOISE_TYPE = "gaussian"                      # "gaussian" | "salt_pepper"
-NOISE_SIGMAS = [0.01, 0.02, 0.03, 0.05, 0.1]  # λίστα επιπέδων σ -> ένα run ανά επίπεδο
-NOISE_SIGMA = NOISE_SIGMAS[0]                # ΤΡΕΧΟΝ επίπεδο (αλλάζει στο loop του main)
+NOISE_SIGMAS = [0.01, 0.02, 0.03, 0.05, 0.1]  # list of σ levels -> one run per level
+NOISE_SIGMA = NOISE_SIGMAS[0]                # CURRENT level (changed in the main loop)
 NOISE_SEED = 42
 
-# Trajectory plot (4): τυχαίο test window
+# Trajectory plot (4): a random test window
 TRAJ_SEED = None
 TRAJ_WINDOW = None
 N_TRAJ_WINDOWS = 1
 
 # ---------------------------------------------------------------------------
 # Model definitions — Baseline vs P3 semi vs P3 weak
-# (ΙΔΙΑ monolithic αρχιτεκτονική· διαφέρει μόνο η εποπτεία -> διαφορετικά checkpoints)
+# (the SAME monolithic architecture; only the supervision differs -> different checkpoints)
 # ---------------------------------------------------------------------------
 MODELS = [
     {"label": "Baseline", "color": "C0",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<lunarlander-baseline-vae>",
-     "lstm_ckpt": "<lunarlander-baseline-lstm>",
-     "latent_root": "/kaggle/working/lunarlander_p3_latents/baseline"},
+     "vae_ckpt": BASELINE_VAE,
+     "lstm_ckpt": BASELINE_LSTM,
+     "latent_root": outputs("lunarlander_p3_latents/baseline")},
     {"label": "P3 semi", "color": "C1",
      "make_vae": lambda: VAE_P3(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<lunarlander-p3-semi-vae>",
-     "lstm_ckpt": "<lunarlander-p3-semi-lstm>",
-     "latent_root": "/kaggle/working/lunarlander_p3_latents/p3_semi"},
+     "vae_ckpt": P3_SEMI_VAE,
+     "lstm_ckpt": P3_SEMI_LSTM,
+     "latent_root": outputs("lunarlander_p3_latents/p3_semi")},
     {"label": "P3 weak", "color": "C3",
      "make_vae": lambda: VAE_P3(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<lunarlander-p3-weak-vae>",
-     "lstm_ckpt": "<lunarlander-p3-weak-lstm>",
-     "latent_root": "/kaggle/working/lunarlander_p3_latents/p3_weak"},
+     "vae_ckpt": P3_WEAK_VAE,
+     "lstm_ckpt": P3_WEAK_LSTM,
+     "latent_root": outputs("lunarlander_p3_latents/p3_weak")},
 ]
 
 
@@ -111,7 +112,7 @@ def make_noise_fn(noise_type, level, seed, device):
 
 
 # ---------------------------------------------------------------------------
-# NOISY precompute_latents — εφαρμόζει noise ΠΡΙΝ το encoding
+# NOISY precompute_latents — applies the noise BEFORE encoding
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def precompute_latents_noisy(encode_fn, root, out_root, noise_fn, shift=0, batch=256, device="cuda"):
@@ -229,7 +230,7 @@ def evaluate_model_noisy(m, device, mean_s, std_s):
 # Plots
 # ---------------------------------------------------------------------------
 def plot_median_iqr(err, save_dir):
-    """(1) Overall median+IQR state-MSE (mean over dims) — όλα τα μοντέλα."""
+    """(1) Overall median+IQR state-MSE (mean over dims) — all models."""
     horizons = np.arange(1, SEQ_LEN + 1)
     plt.figure(figsize=(6.8, 4.8))
     for m in MODELS:
@@ -249,7 +250,7 @@ def plot_median_iqr(err, save_dir):
 
 
 def plot_perdim(err, save_dir):
-    """(2) Per-dim median+IQR state-MSE (2×4) — όλα τα μοντέλα."""
+    """(2) Per-dim median+IQR state-MSE (2×4) — all models."""
     horizons = np.arange(1, SEQ_LEN + 1)
     fig, axes = plt.subplots(2, 4, figsize=(16, 8), squeeze=False)
     for d in range(N_SUP):
@@ -275,7 +276,7 @@ def plot_perdim(err, save_dir):
 
 
 def plot_paired(err, save_dir, rng):
-    """(3) Paired Δ (Baseline − variant) median + 95% bootstrap CI, για κάθε variant."""
+    """(3) Paired Δ (Baseline − variant) median + 95% bootstrap CI, for each variant."""
     base = MODELS[0]["label"]
     variants = MODELS[1:]
     horizons = np.arange(1, SEQ_LEN + 1)
@@ -301,7 +302,7 @@ def plot_paired(err, save_dir, rng):
 
 
 def plot_trajectory(data, mean_s, std_s, save_dir, rng):
-    """(4) Physical trajectory ενός ΤΥΧΑΙΟΥ window: GT vs baseline vs semi vs weak (2×4)."""
+    """(4) Physical trajectory of a RANDOM window: GT vs baseline vs semi vs weak (2×4)."""
     base = MODELS[0]["label"]
     mean8 = np.asarray(mean_s[:N_SUP], np.float64)
     std8 = np.asarray(std_s[:N_SUP], np.float64)
@@ -339,11 +340,11 @@ def plot_trajectory(data, mean_s, std_s, save_dir, rng):
 
 
 # ---------------------------------------------------------------------------
-# (5) Degradation summary πάνω σε ΟΛΟ το σ-sweep
+# (5) Degradation summary over the WHOLE σ sweep
 # ---------------------------------------------------------------------------
 def plot_degradation(deg, save_dir):
-    """median state-MSE (mean over dims) vs σ, σε σταθερούς ορίζοντες — μία γραμμή ανά μοντέλο.
-    deg[σ][label] = median MSE curve (L,). Πιο flat καμπύλη = πιο robust στον θόρυβο."""
+    """median state-MSE (mean over dims) vs σ, at fixed horizons — one line per model.
+    deg[σ][label] = median MSE curve (L,). A flatter curve = more robust to noise."""
     SUMMARY_HORIZONS = [h for h in (1, 10, 20, 30) if h <= SEQ_LEN]
     sig = NOISE_SIGMAS
     fig, axes = plt.subplots(1, len(SUMMARY_HORIZONS),
@@ -359,7 +360,7 @@ def plot_degradation(deg, save_dir):
         if hi == 0:
             ax.set_ylabel("median state-MSE")
         ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8)
-    plt.suptitle(f"Degradation under {NOISE_TYPE} noise — encoded (πιο flat = πιο robust)", y=1.02)
+    plt.suptitle(f"Degradation under {NOISE_TYPE} noise — encoded (flatter = more robust)", y=1.02)
     plt.tight_layout()
     p = os.path.join(save_dir, "p3_degradation_encoded.png")
     plt.savefig(p, dpi=150, bbox_inches="tight"); plt.close(fig)
@@ -367,7 +368,7 @@ def plot_degradation(deg, save_dir):
 
 
 # ---------------------------------------------------------------------------
-# Main — SWEEP πάνω στα NOISE_SIGMAS
+# Main — SWEEP over NOISE_SIGMAS
 # ---------------------------------------------------------------------------
 def main():
     global NOISE_SIGMA
@@ -386,7 +387,7 @@ def main():
                  "noise_type": NOISE_TYPE, "noise_sigmas": np.array(NOISE_SIGMAS)}
 
     for sigma in NOISE_SIGMAS:
-        NOISE_SIGMA = sigma               # οι plot/eval functions διαβάζουν αυτό το global
+        NOISE_SIGMA = sigma               # the plot/eval functions read this global
         tag = f"{sigma:.2f}".replace(".", "p")
         print(f"\n{'#'*64}\n#  NOISE LEVEL: {NOISE_TYPE} σ={sigma:.2f}\n{'#'*64}")
         data = {m["label"]: evaluate_model_noisy(m, device, mean_s, std_s) for m in MODELS}
@@ -421,7 +422,7 @@ def main():
             print(f"  Δ(base−{v['label']}) " +
                   "  ".join(f"h{h}={med_d[h-1]:+.5f}[{lo_d[h-1]:+.5f},{hi_d[h-1]:+.5f}]" for h in HS))
 
-    # ---- (5) degradation summary πάνω σε όλο το sweep ----
+    # ---- (5) degradation summary over the whole sweep ----
     plot_degradation(deg, SAVE_DIR)
 
     np.savez(os.path.join(SAVE_DIR, "cmp_p3_noise_sweep_curves.npz"), **save_dict)

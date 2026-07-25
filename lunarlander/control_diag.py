@@ -1,22 +1,22 @@
 """
-control_diag.py — Στοχευμένα διαγνωστικά για το ΓΙΑΤΙ αποτυγχάνει το model-based control του
-control.py (ενώ ο enc_pid προσγειώνεται). ΚΑΜΙΑ τυφλή αλλαγή — πρώτα αποδείξεις με δεδομένα.
+control_diag.py — Targeted diagnostics for WHY the model-based control of
+control.py fails (while enc_pid lands). NO blind changes — evidence from data first.
 
-Τέσσερα tests (τρέξε & δες τα prints/plots):
+Four tests (run it and read the prints/plots):
 
-  D1) DREAM ACCURACY — open-loop LSTM rollout από ΑΛΗΘΙΝΟ seed + ΑΛΗΘΙΝΑ actions σε test τροχιές,
-      vs GT, standardized RMSE ανά horizon & dim. -> Πόσο μακριά εμπιστεύεσαι το «όνειρο»; (Η1)
+  D1) DREAM ACCURACY — open-loop LSTM rollout from a TRUE seed + TRUE actions on test trajectories,
+      vs GT, standardized RMSE per horizon & dim. -> How far can you trust the "dream"? (H1)
 
-  D2) ACTION RESPONSE — από ΑΛΗΘΙΝΟ mid-flight seed, ονειρέψου ΣΤΑΘΕΡΗ action {0,1,2,3} και δες αν
-      η απόκριση έχει νόημα (main engine -> vy ανεβαίνει· side -> ω αλλάζει πρόσημο). -> bug/σημασία.
+  D2) ACTION RESPONSE — from a TRUE mid-flight seed, dream a CONSTANT action {0,1,2,3} and check whether
+      the response makes sense (main engine -> vy rises; side -> ω changes sign). -> bug/significance.
 
-  D3) DREAM-VALUE vs REALITY — από ΙΔΙΟ start state, για M τυχαίες ακολουθίες: dream_value (MPC cost)
-      ΕΝΑΝΤΙ του ΠΡΑΓΜΑΤΙΚΟΥ gym return (εκτέλεση στο env). Correlation. -> Αν ≤0, ο planner
-      βελτιστοποιεί ΛΑΘΟΣ πράγμα = exploitation (Η2). Το «καπνίζον όπλο».
+  D3) DREAM-VALUE vs REALITY — from the SAME start state, for M random sequences: dream_value (MPC cost)
+      AGAINST the REAL gym return (executed in the env). Correlation. -> If <=0, the planner
+      optimizes the WRONG thing = exploitation (H2). The "smoking gun".
 
-  D4) ENCODER R² ανά dim — επιβεβαιώνει ότι η αντίληψη (ειδικά ταχύτητες) είναι/δεν είναι ο ένοχος.
+  D4) ENCODER R² per dim — confirms whether perception (especially the velocities) is or is not the culprit.
 
-Επαναχρησιμοποιεί τα config/functions του control.py (ίδια checkpoints/paths· patched μαζί).
+Reuses control.py's config/functions (the same checkpoints/paths).
 Run:  !python3 lunarlander/control_diag.py
 """
 import os
@@ -25,7 +25,7 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-import control as C                       # ίδιο config/functions· import ΔΕΝ τρέχει το main()
+import control as C                       # same config/functions; the import does NOT run main()
 from loader import list_npz
 
 N_SUP, N_ACTIONS = C.N_SUP, C.N_ACTIONS
@@ -38,7 +38,7 @@ N_EPS_D1 = 8
 H_LIST = [1, 5, 10, 24]
 H_MAX = 24
 STRIDE = 10
-M_D3 = 96            # τυχαίες ακολουθίες για το value-vs-reality
+M_D3 = 96            # random sequences for the value-vs-reality test
 H_D3 = 24
 WIND_D3 = False
 
@@ -71,7 +71,7 @@ def d1_dream_accuracy(vae, lstm, mean_t, std_t, std8, device, test_dir):
     files = list_npz(test_dir)
     if not files:
         print("[D1] no test episodes:", test_dir); return
-    # διάλεξε τα ΜΕΓΑΛΥΤΕΡΑ επεισόδια (πλούσια δυναμική)
+    # pick the LONGEST episodes (rich dynamics)
     lens = [(np.load(f)["states"].shape[0], f) for f in files[:200]]
     pick = [f for _, f in sorted(lens, reverse=True)[:N_EPS_D1]]
     se = np.zeros((H_MAX, N_SUP)); cnt = 0
@@ -95,8 +95,8 @@ def d1_dream_accuracy(vae, lstm, mean_t, std_t, std8, device, test_dir):
     plt.figure(figsize=(7.2, 4.8))
     for d in range(N_SUP):
         plt.plot(h, rmse[:, d], lw=1.6, label=DIM_NAMES[d])
-    plt.axhline(1.0, color="k", ls=":", lw=1, label="RMSE=1 (≈ τυχαίο)")
-    plt.title("D1 — dream RMSE vs horizon (standardized· >1 = άχρηστη πρόβλεψη)")
+    plt.axhline(1.0, color="k", ls=":", lw=1, label="RMSE=1 (~random)")
+    plt.title("D1 — dream RMSE vs horizon (standardized; >1 = a useless prediction)")
     plt.xlabel("horizon"); plt.ylabel("standardized RMSE"); plt.grid(alpha=0.3); plt.legend(fontsize=8)
     plt.tight_layout()
     p = os.path.join(SAVE_DIR, "d1_dream_accuracy.png")
@@ -110,7 +110,7 @@ def d1_dream_accuracy(vae, lstm, mean_t, std_t, std8, device, test_dir):
 def d2_action_response(vae, lstm, mean_t, std_t, device):
     env = C.make_env(False)
     env.reset(seed=SEED)
-    for _ in range(15):                                # πήγαινε σε mid-flight
+    for _ in range(15):                                # get to mid-flight
         env.step(0)
     f_prev = C.resize_frame(env.render()); env.step(0); f_cur = C.resize_frame(env.render())
     env.close()
@@ -125,18 +125,18 @@ def d2_action_response(vae, lstm, mean_t, std_t, device):
             axes[j // 2][j % 2].plot(traj[:, dim], lw=1.8, label=labels[a])
     for j, (dim, name) in enumerate(show):
         ax = axes[j // 2][j % 2]
-        ax.set_title(f"dreamed {name} υπό σταθερή action"); ax.set_xlabel("horizon"); ax.grid(alpha=0.3)
+        ax.set_title(f"dreamed {name} under a constant action"); ax.set_xlabel("horizon"); ax.grid(alpha=0.3)
         if j == 0:
             ax.legend(fontsize=8)
-    plt.suptitle("D2 — action response (sanity: MAIN engine πρέπει να ↑ vy· left/right αντίθετο ω)")
+    plt.suptitle("D2 — action response (sanity: the MAIN engine must raise vy; left/right flip ω)")
     plt.tight_layout()
     p = os.path.join(SAVE_DIR, "d2_action_response.png")
     plt.savefig(p, dpi=150, bbox_inches="tight"); plt.close(fig); print("saved:", p)
-    print("[D2] saved action-response plot — έλεγξε ότι MAIN κρατά/ανεβάζει το y & vy· side αλλάζει ω.")
+    print("[D2] saved action-response plot — check that MAIN holds/raises y & vy; side changes ω.")
 
 
 # ---------------------------------------------------------------------------
-# D3 — dream-value vs real return  (το «καπνίζον όπλο» για exploitation)
+# D3 — dream-value vs real return  (the "smoking gun" for exploitation)
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def d3_value_vs_reality(vae, lstm, mean_t, std_t, device):
@@ -147,7 +147,7 @@ def d3_value_vs_reality(vae, lstm, mean_t, std_t, device):
     for m in range(M_D3):
         env.reset(seed=SEED)
         f_prev = C.resize_frame(env.render())
-        env.step(0)                                    # ένα βήμα -> ζεύγος + mid-state (ίδιο για όλα)
+        env.step(0)                                    # one step -> a pair + a mid-state (the same for all)
         f_cur = C.resize_frame(env.render())
         z0 = C.encode_pair(vae, f_prev, f_cur, device)
         prim = torch.from_numpy(seqs[m:m + 1]).to(device)
@@ -161,11 +161,11 @@ def d3_value_vs_reality(vae, lstm, mean_t, std_t, device):
     env.close()
     dv, rr = np.array(dv), np.array(rr)
     corr = float(np.corrcoef(dv, rr)[0, 1])
-    # πόσο καλή είναι η ΕΠΙΛΟΓΗ του MPC: το real-return της ακολουθίας με το ΜΕΓΑΛΥΤΕΡΟ dream_value
+    # how good the MPC's CHOICE is: the real return of the sequence with the LARGEST dream_value
     best_dream = int(np.argmax(dv))
     print(f"\n[D3] DREAM-VALUE vs REAL RETURN  (M={M_D3}, H={H_D3}, wind={WIND_D3})")
-    print(f"  correlation(dream_value, real_return) = {corr:+.3f}   (θέλουμε >0· ≤0 = exploitation)")
-    print(f"  real_return της 'best-dream' ακολουθίας = {rr[best_dream]:+.1f}  "
+    print(f"  correlation(dream_value, real_return) = {corr:+.3f}   (we want >0; <=0 = exploitation)")
+    print(f"  real_return of the 'best-dream' sequence = {rr[best_dream]:+.1f}  "
           f"(median real = {np.median(rr):+.1f}, max real = {rr.max():+.1f})")
     plt.figure(figsize=(6.4, 5.0))
     plt.scatter(dv, rr, s=18, alpha=0.6)
@@ -216,11 +216,11 @@ def main():
     d4_encoder_r2(vae, mean, std, device, test_dir)
 
     print(f"\n{'='*70}")
-    print("ΠΩΣ ΔΙΑΒΑΖΕΤΑΙ:")
-    print("  D1: αν το mean RMSE ξεπερνά ~1 πριν τον h=10 -> το ΟΝΕΙΡΟ είναι άχρηστο (Η1).")
-    print("  D3: αν corr ≤ 0 ή το 'best-dream' real_return είναι χάλια -> EXPLOITATION (Η2).")
-    print("  D4: αν τα x/y/theta έχουν καλό R² αλλά vx/vy/omega όχι -> seed-velocity bottleneck.")
-    print(f"  -> εστιάζουμε τη διόρθωση εκεί που δείχνουν τα νούμερα.\n{'='*70}")
+    print("HOW TO READ IT:")
+    print("  D1: if the mean RMSE passes ~1 before h=10 -> the DREAM is useless (H1).")
+    print("  D3: if corr <= 0 or the 'best-dream' real_return is bad -> EXPLOITATION (H2).")
+    print("  D4: if x/y/theta have good R² but vx/vy/omega do not -> a seed-velocity bottleneck.")
+    print(f"  -> focus the fix where the numbers point.\n{'='*70}")
     print("saved diag ->", SAVE_DIR)
 
 

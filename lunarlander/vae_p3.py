@@ -1,39 +1,39 @@
 """
 vae_p3.py — Principle 3 (Multi-level / multi-strength supervision) VAE
-για LunarLander.  Port του cart_pole/vae_principle3.py· state 4D -> 8D· τρέχει σε MPS
-(Apple Silicon) ώστε να εκπαιδεύεται ΤΟΠΙΚΑ στο Mac.
+for LunarLander.  Port of cart_pole/vae_principle3.py; state 4D -> 8D; runs on MPS
+(Apple Silicon) so it can be trained LOCALLY on the Mac.
 
-ΣΧΕΔΙΑΣΤΙΚΗ ΑΠΟΦΑΣΗ — "P3 ΜΟΝΟ ΤΟΥ" (απομονωμένο, πάνω στο baseline):
-  Κρατάμε ΑΚΡΙΒΩΣ την αρχιτεκτονική του baseline (ΕΝΑΣ monolithic encoder, 6-κάναλη
-  είσοδος stack(frame_t,frame_t+1), 64 latent, SPLIT-β KL) και αλλάζουμε ΜΟΝΟ τον ΣΤΟΧΟ
-  ΕΠΟΠΤΕΙΑΣ -> κάθε διαφορά οφείλεται καθαρά στην Αρχή 3.
+DESIGN DECISION — "P3 ON ITS OWN" (isolated, on top of the baseline):
+  We keep the baseline architecture EXACTLY (ONE monolithic encoder, 6-channel
+  input stack(frame_t,frame_t+1), 64 latent, split-β KL) and change ONLY the SUPERVISION
+  TARGET -> any difference is cleanly attributable to Principle 3.
 
 obs = [x, y, vx, vy, theta, omega, leg1, leg2]
-  STATIC (άμεσα μετρήσιμα)   : x(0), y(1), theta(4), leg1(6), leg2(7)
-  VELOCITY (παράγωγα)        : vx(2), vy(3), omega(5)
+  STATIC (directly measurable) : x(0), y(1), theta(4), leg1(6), leg2(7)
+  VELOCITY (derivatives)       : vx(2), vy(3), omega(5)
 
-ΑΡΧΗ 3 (paper, §3.3): πολλαπλές ισχείς εποπτείας:
-  (1) SEMI : εποπτεύονται ΜΟΝΟ τα STATIC (θέσεις/γωνία/πόδια)· οι ΤΑΧΥΤΗΤΕΣ άγνωστες.
-  (2) WEAK : + εποπτεία ταχύτητας με ΕΚΤΙΜΗΣΗ finite-diff (vx<-Δx, vy<-Δy, omega<-Δtheta).
-ΑΝΑΦΟΡΑ "FULL" (όλα τα 8 dims με ΑΛΗΘΙΝΑ states) == baseline -> εκείνη η καμπύλη ως reference.
+PRINCIPLE 3 (paper, §3.3): multiple supervision strengths:
+  (1) SEMI : ONLY the STATIC dims are supervised (positions/angle/legs); the VELOCITIES are unknown.
+  (2) WEAK : + velocity supervision from a finite-diff ESTIMATE (vx<-Δx, vy<-Δy, omega<-Δtheta).
+The "FULL" REFERENCE (all 8 dims with TRUE states) == the baseline -> use that curve as the reference.
 
 =====================================================================================
-*** ΚΡΙΣΙΜΗ ΔΙΟΡΘΩΣΗ vs CartPole (το πιθανό "λάθος" στο port) ***
-  Στο CartPole το gym κάνει explicit Euler -> (x_{t+1}-x_t)/dt = vx_t ΑΚΡΙΒΩΣ, άρα ένα
-  σταθερό /DT (=tau=0.02) αρκούσε. ΣΤΟ LUNARLANDER ΟΧΙ: οι ταχύτητες του obs έχουν ΔΙΚΗ
-  τους κανονικοποίηση (vel*k/FPS) που ΔΙΑΦΕΡΕΙ ανά διάσταση. Εμπειρικά (από τα ΔΕΔΟΜΕΝΑ):
+*** CRITICAL CORRECTION vs CartPole (the likely "bug" in a naive port) ***
+  In CartPole gym does explicit Euler -> (x_{t+1}-x_t)/dt = vx_t EXACTLY, so a single
+  constant /DT (=tau=0.02) was enough. IN LUNARLANDER IT IS NOT: the obs velocities have their
+  OWN normalization (vel*k/FPS) that DIFFERS per dimension. Empirically (from the DATA):
         vx ≈ 98.9 * Δx ,  vy ≈ 44.4 * Δy ,  omega ≈ 18.0 * Δtheta   (r=0.95–0.998)
-  Ένα σκέτο /DT θα έδινε ΤΕΛΕΙΩΣ λάθος κλίμακα. Γι' αυτό ΒΑΘΜΟΝΟΜΟΥΜΕ τις σταθερές
-  vel_scale[d] ΑΠΟ ΤΑ ΔΕΔΟΜΕΝΑ στην αρχή (calibrate_vel_scales) -> robust & version-proof.
+  A plain /DT would give a COMPLETELY wrong scale. That is why we CALIBRATE the constants
+  vel_scale[d] FROM THE DATA at startup (calibrate_vel_scales) -> robust & version-proof.
 
-ΑΛΛΕΣ ΒΕΛΤΙΩΣΕΙΣ ΣΤΟ PORT:
-  * physical_rmse: regime-aware report -> ξεχωρίζει supervised (★) από unsupervised dims,
-    ώστε να ΜΗΝ μπερδεύει το (νοηματικά κενό) velocity-RMSE του semi.
-  * MPS device + num_workers=0/pin_memory=False στο Mac (αποφυγή pickling του eager dataset).
+OTHER IMPROVEMENTS IN THE PORT:
+  * physical_rmse: regime-aware report -> separates supervised (★) from unsupervised dims,
+    so it does NOT confuse the (meaningless) velocity RMSE of semi.
+  * MPS device + num_workers=0/pin_memory=False on the Mac (avoids pickling the eager dataset).
 
-ΣΗΜ. (2-frame): ο encoder βλέπει 2 frames -> η ταχύτητα είναι ΠΑΡΑΤΗΡΗΣΙΜΗ· η διαφορά
-semi vs weak θα είναι ΗΠΙΟΤΕΡΗ (συνειδητή επιλογή για ΚΟΙΝΟ backbone με baseline/P1/P2).
-Τρέξε ΞΕΧΩΡΙΣΤΑ για SUPERVISION="semi" και ="weak".
+NOTE (2-frame): the encoder sees 2 frames -> velocity is OBSERVABLE; the semi vs weak
+difference will be MILDER (a deliberate choice, to keep the backbone SHARED with baseline/P1/P2).
+Run SEPARATELY for SUPERVISION="semi" and ="weak".
 """
 import os
 import numpy as np
@@ -46,16 +46,17 @@ from tqdm.auto import tqdm
 
 from loader import VaePairDataset, load_norm_stats, list_npz
 
+from paths import DATA_ROOT, outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG  (ΤΟΠΙΚΑ paths -> τρέχει στο Mac· για Kaggle άλλαξε σε /kaggle/working/...)
+# CONFIG  (paths from config.py via paths.py)
 # ---------------------------------------------------------------------------
 SUPERVISION = "weak"
 
-DATA_ROOT = "<lunarlander-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = f"/kaggle/working/lunarlander_p3_{SUPERVISION}_vae"
+SAVE_DIR = outputs(f"lunarlander_p3_{SUPERVISION}_vae")
 
 STATE_NAMES = ("x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2")
 
@@ -63,16 +64,16 @@ LATENT_SIZE = 64
 N_SUP = 8                  # [x, y, vx, vy, theta, omega, leg1, leg2]
 SHIFT = 0                  # CLEAN ground truth (no label noise)
 
-# --- ΑΡΧΗ 3: ρύθμιση εποπτείας ---
-STATIC_DIMS = (0, 1, 4, 6, 7)    # x, y, theta, leg1, leg2 -> ΠΑΝΤΑ εποπτευόμενα
+# --- PRINCIPLE 3: supervision setting ---
+STATIC_DIMS = (0, 1, 4, 6, 7)    # x, y, theta, leg1, leg2 -> ALWAYS supervised
 VEL_DIMS = (2, 3, 5)             # vx, vy, omega
-VEL_SRC = {2: 0, 3: 1, 5: 4}     # vel-dim <- pos-dim για το finite-diff (vx<-x, vy<-y, omega<-theta)
+VEL_SRC = {2: 0, 3: 1, 5: 4}     # vel-dim <- pos-dim for the finite diff (vx<-x, vy<-y, omega<-theta)
 
 BATCH = 128
 EPOCHS = 40
 LR = 1e-3
 
-# --- SPLIT-β KL (ΤΑΥΤΟΣΗΜΟ με baseline) ---
+# --- split-β KL (IDENTICAL to the baseline) ---
 BETA_PHYS = 0.01
 BETA_STYLE_MAX = 1.0
 KL_ANNEAL_EPOCHS = 20
@@ -93,7 +94,7 @@ def set_seed(s):
 
 
 def get_device():
-    """ CUDA (Kaggle) -> MPS (Apple Silicon, τοπικά) -> CPU. """
+    """ CUDA (Kaggle) -> MPS (Apple Silicon, locally) -> CPU. """
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
@@ -102,15 +103,15 @@ def get_device():
 
 
 def _to_img(t, device):
-    """ uint8 (B,3,H,W) -> float [0,1] στη συσκευή. """
+    """ uint8 (B,3,H,W) -> float [0,1] on the device. """
     return t.to(device, non_blocking=True).float().div_(255.0)
 
 
 # ---------------------------------------------------------------------------
-# Model — ΑΚΡΙΒΩΣ το baseline VAE (single monolithic encoder)
+# Model — EXACTLY the baseline VAE (single monolithic encoder)
 # ---------------------------------------------------------------------------
 class VAE_P3(nn.Module):
-    """ Είσοδος (B,6,80,120)=stack(frame_t,frame_t+1)· ανακατασκευή (B,3,80,120)=frame_t. """
+    """ Input (B,6,80,120)=stack(frame_t,frame_t+1); reconstructs (B,3,80,120)=frame_t. """
 
     def __init__(self, latent_size=64, in_channels=6, out_channels=3):
         super().__init__()
@@ -150,7 +151,7 @@ class VAE_P3(nn.Module):
 
 
 def encode_fn(model, device):
-    """ Callable για LunarLoader.precompute_latents — δέχεται float [0,1] εικόνες. """
+    """ Callable for LunarLoader.precompute_latents — expects float [0,1] images. """
     @torch.no_grad()
     def _fn(img_t, img_tp1):
         model.eval()
@@ -161,12 +162,12 @@ def encode_fn(model, device):
 
 
 # ---------------------------------------------------------------------------
-# Βαθμονόμηση finite-diff -> ταχύτητα ΑΠΟ ΤΑ ΔΕΔΟΜΕΝΑ (όχι hardcoded physics)
+# Calibrate finite-diff -> velocity FROM THE DATA (not hardcoded physics)
 # ---------------------------------------------------------------------------
 def calibrate_vel_scales(train_dir):
-    """ Για κάθε vel-dim d (πηγή pos pd): least-squares κλίμακα C ώστε vel_t ≈ C * Δpos_t
-    σε RAW obs μονάδες (Σ(v·Δp)/Σ(Δp²)). Επιστρέφει {d: C}. Διαβάζει ΜΟΝΟ τα "states"
-    (φθηνό· np.load lazy). """
+    """ For each vel-dim d (source pos pd): least-squares scale C such that vel_t ≈ C * Δpos_t
+    in RAW obs units (Σ(v·Δp)/Σ(Δp²)). Returns {d: C}. Reads ONLY the "states"
+    (cheap; np.load is lazy). """
     num = {d: 0.0 for d in VEL_DIMS}
     den = {d: 0.0 for d in VEL_DIMS}
     for f in tqdm(list_npz(train_dir), desc="calibrating vel-scales"):
@@ -187,10 +188,10 @@ def calibrate_vel_scales(train_dir):
 
 
 # ---------------------------------------------------------------------------
-# ΑΡΧΗ 3 — στόχος & μάσκα εποπτείας ανάλογα με SUPERVISION
+# PRINCIPLE 3 — supervision target & mask depending on SUPERVISION
 # ---------------------------------------------------------------------------
 def _sup_mask(device):
-    """ Ποιες state dims εποπτεύονται: semi -> static· weak -> static + velocity. """
+    """ Which state dims are supervised: semi -> static; weak -> static + velocity. """
     m = torch.zeros(N_SUP, device=device)
     for d in STATIC_DIMS:
         m[d] = 1.0
@@ -201,12 +202,12 @@ def _sup_mask(device):
 
 
 def _sup_target(state_t, state_tp1, mean_t, std_t, vel_scale):
-    """ Στόχος (standardized) για τις φυσικές dims:
-        static  = ΑΛΗΘΙΝΟ state_t.
-        velocity (μόνο weak) = ΕΚΤΙΜΗΣΗ finite-diff, ΒΑΘΜΟΝΟΜΗΜΕΝΗ ανά dim:
-            Δpos_raw = (pos_{t+1}-pos_t)_std * std[pos]      (mean ακυρώνεται στη διαφορά)
+    """ Target (standardized) for the physical dims:
+        static  = the TRUE state_t.
+        velocity (weak only) = finite-diff ESTIMATE, CALIBRATED per dim:
+            Δpos_raw = (pos_{t+1}-pos_t)_std * std[pos]      (the mean cancels in the difference)
             vel_est_raw = C[d] * Δpos_raw
-            vel_est_std = (vel_est_raw - mean[d]) / std[d]   (ίδιος χώρος με αληθινή ταχύτητα) """
+            vel_est_std = (vel_est_raw - mean[d]) / std[d]   (same space as the true velocity) """
     target = state_t.clone()
     if SUPERVISION == "weak":
         for d in VEL_DIMS:
@@ -218,14 +219,14 @@ def _sup_target(state_t, state_tp1, mean_t, std_t, vel_scale):
 
 
 # ---------------------------------------------------------------------------
-# Loss — per-element means· SPLIT-β KL (phys vs style)· masked supervision (Αρχή 3)
+# Loss — per-element means; split-β KL (phys vs style); masked supervision (Principle 3)
 # ---------------------------------------------------------------------------
 def vae_losses(recon, img_target, mu, logvar, sup_target, sup_mask, n_sup):
     B, D = mu.size(0), mu.size(1)
     recon_l = F.mse_loss(recon, img_target, reduction="mean")
 
     diff = (mu[:, :n_sup] - sup_target) * sup_mask
-    sup = (diff ** 2).sum() / (B * sup_mask.sum())                      # mean ΜΟΝΟ σε supervised dims
+    sup = (diff ** 2).sum() / (B * sup_mask.sum())                      # mean over supervised dims ONLY
 
     kl_per = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
     kld_phys = kl_per[:, :n_sup].sum() / B / n_sup
@@ -279,9 +280,9 @@ def run_epoch(model, loader, device, beta_style, mean_t, std_t, vel_scale, optim
 
 @torch.no_grad()
 def physical_rmse(model, loader, device, std_phys):
-    """ RMSE των 8 dims σε ΦΥΣΙΚΕΣ μονάδες vs ΑΛΗΘΙΝΟ state (διαγνωστικό).
-    ΣΗΜ.: για semi, οι velocity dims είναι ΑΝΕΠΟΠΤΕΥΤΕΣ -> το RMSE τους ΔΕΝ είναι νοηματικό
-    (ελεύθερα latents)· γι' αυτό τα ξεχωρίζουμε με ★ (supervised) στο print. """
+    """ RMSE of the 8 dims in PHYSICAL units vs the TRUE state (diagnostic).
+    NOTE: for semi the velocity dims are UNSUPERVISED -> their RMSE is NOT meaningful
+    (free latents); that is why we mark supervised dims with ★ in the print. """
     model.eval()
     se = torch.zeros(N_SUP, device=device); n = 0
     for img_t, img_tp1, action, state_t, state_tp1 in loader:
@@ -316,7 +317,7 @@ if __name__ == "__main__":
     mean_t = torch.tensor(mean, device=device)
     std_t = torch.tensor(std, device=device)
 
-    # *** βαθμονόμηση finite-diff -> ταχύτητα από τα δεδομένα (ΜΟΝΟ για weak, αλλά φθηνό) ***
+    # *** calibrate finite-diff -> velocity from the data (only needed for weak, but cheap) ***
     vel_scale = calibrate_vel_scales(TRAIN_DIR)
 
     sup_dims = set(STATIC_DIMS) | (set(VEL_DIMS) if SUPERVISION == "weak" else set())
@@ -367,7 +368,7 @@ if __name__ == "__main__":
             bad_epochs += 1
             print(f"  (no improvement: {bad_epochs}/{EARLY_STOP_PATIENCE})")
             if bad_epochs >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}.")
+                print(f"Early stopping at epoch {epoch}.")
                 break
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_last.pth"))

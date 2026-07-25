@@ -6,8 +6,8 @@ Difference from lstm_baseline.py:
   * NO hybrid-gt injection: seed & teacher-forcing targets use
     EXCLUSIVELY VAE-encoded latents (z), NOT GT physical states.
   * Rollout is fully end-to-end using pure VAE-encoded latents.
-  * Saves latents under /kaggle/working/cartpole_p2_latents and the checkpoints
-    under /kaggle/working/cartpole_p2_lstm.
+  * Saves latents under $OUTPUT_DIR/cartpole_p2_latents and the checkpoints
+    under $OUTPUT_DIR/cartpole_p2_lstm.
 """
 import os
 import numpy as np
@@ -21,14 +21,15 @@ from tqdm.auto import tqdm
 from vae_p2 import VAE_P2, encode_fn
 from loader import precompute_latents, LatentSequenceDataset, load_norm_stats
 
+from paths import DATA_ROOT, P2_VAE, outputs
+
 #
 #  Config
 #
-DATA_ROOT = "<cartpole-dataset>"
-LATENT_ROOT = "/kaggle/working/cartpole_p2_latents"
+LATENT_ROOT = outputs("cartpole_p2_latents")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "<cartpole-p2-vae>"
-SAVE_DIR = "/kaggle/working/cartpole_p2_lstm"
+VAE_CKPT = P2_VAE
+SAVE_DIR = outputs("cartpole_p2_lstm")
 
 LATENT_SIZE = 64
 N_SUP = 4

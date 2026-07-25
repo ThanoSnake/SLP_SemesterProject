@@ -1,18 +1,18 @@
 """
-loader.py — EAGER all-in-RAM loading (καμία cache/LRU, μηδέν IO στο train).
+loader.py — EAGER all-in-RAM loading (no cache/LRU, zero IO during training).
 
-Φιλοσοφία:
-  * Όλο το dataset φορτώνεται ΜΙΑ φορά στο __init__ (με progress bar). Μετά κάθε
-    __getitem__ είναι καθαρή RAM-πρόσβαση -> το γρηγορότερο δυνατό train.
-  * Οι εικόνες μένουν uint8 στη RAM· το /255 γίνεται per-sample (φθηνό). Έτσι ΔΕΝ
-    τετραπλασιάζουμε τη μνήμη (float θα ήταν 4×).
-  * Global flat index (αρχείο, θέση t) -> DataLoader(shuffle=True) δίνει αληθινό
-    ανακάτεμα ΑΝΑΜΕΣΑ σε επεισόδια.
-  * shift in {2,5,10} -> noisy_states_{shift}. Προαιρετικό standardize states.
-  * Με num_workers>0 σε Linux, το self.eps μοιράζεται μέσω fork copy-on-write
-    (δεν διπλασιάζεται η RAM). Χρησιμοποίησε persistent_workers=True.
+Rationale:
+  * The whole dataset is loaded ONCE in __init__ (with a progress bar). After that every
+    __getitem__ is a pure RAM access -> the fastest possible training loop.
+  * Images stay uint8 in RAM; the /255 happens per sample (cheap). This way we do NOT
+    quadruple the memory (float would be 4x).
+  * Global flat index (file, position t) -> DataLoader(shuffle=True) gives true
+    shuffling ACROSS episodes.
+  * shift in {2,5,10} -> noisy_states_{shift}. Standardizing the states is optional.
+  * With num_workers>0 on Linux, self.eps is shared via fork copy-on-write
+    (RAM is not duplicated). Use persistent_workers=True.
 
-Ροή: VaePairDataset -> (train VAE) -> precompute_latents -> LatentSequenceDataset.
+Flow: VaePairDataset -> (train VAE) -> precompute_latents -> LatentSequenceDataset.
 """
 from os import listdir, makedirs
 from os.path import join, isdir, basename

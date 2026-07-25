@@ -1,20 +1,20 @@
 """
-sindy_core.py — Shared SINDy backbone (from-scratch, numpy-only) για το CartPole world model.
+sindy_core.py — Shared SINDy backbone (from-scratch, numpy-only) for the CartPole world model.
 
-Τι κάνει: μαθαίνει ΕΡΜΗΝΕΥΣΙΜΗ δυναμική στο 4-dim physical state [x, ẋ, θ, θ̇] με αραιή
-παλινδρόμηση (STLSQ), σε DISCRETE next-state / DELTA μορφή:
-        x_{t+1} = x_t + Θ(x_t, F_t) · Ξ          (Ξ αραιό -> λίγες, διαβάσιμες εξισώσεις)
-Αυτό είναι το dyn_phys: ℝ⁴ → ℝ⁴ της Definition 2 του paper — ο φυσικός αντίστοιχος του LSTM.
+What it does: learns INTERPRETABLE dynamics on the 4-dim physical state [x, ẋ, θ, θ̇] with sparse
+regression (STLSQ), in DISCRETE next-state / DELTA form:
+        x_{t+1} = x_t + Θ(x_t, F_t) · Ξ          (Ξ sparse -> few, readable equations)
+This is the dyn_phys: ℝ⁴ → ℝ⁴ of the paper's Definition 2 — the physical counterpart of the LSTM.
 
-ΣΗΜΑΝΤΙΚΑ design points (συνεπή με τη συζήτηση μεθοδολογίας):
-  * Δουλεύουμε σε RAW physical μονάδες (sin θ θέλει rad) — οι encoded διαστάσεις z[:4] είναι
-    standardized, οπότε de-standardize πριν το fit και re-standardize μόνο για τη μετρική.
-  * DELTA form (residual) όπως ο residual LSTM -> καλύτερη conditioning, identity = Ξ=0.
-  * F_t = signed force από την action: action∈{0,1} -> {-1,+1} (το μέγεθος μπαίνει στο Ξ).
-  * Discrete next-state (όχι finite-difference παράγωγοι) -> ταιριάζει με την next-step
-    πρόβλεψη του LSTM και αποφεύγει τον θόρυβο των παραγώγων.
+KEY design points (consistent with the methodology discussion):
+  * We work in RAW physical units (sin θ needs rad) — the encoded dims z[:4] are
+    standardized, so de-standardize before the fit and re-standardize only for the metric.
+  * DELTA form (residual) like the residual LSTM -> better conditioning, identity = Ξ=0.
+  * F_t = signed force from the action: action∈{0,1} -> {-1,+1} (the magnitude is absorbed into Ξ).
+  * Discrete next-state (not finite-difference derivatives) -> matches the LSTM's next-step
+    prediction and avoids derivative noise.
 
-numpy-only (κανένα torch/pysindy) -> τρέχει παντού, πλήρως διάφανο.
+numpy-only (no torch/pysindy) -> runs anywhere, fully transparent.
 """
 import os
 import sys
@@ -22,8 +22,8 @@ import sys
 import numpy as np
 from itertools import combinations_with_replacement
 
-# --- path bootstrap: το αρχείο ζει ΣΤΟΝ ΙΔΙΟ φάκελο (cartpole/) με τα vae/lstm/loader και τα
-#     SINDy siblings· εξασφάλισε ότι ο φάκελος αυτός είναι στο sys.path (κάλυψη για διαφορετικό cwd) ---
+# --- path bootstrap: this file lives in the SAME folder (cartpole/) as vae/lstm/loader and the
+#     SINDy siblings; make sure that folder is on sys.path (covers a different cwd) ---
 try:
     _HERE = os.path.dirname(os.path.abspath(__file__))
 except NameError:
@@ -33,13 +33,13 @@ if _HERE not in sys.path:
 
 
 N_SUP = 4
-DT = 0.02                                   # CartPole tau (documentation· το dt απορροφάται στο Ξ)
+DT = 0.02                                   # CartPole tau (documentation only; dt is absorbed into Ξ)
 DIM_NAMES = ["x", "x_dot", "theta", "theta_dot"]
 BASE_NAMES = ["x", "x_dot", "theta", "theta_dot", "F"]
 
 
 # ---------------------------------------------------------------------------
-# IO helpers (numpy-only αντίγραφα του loader για να μένει το core dependency-light)
+# IO helpers (numpy-only copies of the loader, to keep the core dependency-light)
 # ---------------------------------------------------------------------------
 def load_norm_stats(path):
     z = np.load(path)
@@ -58,7 +58,7 @@ def list_npz(root):
 
 
 def action_to_force(u):
-    """action {0,1} -> signed direction {-1,+1}. Το μέγεθος της δύναμης μαθαίνεται στο Ξ."""
+    """action {0,1} -> signed direction {-1,+1}. The force magnitude is learned in Ξ."""
     return 2.0 * np.asarray(u, np.float64) - 1.0
 
 
@@ -66,7 +66,7 @@ def action_to_force(u):
 # Feature library  Θ(x, F)
 # ---------------------------------------------------------------------------
 def feature_library(X, F, mode="physics"):
-    """X: (N,4) raw [x, ẋ, θ, θ̇]· F: (N,) signed force. -> (Θ (N,n_feat), names)."""
+    """X: (N,4) raw [x, ẋ, θ, θ̇]; F: (N,) signed force. -> (Θ (N,n_feat), names)."""
     X = np.atleast_2d(np.asarray(X, np.float64))
     F = np.asarray(F, np.float64).reshape(-1)
     x, xd, th, thd = X[:, 0], X[:, 1], X[:, 2], X[:, 3]
@@ -104,7 +104,7 @@ def feature_library(X, F, mode="physics"):
 
 
 # ---------------------------------------------------------------------------
-# STLSQ — sequentially thresholded least squares (με column-normalization)
+# STLSQ — sequentially thresholded least squares (with column normalization)
 # ---------------------------------------------------------------------------
 def _ridge_solve(A, b, ridge):
     AtA = A.T @ A + ridge * np.eye(A.shape[1])
@@ -112,7 +112,7 @@ def _ridge_solve(A, b, ridge):
 
 
 def stlsq(Theta, dX, threshold=0.02, ridge=1e-6, n_iter=10):
-    """dX: (N,4) = x_{t+1}-x_t. -> Ξ (n_feat,4). Threshold σε NORMALIZED columns (scale-invariant)."""
+    """dX: (N,4) = x_{t+1}-x_t. -> Ξ (n_feat,4). Threshold on NORMALIZED columns (scale-invariant)."""
     scale = np.linalg.norm(Theta, axis=0)
     scale[scale == 0] = 1.0
     Tn = Theta / scale
@@ -129,7 +129,7 @@ def stlsq(Theta, dX, threshold=0.02, ridge=1e-6, n_iter=10):
 
 
 def fit_sindy(X, F, X_next, mode="physics", threshold=0.02, ridge=1e-6):
-    """ -> (Ξ (n_feat,4), names). Μαθαίνει το DELTA dX = X_next - X."""
+    """ -> (Ξ (n_feat,4), names). Learns the DELTA dX = X_next - X."""
     Theta, names = feature_library(X, F, mode)
     Xi = stlsq(Theta, (X_next - X).astype(np.float64), threshold, ridge)
     return Xi, names
@@ -139,7 +139,7 @@ def fit_sindy(X, F, X_next, mode="physics", threshold=0.02, ridge=1e-6):
 # Rollout (discrete map)
 # ---------------------------------------------------------------------------
 def sindy_step(x, u, Xi, mode="physics"):
-    """x: (B,4)· u: (B,) action. -> x_next (B,4) = x + Θ(x,F)·Ξ."""
+    """x: (B,4); u: (B,) action. -> x_next (B,4) = x + Θ(x,F)·Ξ."""
     Theta, _ = feature_library(x, action_to_force(u), mode)
     return x + Theta @ Xi
 
@@ -158,10 +158,10 @@ def sindy_rollout(x0, U_seq, Xi, mode="physics"):
 
 
 # ---------------------------------------------------------------------------
-# Data assembly από precomputed latent dirs (z, acts, states[RAW], x)
+# Data assembly from precomputed latent dirs (z, acts, states[RAW], x)
 # ---------------------------------------------------------------------------
 def assemble_fit_data(latent_dir, which, mean, std):
-    """which ∈ {'encoded','gt'}. -> (X (M,4), F (M,), X_next (M,4)) σε RAW physical units.
+    """which ∈ {'encoded','gt'}. -> (X (M,4), F (M,), X_next (M,4)) in RAW physical units.
        encoded: z[:, :4]*std+mean (raw)·  gt: states (raw clean GT)."""
     mean4 = np.asarray(mean[:N_SUP], np.float64)
     std4 = np.asarray(std[:N_SUP], np.float64)
@@ -179,9 +179,9 @@ def assemble_fit_data(latent_dir, which, mean, std):
 
 
 def assemble_windows(latent_dir, mean, std, seq_len=30, stride=1, which_seed="encoded"):
-    """Windows ΙΔΙΑΣ ΛΟΓΙΚΗΣ με το LatentSequenceDataset (ίδιο count/indexing).
-       -> (seed_raw (N,4), U (N,L), gt_raw (N,L,4)) σε RAW physical units.
-       seed: encoded z[s,:4] (raw) ή GT states[s]·  gt: RAW states[s+1 : s+L+1]."""
+    """Windows with the SAME LOGIC as LatentSequenceDataset (same count/indexing).
+       -> (seed_raw (N,4), U (N,L), gt_raw (N,L,4)) in RAW physical units.
+       seed: encoded z[s,:4] (raw) or GT states[s];  gt: RAW states[s+1 : s+L+1]."""
     mean4 = np.asarray(mean[:N_SUP], np.float64)
     std4 = np.asarray(std[:N_SUP], np.float64)
     seeds, Us, gts = [], [], []
@@ -200,7 +200,7 @@ def assemble_windows(latent_dir, mean, std, seq_len=30, stride=1, which_seed="en
 
 
 # ---------------------------------------------------------------------------
-# Metric helpers (standardized, ίδια σύμβαση με τα test_pX)
+# Metric helpers (standardized, same convention as the test_pX scripts)
 # ---------------------------------------------------------------------------
 def standardized_sq_err(pred_raw, gt_raw, std):
     """pred_raw, gt_raw: (N,L,4) RAW. -> (N,L,4) STANDARDIZED squared error (÷ std4)."""
@@ -227,7 +227,7 @@ def bootstrap_paired(diff, n_boot, rng):
 # Pretty-print discovered equations (interpretability!)
 # ---------------------------------------------------------------------------
 def format_equations(Xi, names, tol=1e-8):
-    """ -> list of strings: 'Δ<dim> = c1*feat1 + ...' (μόνο μη-μηδενικοί όροι)."""
+    """ -> list of strings: 'Δ<dim> = c1*feat1 + ...' (non-zero terms only)."""
     lines = []
     for j, dim in enumerate(DIM_NAMES):
         terms = [f"{Xi[i, j]:+.4g}*{names[i]}" for i in range(len(names)) if abs(Xi[i, j]) > tol]

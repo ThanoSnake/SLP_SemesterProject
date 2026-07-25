@@ -1,20 +1,20 @@
 """
-lstm_p1_control.py — ENCODED-mode LSTM (P1) εκπαιδευμένο στο ΠΛΗΡΕΣ control+elite dataset (~12k).
+lstm_p1_control.py — ENCODED-mode LSTM (P1) trained on the FULL control+elite dataset (~12k).
 
-Σκοπός: ένα ΙΣΧΥΡΟΤΕΡΟ world-model για το MPC (Extension 4). Το control dataset έχει
-random-action bursts / perturbed PID -> πολύ καλύτερο ACTION-CONDITIONING απ' ό,τι τα
-heuristic-only δεδομένα (αυτό ήταν το πρόβλημα που έκανε το MPC να αποτυγχάνει).
+Purpose: a STRONGER world model for the MPC (Extension 4). The control dataset has
+random-action bursts / perturbed PID -> much better ACTION CONDITIONING than the
+heuristic-only data (that was the problem that made the MPC fail).
 
-Διαφορές από το lstm_p1.py:
-  * ΞΑΝΑΧΡΗΣΙΜΟΠΟΙΕΙ το ΙΔΙΟ (παγωμένο) P1 VAE -> μόνο precompute latents + train LSTM.
-  * MULTI-ROOT: ενώνει control + elite (train/val/test) μέσω loader_control (καμία αντιγραφή).
-  * WIND_FILTER: 'all' (default, χρησιμοποιεί και τα 12k) | 'clean' | 'wind'.
-  * Imports αντί για inline: VAE_P1 (vae_p1), LatentPredictor (lstm), loader (loader_control).
+Differences from lstm_p1.py:
+  * REUSES the SAME (frozen) P1 VAE -> only precompute latents + train the LSTM.
+  * MULTI-ROOT: unions control + elite (train/val/test) via loader_control (no copying).
+  * WIND_FILTER: 'all' (default, uses all 12k) | 'clean' | 'wind'.
+  * Imports instead of inline: VAE_P1 (vae_p1), LatentPredictor (lstm), loader (loader_control).
 
-ΣΗΜ. norm_stats: ΑΡΧΙΚΑ norm_stats (αυτά που εκπαιδεύτηκε το VAE) — ΟΧΙ combined — γιατί το
-mu[:8] του VAE είναι σε εκείνο το standardized space (αλλιώς το physical-MSE eval βγαίνει λάθος).
+NOTE on norm_stats: the ORIGINAL norm_stats (the ones the VAE was trained with) — NOT combined — because
+the VAE's mu[:8] lives in that standardized space (otherwise the physical-MSE eval comes out wrong).
 
-Τρέξε: python lunarlander/lstm_p1_control.py   (cwd: lunarlander/ ώστε να λυθούν τα imports).
+Run: python lunarlander/lstm_p1_control.py   (cwd: lunarlander/ so the imports resolve).
 """
 import os
 from os.path import join, isdir
@@ -30,19 +30,21 @@ from vae_p1 import VAE_P1
 from lstm import LatentPredictor
 from loader_control import load_norm_stats, precompute_latents, LatentSequenceDataset
 
+from paths import NORM_STATS as DEFAULT_NORM_STATS, P1_VAE, outputs
+
 # ===========================================================================
-# CONFIG — τοπικά paths (M4 Max). Όλα env-overridable.
+# CONFIG — local paths (M4 Max). Everything env-overridable.
 # ===========================================================================
 CONTROL_ROOT = os.environ.get("CONTROL_ROOT", os.path.expanduser("~/lunarlander_control_data"))
 ELITE_ROOT = os.environ.get("ELITE_ROOT",
                             os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                          "lunarlander_elite_recovery_4000"))
-DATA_ROOTS = [CONTROL_ROOT, ELITE_ROOT]            # καθένα με train/val/test
+DATA_ROOTS = [CONTROL_ROOT, ELITE_ROOT]            # each with train/val/test
 
-VAE_CKPT = os.environ.get("VAE_CKPT", "<lunarlander-p1-vae>")          # ΤΟ ΙΔΙΟ trained P1 VAE
-NORM_STATS = os.environ.get("NORM_STATS", "<lunarlander-dataset>/norm_stats.npz")  # ΑΡΧΙΚΑ (του VAE)
-# output base: Kaggle -> /kaggle/working· τοπικά -> ~/lunarlander_runs (override με OUT_ROOT/LATENT_ROOT/SAVE_DIR)
-_OUT = os.environ.get("OUT_ROOT", "/kaggle/working" if isdir("/kaggle/working") else os.path.expanduser("~/lunarlander_runs"))
+VAE_CKPT = os.environ.get("VAE_CKPT", P1_VAE)          # THE SAME trained P1 VAE
+NORM_STATS = os.environ.get("NORM_STATS", DEFAULT_NORM_STATS)   # the ORIGINAL ones (the VAE's)
+# output base: OUTPUT_DIR from config.py (override with OUT_ROOT/LATENT_ROOT/SAVE_DIR)
+_OUT = os.environ.get("OUT_ROOT", outputs())
 LATENT_ROOT = os.environ.get("LATENT_ROOT", join(_OUT, "lunarlander_p1_control_latents"))
 SAVE_DIR = os.environ.get("SAVE_DIR", join(_OUT, "lunarlander_p1_control_lstm"))
 
@@ -52,26 +54,26 @@ LATENT_SIZE, N_SUP, N_IMG = 64, 8, 56
 N_ACTIONS = 4
 SHIFT = 0
 
-SEQ_LEN = 10                       # MPC-oriented: κοντινός ορίζοντας (το MPC ρωτάει ~K βήματα)
-STRIDE = 3                         # κοντύτερα windows -> περισσότερα δείγματα ανά επεισόδιο
-BATCH = 256                        # latents μικρά + SEQ_LEN=10 -> μεγάλο batch (throughput, ειδικά MPS)
+SEQ_LEN = 10                       # MPC-oriented: a short horizon (the MPC asks ~K steps ahead)
+STRIDE = 3                         # shorter windows -> more samples per episode
+BATCH = 256                        # small latents + SEQ_LEN=10 -> a large batch (throughput, especially on MPS)
 HIDDEN = 64
 LAYERS = 2
 
 EPOCHS = 150
-LR = 1e-3                          # σταθερό· ο ReduceLROnPlateau το μειώνει στο plateau
-WEIGHT_DECAY = 1e-5                # ήπιο AdamW regularization (περισσότερα δεδομένα/εποχές)
+LR = 1e-3                          # fixed; ReduceLROnPlateau lowers it at a plateau
+WEIGHT_DECAY = 1e-5                # mild AdamW regularization (more data/epochs)
 CLIP = 1.0
 W_PHYS = 1.0
 
-# Scheduled sampling -> ΠΛΗΡΩΣ free-running στο τέλος (P_END=0) για MPC. Κλίσεις ∝ EPOCHS:
-P_START, P_END, P_DECAY_EPOCHS = 1.0, 0.0, 120    # p_tf 1.0->0.0 γραμμικά στις πρώτες ~80% εποχές
-L_START, CURRICULUM_EPOCHS = 3, 45                # horizon 3 -> SEQ_LEN(10) στις πρώτες ~30% εποχές
+# Scheduled sampling -> FULLY free-running at the end (P_END=0) for the MPC. Slopes ∝ EPOCHS:
+P_START, P_END, P_DECAY_EPOCHS = 1.0, 0.0, 120    # p_tf 1.0->0.0 linearly over the first ~80% of epochs
+L_START, CURRICULUM_EPOCHS = 3, 45                # horizon 3 -> SEQ_LEN(10) over the first ~30% of epochs
 
 EARLY_STOP_PATIENCE = 10
-SCHED_PATIENCE = 5                 # < EARLY_STOP -> προλαβαίνει 1-2 LR drops πριν το stop
+SCHED_PATIENCE = 5                 # < EARLY_STOP -> allows 1-2 LR drops before stopping
 MIN_LR = 1e-5
-NUM_WORKERS = 0                    # τοπικά Mac: spawn θα ξανα-pickle-άρει το eager dataset -> 0 (data ήδη σε RAM)
+NUM_WORKERS = 0                    # locally on the Mac: spawn would re-pickle the eager dataset -> 0 (data is already in RAM)
 SEED = 0
 DO_PRECOMPUTE = True
 
@@ -107,7 +109,7 @@ def encode_fn(model, device):
 
 
 # ===========================================================================
-# Rollout — ENCODED (seed/target = VAE latent· teacher forcing μέσω scheduled sampling)
+# Rollout — ENCODED (seed/target = VAE latent; teacher forcing via scheduled sampling)
 # ===========================================================================
 def rollout(model, batch, p_tf, free_running=False, max_len=None):
     z_t, action, z_tp1, state_t, state_tp1 = batch
@@ -151,7 +153,7 @@ def train_epoch(model, loader, optimizer, device, p_tf, cur_len, desc=""):
 
 @torch.no_grad()
 def eval_epoch(model, loader, device, std_phys, desc=""):
-    """ FREE-RUNNING στο ΠΛΗΡΕΣ SEQ_LEN -> physical MSE ανά ορίζοντα vs CLEAN state. """
+    """ FREE-RUNNING at the FULL SEQ_LEN -> physical MSE per horizon vs the CLEAN state. """
     model.eval()
     se, n = None, 0
     for batch in tqdm(loader, desc=desc, leave=False):
@@ -230,7 +232,7 @@ if __name__ == "__main__":
         else:
             bad += 1
             if bad >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}."); break
+                print(f"Early stopping at epoch {epoch}."); break
 
     torch.save(model.state_dict(), join(SAVE_DIR, "lstm_p1_control_last.pth"))
     print("Best val phys-MSE:", best)

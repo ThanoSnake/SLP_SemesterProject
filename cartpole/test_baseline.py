@@ -1,29 +1,29 @@
 """
-test_baseline.py — Αυτόνομη αξιολόγηση του Baseline world model (CartPole).
+test_baseline.py — Standalone evaluation of the baseline world model (CartPole).
 
-ΣΚΟΠΟΣ: ποσοτικοποίηση & οπτικοποίηση της ΕΡΜΗΝΕΥΣΙΜΟΤΗΤΑΣ ΚΩΔΙΚΟΠΟΙΗΣΗΣ του baseline
-VAE ΧΩΡΙΣ σύγκριση με κάποια αρχή — δίνει το «σημείο αναφοράς» για την παρουσίαση/αναφορά
-και αναδεικνύει εγγενή δυνατά/αδύναμα σημεία του baseline.
+PURPOSE: quantify & visualize the ENCODING INTERPRETABILITY of the baseline
+VAE WITHOUT comparing against any principle — it gives the "reference point" for the presentation/report
+and brings out the baseline's inherent strengths/weaknesses.
 
-Αυτό το αρχείο υλοποιεί το MODULE 1 — «Physical encoding vs GT» (μόνο ο encoder, χωρίς LSTM):
-  (1) Per-dim μετρικές: RMSE & MAE σε ΦΥΣΙΚΕΣ μονάδες, R², Pearson r  -> πίνακας + bar chart
-      → δείχνει το «(a) how well latent embeddings map to physical variables» του paper.
-  (2) Scatter pred-vs-GT ανά dim (+ γραμμή ταυτότητας, R²)
-      → αναδεικνύει ποιες dims κωδικοποιούνται καλά/άσχημα (αναμένουμε χειρότερα στις ΤΑΧΥΤΗΤΕΣ).
-  (3) Per-dim ιστόγραμμα σφάλματος (φυσικές μονάδες) → bias/spread ανά μέγεθος.
-  (4) Time-series overlay GT vs encoded mu[:4] σε δείγμα επεισοδίων
-      → tracking + θόρυβος/υστέρηση, ειδικά στις ταχύτητες.
+This file implements MODULE 1 — "Physical encoding vs GT" (encoder only, no LSTM):
+  (1) Per-dim metrics: RMSE & MAE in PHYSICAL units, R², Pearson r  -> table + bar chart
+      -> shows the paper's "(a) how well latent embeddings map to physical variables".
+  (2) Scatter pred-vs-GT per dim (+ identity line, R²)
+      -> reveals which dims are encoded well/badly (we expect the VELOCITIES to be worse).
+  (3) Per-dim error histogram (physical units) -> bias/spread per quantity.
+  (4) Time-series overlay of GT vs encoded mu[:4] on a sample of episodes
+      -> tracking + noise/lag, especially on the velocities.
 
-ΠΩΣ ΔΙΑΒΑΖΕΤΑΙ ΓΙΑ ΤΗΝ ΑΝΑΦΟΡΑ:
-  * Υψηλό R² (≈1) & χαμηλό RMSE σε x,θ = καθαρή φυσική κωδικοποίηση της ΣΤΑΤΙΚΗΣ κατάστασης.
-  * Χαμηλότερο R² / μεγαλύτερο RMSE στις ẋ,θ̇ = αδυναμία κωδικοποίησης ΤΑΧΥΤΗΤΩΝ (παρότι ο
-    encoder βλέπει 2 frames) → κίνητρο για τις αρχές (π.χ. P3 weak supervision).
+HOW TO READ IT FOR THE REPORT:
+  * High R² (~1) & low RMSE on x,θ = clean physical encoding of the STATIC state.
+  * Lower R² / higher RMSE on ẋ,θ̇ = weaker encoding of the VELOCITIES (even though the
+    encoder sees 2 frames) -> the motivation for the principles (e.g. P3 weak supervision).
 
-ΣΗΜ.: Το «πλήρες» baseline test (VAE+LSTM) θα επεκταθεί με Module 2 (reconstruction quality)
-και Module 3 (rollout MSE ανά horizon, decoded rollout) — χρειάζονται το LSTM checkpoint.
+NOTE: the "full" baseline test (VAE+LSTM) will be extended with Module 2 (reconstruction quality)
+and Module 3 (rollout MSE per horizon, decoded rollout) — those need the LSTM checkpoint.
 
-Τοποθετείται στο cart_pole/ (δίπλα στα vae.py/loader.py) ώστε να ΜΗΝ έχει το import-issue
-των υποφακέλων pX/. Συμπλήρωσε τα <...> paths (ίδιο convention με τα υπόλοιπα scripts).
+It lives in cart_pole/ (next to vae.py/loader.py) so that it does NOT hit the import issue
+of the pX/ subfolders. Paths come from config.py (via paths.py).
 """
 import os
 import numpy as np
@@ -34,18 +34,19 @@ from torch.utils.data import DataLoader
 from loader import VaePairDataset, load_norm_stats, list_npz
 from vae import VAE
 
+from paths import BASELINE_VAE, DATA_ROOT, outputs
+
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<cartpole-dataset>"
 TEST_DIR = os.path.join(DATA_ROOT, "test")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-VAE_CKPT = "<cartpole-baseline-vae>"
-SAVE_DIR = "/kaggle/working/cartpole_baseline_out"
+VAE_CKPT = BASELINE_VAE
+SAVE_DIR = outputs("cartpole_baseline_out")
 
 LATENT_SIZE = 64
 N_SUP = 4
-SHIFT = 0                 # 0=clean GT comparison (το σωστό για interpretability check)
+SHIFT = 0                 # 0=clean GT comparison (the right choice for an interpretability check)
 BATCH = 128
 NUM_WORKERS = 2
 SEED = 0
@@ -54,23 +55,23 @@ DIM_NAMES = ["x", "x_dot", "theta", "theta_dot"]
 DIM_LABELS = ["x", r"$\dot{x}$", r"$\theta$", r"$\dot{\theta}$"]
 DIM_UNITS = ["(cart pos)", "(cart vel)", "[rad]", "[rad/s]"]
 
-N_EPISODE_PLOTS = 3       # πόσα επεισόδια για το time-series overlay
-SCATTER_MAX_PTS = 8000    # subsample για ελαφρύ scatter
+N_EPISODE_PLOTS = 3       # how many episodes for the time-series overlay
+SCATTER_MAX_PTS = 8000    # subsample to keep the scatter light
 SEED_SCATTER = 0
 
-# Μονάδες ΑΠΕΙΚΟΝΙΣΗΣ:
-#   "standardized" -> mean0/std1 ανά dim. Κοινή κλίμακα μεταξύ x/ẋ/θ/θ̇, το spread του error
-#       διαβάζεται ως «κλάσμα του φυσικού εύρους», ΚΑΙ είναι συνεπές με τα test_pX comparison
-#       plots (που μετρούν standardized MSE). [ΠΡΟΕΠΙΛΟΓΗ]
-#   "physical"     -> πραγματικές μονάδες (de-standardized). Νόημα «πραγματικού κόσμου», αλλά
-#       οι 4 dims ΔΕΝ συγκρίνονται οπτικά (διαφορετικές κλίμακες).
-# Ο ΠΙΝΑΚΑΣ μετρικών τυπώνει ΚΑΙ ΤΑ ΔΥΟ (RMSE_std + RMSE_phys) ανεξαρτήτως· R²/Pearson είναι
+# DISPLAY units:
+#   "standardized" -> mean0/std1 per dim. Common scale across x/ẋ/θ/θ̇, the error spread
+#       reads as a "fraction of the physical range", AND it is consistent with the test_pX comparison
+#       plots (which measure standardized MSE). [DEFAULT]
+#   "physical"     -> real units (de-standardized). Real-world meaning, but
+#       the 4 dims are NOT visually comparable (different scales).
+# The metrics TABLE prints BOTH (RMSE_std + RMSE_phys) regardless; R²/Pearson are
 # scale-invariant.
 UNITS = "standardized"
 
 
 def _to_img(t, device):
-    """uint8 (B,3,H,W) -> float [0,1] στη συσκευή (ίδια μετατροπή με το training)."""
+    """uint8 (B,3,H,W) -> float [0,1] on the device (same conversion as in training)."""
     return t.to(device, non_blocking=True).float().div_(255.0)
 
 
@@ -79,7 +80,7 @@ def _unit_suffix():
 
 
 def _to_units(mu_std, gt_std, mean, std):
-    """Standardized arrays -> (mu, gt) στις μονάδες απεικόνισης (UNITS)."""
+    """Standardized arrays -> (mu, gt) in the display units (UNITS)."""
     if UNITS == "standardized":
         return mu_std, gt_std
     mean4 = np.asarray(mean[:N_SUP], np.float64)
@@ -88,28 +89,28 @@ def _to_units(mu_std, gt_std, mean, std):
 
 
 # ---------------------------------------------------------------------------
-# (collect) Κωδικοποίηση όλου του test set: mu[:4] (standardized) vs GT state (standardized)
+# (collect) Encode the whole test set: mu[:4] (standardized) vs GT state (standardized)
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def collect_encoding(model, loader, device):
-    """ -> (mu_std (N,4), gt_std (N,4)) στον STANDARDIZED χώρο (όπως εκπαιδεύτηκε ο encoder).
-    mu[:4] είναι deterministic (model.eval -> reparameterize επιστρέφει mu)."""
+    """ -> (mu_std (N,4), gt_std (N,4)) in STANDARDIZED space (as the encoder was trained).
+    mu[:4] is deterministic (model.eval -> reparameterize returns mu)."""
     model.eval()
     mus, gts = [], []
     for img_t, img_tp1, action, state_t, state_tp1 in loader:
         x = torch.cat([_to_img(img_t, device), _to_img(img_tp1, device)], dim=1)
         mu, _ = model.encode(x)
         mus.append(mu[:, :N_SUP].cpu().numpy())
-        gts.append(state_t.numpy())                 # ήδη standardized από τον loader
+        gts.append(state_t.numpy())                 # already standardized by the loader
     return np.concatenate(mus, 0), np.concatenate(gts, 0)
 
 
 # ---------------------------------------------------------------------------
-# (metrics) Per-dim: RMSE/MAE σε ΦΥΣΙΚΕΣ μονάδες, R², Pearson r
+# (metrics) Per-dim: RMSE/MAE in PHYSICAL units, R², Pearson r
 # ---------------------------------------------------------------------------
 def physical_metrics(mu_std, gt_std, mean, std):
-    """mu_std,gt_std: (N,4) standardized. De-standardize για RMSE/MAE· R² & r είναι scale-invariant.
-       (το mean ακυρώνεται στη διαφορά, οπότε RMSE_phys = RMSE_std * std[dim])."""
+    """mu_std,gt_std: (N,4) standardized. De-standardize for RMSE/MAE; R² & r are scale-invariant.
+       (the mean cancels in the difference, so RMSE_phys = RMSE_std * std[dim])."""
     std4 = np.asarray(std[:N_SUP], np.float64)
     err = (mu_std - gt_std).astype(np.float64)      # standardized error
     rmse_std = np.sqrt((err ** 2).mean(0))
@@ -165,7 +166,7 @@ def plot_bar(m, save_dir):
 
 
 def plot_scatter(mu_std, gt_std, m, mean, std, save_dir):
-    """pred-vs-GT ανά dim, με γραμμή ταυτότητας + R² (μονάδες κατά UNITS)."""
+    """pred-vs-GT per dim, with an identity line + R² (units follow UNITS)."""
     mu_plot, gt_plot = _to_units(mu_std, gt_std, mean, std)
     rmse_key = "rmse_std" if UNITS == "standardized" else "rmse_phys"
 
@@ -216,12 +217,12 @@ def plot_error_hist(mu_std, gt_std, mean, std, save_dir):
 
 
 # ---------------------------------------------------------------------------
-# (episode) Κωδικοποίηση ΟΛΟΚΛΗΡΟΥ επεισοδίου -> time-series overlay
+# (episode) Encode a WHOLE episode -> time-series overlay
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def encode_episode(model, npz_path, device, batch=256):
     """ -> (mu_std (T-1,4) standardized, gt_raw (T-1,4) RAW physical).
-    mu από ζεύγη (frame_t, frame_t+1)· gt = RAW states[:-1] (όχι standardized)."""
+    mu from pairs (frame_t, frame_t+1); gt = RAW states[:-1] (not standardized)."""
     model.eval()
     with np.load(npz_path) as d:
         imgs = d["imgs"].astype(np.float32) / 255.0
@@ -238,14 +239,14 @@ def encode_episode(model, npz_path, device, batch=256):
 
 
 def plot_timeseries(model, mean, std, device, save_dir, n_eps=N_EPISODE_PLOTS):
-    """GT (raw) vs encoded mu[:4] (de-standardized) στον χρόνο, για n_eps επεισόδια."""
+    """GT (raw) vs encoded mu[:4] (de-standardized) over time, for n_eps episodes."""
     mean4 = np.asarray(mean[:N_SUP], np.float64)
     std4 = np.asarray(std[:N_SUP], np.float64)
     files = list_npz(TEST_DIR)
     if not files:
         print("[warn] no test episodes found for time-series.")
         return
-    # Διαλέγουμε τα ΜΕΓΑΛΥΤΕΡΑ επεισόδια (πιο πλούσια δυναμική) για ωραιότερα plots.
+    # Pick the LONGEST episodes (richer dynamics) for nicer plots.
     lengths = []
     for f in files:
         with np.load(f) as d:

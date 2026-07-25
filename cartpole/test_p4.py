@@ -1,18 +1,18 @@
 """
-test_p4.py — Αξιολόγηση Principle 4 (compositional decoding) όπως στο paper.
+test_p4.py — Evaluation of Principle 4 (compositional decoding) as in the paper.
 
-Μετράει & συγκρίνει baseline VAE (1 μονολιθικός decoder)  vs  VAE_P4 (3 μικροί object decoders):
-    1) full-image reconstruction MSE   (όσο χαμηλότερο τόσο καλύτερα)
-    2) SSIM                            (όσο υψηλότερο τόσο καλύτερα)
-    3) ΜΕΓΕΘΟΣ μοντέλου = #params      (decoder-only ΚΑΙ total)
-Στόχος (claim του paper): ο P4 χάνει ΕΛΑΧΙΣΤΑ σε MSE/SSIM για ΜΕΓΑΛΗ μείωση παραμέτρων decoder.
+Measures & compares the baseline VAE (1 monolithic decoder)  vs  VAE_P4 (3 small object decoders):
+    1) full-image reconstruction MSE   (lower is better)
+    2) SSIM                            (higher is better)
+    3) model SIZE = #params            (decoder-only AND total)
+Goal (the paper's claim): P4 loses VERY LITTLE in MSE/SSIM for a LARGE reduction in decoder params.
 
-ΠΡΟΫΠΟΘΕΣΕΙΣ (notebook convention — ΔΕΝ ξαναδηλώνουμε models/loaders εδώ):
-  Από προηγούμενα cells πρέπει να υπάρχουν στο scope:
-    - VAE                (baseline, με .decode/.fc_decode/.decoder)
-    - VAE_P4             (από το vae_principle4.py, με .decode -> (composite, comps))
-    - VaePairDataset, load_norm_stats   (από το vae_principle4.py — 5-item loader, χωρίς masks)
-  Αλλιώς κάνε import/run τα αντίστοιχα cells πρώτα.
+PREREQUISITES (notebook convention — we do NOT redeclare models/loaders here):
+  The following must already be in scope from earlier cells:
+    - VAE                (baseline, with .decode/.fc_decode/.decoder)
+    - VAE_P4             (from vae_principle4.py, with .decode -> (composite, comps))
+    - VaePairDataset, load_norm_stats   (from vae_principle4.py — 5-item loader, no masks)
+  Otherwise import/run the corresponding cells first.
 """
 import os
 import torch
@@ -24,21 +24,22 @@ from loader import VaePairDataset, load_norm_stats
 from vae import VAE
 from vae_p4 import VAE_P4
 
+from paths import BASELINE_VAE, DATA_ROOT, P4_VAE, outputs
+
 
 #
 #  Config
 #
-DATA_ROOT = "<cartpole-dataset>"
 EVAL_DIR = os.path.join(DATA_ROOT, "val")   # or a dedicated test split
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-BASELINE_CKPT = "<cartpole-baseline-vae>"
-P4_CKPT = "<cartpole-p4-vae>"
+BASELINE_CKPT = BASELINE_VAE
+P4_CKPT = P4_VAE
 
 LATENT_SIZE = 64
 N_SUP = 4
 BATCH = 128
 NUM_WORKERS = 4
-SAVE_FIG = "/kaggle/working/cartpole_p4_out/p4_compare.png"
+SAVE_FIG = outputs("cartpole_p4_out/p4_compare.png")
 
 
 #

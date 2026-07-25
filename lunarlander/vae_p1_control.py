@@ -1,18 +1,18 @@
 """
-vae_p1_control.py — Retrain του VAE σε WIDE-COVERAGE control dataset (8k), με LAZY low-RAM loader.
+vae_p1_control.py — Retrain of the VAE on a WIDE-COVERAGE control dataset (8k), with a LAZY low-RAM loader.
 
-ΓΙΑΤΙ: η διάγνωση έδειξε ότι ο encoder είναι σχεδόν τέλειος in-distribution (theta corr 0.98, omega 0.83)
-αλλά καταρρέει στο RL/MPC exploration (theta 0.11-0.70) — ΚΑΘΑΡΟ distribution shift, ΟΧΙ έλλειψη
-χωρητικότητας. Λύση: retrain στο control dataset (random bursts/perturbed PID -> ευρεία κάλυψη
-theta/omega/vx) ώστε ο encoder να γενικεύει στις καταστάσεις που επισκέπτονται RL & MPC.
+WHY: the diagnostic showed that the encoder is near-perfect in-distribution (theta corr 0.98, omega 0.83)
+but collapses under RL/MPC exploration (theta 0.11-0.70) — a CLEAR distribution shift, NOT a lack of
+capacity. Fix: retrain on the control dataset (random bursts/perturbed PID -> wide coverage of
+theta/omega/vx) so that the encoder generalizes to the states RL & MPC actually visit.
 
-ΟΛΑ import-form:
-  * μοντέλο + losses + train/eval βρόχοι -> από vae_p1 (ή vae για baseline)  [ΚΑΜΙΑ επανα-υλοποίηση]
-  * lazy dataset + chunked sampler                                          -> από lazy_vae_loader
-Τρέξε:  python3 lunarlander/vae_p1_control.py        (VAE_MODEL=baseline για baseline VAE)
+EVERYTHING is import-form:
+  * model + losses + train/eval loops -> from vae_p1 (or vae for the baseline)  [NO re-implementation]
+  * lazy dataset + chunked sampler                                             -> from lazy_vae_loader
+Run:  python3 lunarlander/vae_p1_control.py        (VAE_MODEL=baseline for the baseline VAE)
 
-ΣΗΜ. norm_stats: ΝΕΟ retrain -> χρησιμοποίησε τα norm_stats του CONTROL dataset (το mu[:8] θα ζει
-σε εκείνο το standardized space· τα downstream scripts πρέπει να φορτώνουν ΤΑ ΙΔΙΑ norm_stats).
+NOTE on norm_stats: this is a NEW retrain -> use the CONTROL dataset's norm_stats (mu[:8] will live
+in that standardized space; the downstream scripts must load THE SAME norm_stats).
 """
 import os
 import torch
@@ -22,7 +22,9 @@ from torch.utils.data import DataLoader
 from lazy_vae_loader import VaePairDatasetLazy, ChunkedEpisodeSampler
 from loader_control import load_norm_stats
 
-# --- επιλογή μοντέλου: P1 (default) ή baseline· και τα δύο εκθέτουν ίδιο API/ globals ---
+from paths import CONTROL_DATA, outputs
+
+# --- model choice: P1 (default) or baseline; both expose the same API/globals ---
 VAE_MODEL = os.environ.get("VAE_MODEL", "p1")          # "p1" | "baseline"
 if VAE_MODEL == "p1":
     import vae_p1 as M
@@ -34,23 +36,22 @@ else:
     BEST_NAME, LAST_NAME = "vae_baseline_control_best.pth", "vae_baseline_control_last.pth"
 
 # ---------------------------------------------------------------------------
-# CONFIG — placeholders <...> τα γεμίζει ο bootstrap patcher (CONFIG_PATHS)
+# CONFIG  (paths from config.py via paths.py)
 # ---------------------------------------------------------------------------
-DATA_ROOT = os.environ.get("LL_DATA_ROOT") or "<lunarlander-control-dataset>"   # local: LL_DATA_ROOT=...· Kaggle: patcher
-TRAIN_DIRS = [os.path.join(DATA_ROOT, "train")]        # multi-root ready (π.χ. +elite αν θες)
+DATA_ROOT = os.environ.get("LL_DATA_ROOT") or CONTROL_DATA   # local: LL_DATA_ROOT=...
+TRAIN_DIRS = [os.path.join(DATA_ROOT, "train")]        # multi-root ready (e.g. +elite if you want)
 VAL_DIRS = [os.path.join(DATA_ROOT, "val")]
-NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")  # ΤΑ NORM_STATS ΤΟΥ CONTROL
-SAVE_DIR = "/kaggle/working/lunarlander_vae_control" if os.path.isdir("/kaggle/working") \
-    else os.path.expanduser("~/lunarlander_runs/lunarlander_vae_control")
+NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")  # THE CONTROL DATASET'S NORM_STATS
+SAVE_DIR = outputs("lunarlander_vae_control")
 
 SHIFT = int(os.environ.get("SHIFT", "0"))              # 0=clean· 2/5/10 -> weak supervision
 WIND_FILTER = os.environ.get("WIND_FILTER", "all")     # "all"|"clean"|"wind"
 BATCH = int(os.environ.get("BATCH", "128"))
 EPOCHS = int(os.environ.get("EPOCHS", str(M.EPOCHS)))
 LR = float(os.environ.get("LR", str(M.LR)))
-NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "4"))  # Kaggle Linux/fork· lazy ds πικλάρει φθηνά
-CHUNK = int(os.environ.get("CHUNK", "64"))             # επεισόδια ανά chunk (sampler)
-CACHE = int(os.environ.get("CACHE", str(CHUNK + 8)))   # cache >= chunk (εγγύηση hits)
+NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "4"))  # Kaggle Linux/fork; the lazy ds pickles cheaply
+CHUNK = int(os.environ.get("CHUNK", "64"))             # episodes per chunk (sampler)
+CACHE = int(os.environ.get("CACHE", str(CHUNK + 8)))   # cache >= chunk (guarantees hits)
 SEED = int(os.environ.get("SEED", "0"))
 
 
@@ -61,7 +62,7 @@ def main():
                           ("mps" if torch.backends.mps.is_available() else "cpu"))
     print(f"device: {device} | model: {VAE_MODEL} | save -> {SAVE_DIR}")
     if device.type == "cpu":
-        print("  ΠΡΟΣΟΧΗ device=cpu -> ενεργοποίησε GPU (Kaggle).")
+        print("  WARNING device=cpu -> enable the GPU (Kaggle).")
 
     mean, std = load_norm_stats(NORM_STATS)
     std_phys = torch.tensor(std[:M.N_SUP], device=device)
@@ -76,7 +77,7 @@ def main():
     pw = NUM_WORKERS > 0
     train_dl = DataLoader(train_ds, batch_size=BATCH, sampler=sampler, drop_last=True,
                           num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
-    val_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False,    # sequential -> ήδη episode-local
+    val_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False,    # sequential -> already episode-local
                         num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=pw)
 
     model = make_net().to(device)

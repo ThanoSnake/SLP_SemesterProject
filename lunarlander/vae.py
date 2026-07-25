@@ -1,21 +1,21 @@
 """
-vae.py — Physically-interpretable VAE για LunarLander (baseline, notebook-ready).
-Port του cart_pole/vae_baseline.py· state 4D -> 8D.
+vae.py — Physically-interpretable VAE for LunarLander (baseline, notebook-ready).
+Port of cart_pole/vae_baseline.py; state 4D -> 8D.
 
-Χαρακτηριστικά:
-  * ΕΙΣΟΔΟΣ 2 διαδοχικά frames (stack -> 6 κανάλια) -> κωδικοποίηση ταχυτήτων.
-  * SPLIT-β KL: μικρό σταθερό BETA_PHYS στις 8 φυσικές dims, beta_style annealed 0->1
-    στις υπόλοιπες 56.
-  * Supervised alignment των 8 πρώτων dims με standardized φυσικά states
+Features:
+  * INPUT is 2 consecutive frames (stack -> 6 channels) -> velocities become encodable.
+  * Split-β KL: small fixed BETA_PHYS on the 8 physical dims, beta_style annealed 0->1
+    on the remaining 56.
+  * Supervised alignment of the first 8 dims with the standardized physical states
     ([x, y, vx, vy, theta, omega, leg1, leg2]).
-  * Per-element mean losses· ξεχωριστά components στο log.
-  * Validation με physical RMSE ανά μέγεθος + best-model saving + EARLY STOPPING.
+  * Per-element mean losses; components logged separately.
+  * Validation with physical RMSE per quantity + best-model saving + EARLY STOPPING.
 
-  ΒΕΛΤΙΩΣΗ ΧΡΟΝΟΥ: ο loader επιστρέφει uint8 εικόνες· η μεταφορά στη GPU γίνεται σε
-  uint8 (4× λιγότερα bytes στο PCIe) και το .float()/255 γίνεται ΣΤΗ GPU (όχι στη CPU)
-  -> εξαφανίζει το CPU bottleneck της κανονικοποίησης.
+  SPEED NOTE: the loader returns uint8 images; the transfer to the GPU happens in
+  uint8 (4x fewer bytes over PCIe) and the .float()/255 happens ON THE GPU (not on the CPU)
+  -> this removes the CPU bottleneck of the normalization.
 
-Σε notebook: τρέξε ΠΡΩΤΑ το cell του LunarLoader.
+In a notebook: run the LunarLoader cell FIRST.
 """
 import os
 import numpy as np
@@ -28,14 +28,15 @@ from tqdm.auto import tqdm
 
 from loader import VaePairDataset, load_norm_stats
 
+from paths import DATA_ROOT, outputs
+
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/lunarlander_baseline_vae"
+SAVE_DIR = outputs("lunarlander_baseline_vae")
 
 STATE_NAMES = ("x", "y", "vx", "vy", "theta", "omega", "leg1", "leg2")
 
@@ -47,15 +48,15 @@ BATCH = 128
 EPOCHS = 40
 LR = 1e-3
 
-# --- SPLIT-β KL ---
-BETA_PHYS = 0.01           # σταθερό, ΜΙΚΡΟ: ελάχιστη πίεση στις φυσικές dims
-BETA_STYLE_MAX = 1.0       # τελικό βάρος KL στις style dims
+# --- split-β KL ---
+BETA_PHYS = 0.01           # fixed and SMALL: minimal pressure on the physical dims
+BETA_STYLE_MAX = 1.0       # final KL weight on the style dims
 KL_ANNEAL_EPOCHS = 20      # beta_style: 0 -> BETA_STYLE_MAX
 
 LAMBDA_SUP = 1.0           # per-element mean -> O(1) knob
 
 EARLY_STOP_PATIENCE = 5
-SCHED_PATIENCE = 3         # < EARLY_STOP -> προλαβαίνει να πέσει το LR πρώτα
+SCHED_PATIENCE = 3         # < EARLY_STOP -> the LR gets a chance to drop first
 
 NUM_WORKERS = 2
 SEED = 0
@@ -66,7 +67,7 @@ def set_seed(s):
 
 
 def _to_img(t, device):
-    """ uint8 (B,3,H,W) -> float [0,1] στη GPU (η μεταφορά γίνεται σε uint8). """
+    """ uint8 (B,3,H,W) -> float [0,1] on the GPU (the transfer happens in uint8). """
     return t.to(device, non_blocking=True).float().div_(255.0)
 
 
@@ -74,7 +75,7 @@ def _to_img(t, device):
 # Model
 # ---------------------------------------------------------------------------
 class VAE(nn.Module):
-    """ Είσοδος (B,6,80,120)=stack(frame_t,frame_t+1)· ανακατασκευή (B,3,80,120)=frame_t. """
+    """ Input (B,6,80,120)=stack(frame_t,frame_t+1); reconstructs (B,3,80,120)=frame_t. """
 
     def __init__(self, latent_size=64, in_channels=6, out_channels=3):
         super().__init__()
@@ -114,7 +115,7 @@ class VAE(nn.Module):
 
 
 def encode_fn(model, device):
-    """ Callable για LunarLoader.precompute_latents — δέχεται float [0,1] εικόνες. """
+    """ Callable for LunarLoader.precompute_latents — expects float [0,1] images. """
     @torch.no_grad()
     def _fn(img_t, img_tp1):
         model.eval()
@@ -125,14 +126,14 @@ def encode_fn(model, device):
 
 
 # ---------------------------------------------------------------------------
-# Loss — per-element means· SPLIT-β KL (phys vs style)
+# Loss — per-element means; split-β KL (phys vs style)
 # ---------------------------------------------------------------------------
 def vae_losses(recon, target, mu, logvar, state_t, n_sup):
     B, D = mu.size(0), mu.size(1)
-    recon_l = F.mse_loss(recon, target, reduction="mean")               # ανά pixel
-    sup = F.mse_loss(mu[:, :n_sup], state_t, reduction="mean")          # ανά supervised dim
+    recon_l = F.mse_loss(recon, target, reduction="mean")               # per pixel
+    sup = F.mse_loss(mu[:, :n_sup], state_t, reduction="mean")          # per supervised dim
 
-    kl_per = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())             # (B, D) ανά διάσταση
+    kl_per = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())             # (B, D) per dimension
     kld_phys = kl_per[:, :n_sup].sum() / B / n_sup
     kld_style = kl_per[:, n_sup:].sum() / B / (D - n_sup)
     return recon_l, kld_phys, kld_style, sup
@@ -148,10 +149,10 @@ def run_epoch(model, loader, device, beta_style, optimizer=None, desc=""):
 
     pbar = tqdm(loader, desc=desc, leave=False)
     for img_t, img_tp1, action, state_t, state_tp1 in pbar:
-        img_t = _to_img(img_t, device)                       # uint8 -> float/255 ΣΤΗ GPU
+        img_t = _to_img(img_t, device)                       # uint8 -> float/255 ON THE GPU
         img_tp1 = _to_img(img_tp1, device)
         x = torch.cat([img_t, img_tp1], dim=1)               # (B,6,H,W)
-        target = img_t                                       # ανακατασκευή του frame_t
+        target = img_t                                       # reconstruct frame_t
         st = state_t.to(device, non_blocking=True)
 
         with torch.set_grad_enabled(train):
@@ -200,7 +201,7 @@ if __name__ == "__main__":
     set_seed(SEED)
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("device:", device, "  (αν 'cpu' -> ενεργοποίησε GPU στην Kaggle!)")
+    print("device:", device, "  (if 'cpu' -> enable the GPU on Kaggle!)")
 
     mean, std = load_norm_stats(NORM_STATS)
     std_phys = torch.tensor(std[:N_SUP], device=device)
@@ -250,7 +251,7 @@ if __name__ == "__main__":
             bad_epochs += 1
             print(f"  (no improvement: {bad_epochs}/{EARLY_STOP_PATIENCE})")
             if bad_epochs >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping στο epoch {epoch}.")
+                print(f"Early stopping at epoch {epoch}.")
                 break
 
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_last.pth"))

@@ -1,23 +1,23 @@
 """
-lazy_vae_loader.py — LAZY (low-RAM) VAE pair dataset για ΜΕΓΑΛΑ datasets (control 8k ~27GB eager).
+lazy_vae_loader.py — LAZY (low-RAM) VAE pair dataset for LARGE datasets (control 8k is ~27GB eager).
 
-Γιατί: ο `loader.VaePairDataset` φορτώνει ΟΛΑ τα imgs στη RAM (eager) -> ~27GB για το control 8k,
-που ΔΕΝ χωράει σε Kaggle GPU session (~13-16GB). Εδώ τα imgs μένουν συμπιεσμένα στον δίσκο
-(τα npz είναι ~1GB) και αποσυμπιέζονται ΑΝΑ ΕΠΕΙΣΟΔΙΟ on-the-fly.
+Why: `loader.VaePairDataset` loads ALL the imgs into RAM (eager) -> ~27GB for control 8k,
+which does NOT fit in a Kaggle GPU session (~13-16GB). Here the imgs stay compressed on disk
+(the npz files are ~1GB) and are decompressed PER EPISODE on the fly.
 
-ΠΡΟΒΛΗΜΑ ΤΑΧΥΤΗΤΑΣ & ΛΥΣΗ:
-  Με σκέτο random shuffle, κάθε δείγμα θα αποσυμπίεζε ΟΛΟ το επεισόδιο (τα συμπιεσμένα .npy δεν έχουν
-  partial read) -> τραγικά αργό. Λύση: `ChunkedEpisodeSampler` — ανακατεύει τα ΕΠΕΙΣΟΔΙΑ, τα χωρίζει σε
-  chunks (π.χ. 64 επεισόδια), και μέσα σε κάθε chunk ανακατεύει ΟΛΑ τα παράθυρα μαζί. Έτσι:
-    * τοπικότητα: κάθε επεισόδιο αποσυμπιέζεται ~μία φορά/epoch (μένει στο μικρό LRU cache όσο είναι ενεργό
-      το chunk του), αλλά
-    * διαφορετικότητα batch: κάθε batch τραβάει παράθυρα από ~64 διαφορετικά επεισόδια.
-  RAM: cache_size × ~4.3MB ανά worker (π.χ. 72 × 4.3MB ≈ 0.3GB/worker).
+THE SPEED PROBLEM & THE FIX:
+  With plain random shuffling, every sample would decompress the WHOLE episode (compressed .npy has no
+  partial read) -> painfully slow. Fix: `ChunkedEpisodeSampler` — it shuffles the EPISODES, splits them into
+  chunks (e.g. 64 episodes), and shuffles ALL the windows together inside each chunk. So:
+    * locality: each episode is decompressed ~once per epoch (it stays in the small LRU cache while
+      its chunk is active), but
+    * batch diversity: each batch draws windows from ~64 different episodes.
+  RAM: cache_size x ~4.3MB per worker (e.g. 72 x 4.3MB ~ 0.3GB/worker).
 
-Συμβατό 1:1 με τον `VaePairDataset`: __getitem__ -> (img_t uint8 (3,H,W), img_tp1 uint8, action,
-state_t std, state_tp1 std). Η μετατροπή uint8 -> float/255 γίνεται στη GPU μέσα στο run_epoch.
+Compatible 1:1 with `VaePairDataset`: __getitem__ -> (img_t uint8 (3,H,W), img_tp1 uint8, action,
+state_t std, state_tp1 std). The uint8 -> float/255 conversion happens on the GPU inside run_epoch.
 
-Import-form· δεν τροποποιεί κανένα υπάρχον module. Δανείζεται helpers από το loader_control.
+Import-only; it modifies no existing module. Borrows helpers from loader_control.
 """
 import numpy as np
 import torch
@@ -32,10 +32,10 @@ from loader_control import list_npz, load_norm_stats, _standardize, _wind_skip, 
 # Lazy pair dataset
 # ---------------------------------------------------------------------------
 class VaePairDatasetLazy(torch.utils.data.Dataset):
-    """Ζεύγη (frame_t, frame_{t+1}) από ΜΕΓΑΛΟ dataset, χωρίς eager RAM.
+    """Pairs (frame_t, frame_{t+1}) from a LARGE dataset, without eager RAM.
 
-    roots: str ή λίστα από split-dirs (π.χ. [control/train])  ·  shift: 0|2|5|10 (weak sup input)
-    cache_size: πόσα ΑΠΟΣΥΜΠΙΕΣΜΕΝΑ επεισόδια κρατά ανά process (>= chunk_size του sampler).
+    roots: str or list of split-dirs (e.g. [control/train])  ;  shift: 0|2|5|10 (weak-sup input)
+    cache_size: how many DECOMPRESSED episodes to keep per process (>= the sampler's chunk_size).
     wind_filter: 'all'|'clean'|'wind'.
     """
     def __init__(self, roots, shift=0, state_mean=None, state_std=None,
@@ -45,7 +45,7 @@ class VaePairDatasetLazy(torch.utils.data.Dataset):
         self.mean = None if state_mean is None else np.asarray(state_mean, np.float32)
         self.std = None if state_std is None else np.asarray(state_std, np.float32)
 
-        # Indexing: διαβάζει ΜΟΝΟ 'states' (+'wind_enabled' αν χρειάζεται) -> φθηνό, χαμηλή RAM.
+        # Indexing: reads ONLY 'states' (+'wind_enabled' if needed) -> cheap, low RAM.
         self.files, self.index, self.ep_ranges = [], [], []
         for f in tqdm(list_npz(roots), desc="indexing (lazy)"):
             with np.load(f) as d:
@@ -57,12 +57,12 @@ class VaePairDatasetLazy(torch.utils.data.Dataset):
             fi = len(self.files)
             self.files.append(f)
             start = len(self.index)
-            for t in range(T - 1):                      # window=2 -> παράθυρα 0..T-2
+            for t in range(T - 1):                      # window=2 -> windows 0..T-2
                 self.index.append((fi, t))
-            self.ep_ranges.append((start, len(self.index)))   # [start,end) global window-indices ανά επεισόδιο
+            self.ep_ranges.append((start, len(self.index)))   # [start,end) global window indices per episode
         if not self.index:
             raise RuntimeError(f"No pairs from {roots} (wind_filter={wind_filter}?)")
-        self._cache = OrderedDict()                     # fi -> dict(imgs,acts,states,x)  (per-process, μετά το fork)
+        self._cache = OrderedDict()                     # fi -> dict(imgs,acts,states,x)  (per process, after the fork)
 
     def __len__(self):
         return len(self.index)
@@ -100,11 +100,11 @@ class VaePairDatasetLazy(torch.utils.data.Dataset):
 # Sampler: locality (cache hits) + batch diversity
 # ---------------------------------------------------------------------------
 class ChunkedEpisodeSampler(torch.utils.data.Sampler):
-    """Ανακατεύει ΕΠΕΙΣΟΔΙΑ, τα ομαδοποιεί σε chunks, και μέσα σε κάθε chunk ανακατεύει ΟΛΑ τα
-    παράθυρα μαζί. Έτσι κάθε batch βλέπει ~chunk_size διαφορετικά επεισόδια (διαφορετικότητα),
-    αλλά μόνο chunk_size επεισόδια είναι «ανοιχτά» ταυτόχρονα (τοπικότητα -> cache hits).
+    """Shuffles EPISODES, groups them into chunks, and shuffles ALL the windows together inside
+    each chunk. This way each batch sees ~chunk_size different episodes (diversity),
+    but only chunk_size episodes are "open" at a time (locality -> cache hits).
 
-    ΣΗΜ.: cache_size του dataset πρέπει να είναι >= chunk_size."""
+    NOTE: the dataset's cache_size must be >= chunk_size."""
     def __init__(self, ep_ranges, chunk_size=64, seed=0):
         self.ep_ranges = list(ep_ranges)
         self.chunk_size = chunk_size

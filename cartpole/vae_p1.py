@@ -1,22 +1,22 @@
 """
-vae_p1.py — Principle 1 (Structured latent) VAE για CartPole (notebook-ready, Kaggle).
+vae_p1.py — Principle 1 (structured latent) VAE for CartPole (notebook-ready, Kaggle).
 
-Διαφορά από το baseline vae.py:
-  * ΔΥΟ ΑΝΕΞΑΡΤΗΤΟΙ encoders (διαφορετικά βάρη) με ΔΙΑΦΟΡΕΤΙΚΗ είσοδο:
-        - state_encoder : 6 καν. = stack(frame_t, frame_t+1) -> N_SUP   (x, x_dot, theta, theta_dot)
-                          (χρειάζεται 2 frames για να βγάλει ταχύτητα)
-        - image_encoder : 3 καν. = ΜΟΝΟ frame_t            -> N_IMG   (low-level visual features)
-                          (1 frame -> δεν μπορεί να κωδικοποιήσει ταχύτητα: τα image dims
-                           αποσυζεύγνυνται από τη δυναμική/ταχύτητα)
-    Τα δύο κομμάτια συνενώνονται -> latent (N_SUP + N_IMG = LATENT_SIZE).
+Difference from the baseline vae.py:
+  * TWO INDEPENDENT encoders (separate weights) with DIFFERENT inputs:
+        - state_encoder : 6 ch. = stack(frame_t, frame_t+1) -> N_SUP   (x, x_dot, theta, theta_dot)
+                          (needs 2 frames in order to extract velocity)
+        - image_encoder : 3 ch. = ONLY frame_t              -> N_IMG   (low-level visual features)
+                          (1 frame -> cannot encode velocity: the image dims are
+                           decoupled from the dynamics/velocity)
+    The two parts are concatenated -> latent (N_SUP + N_IMG = LATENT_SIZE).
     (Paper, Principle 1: "split the encoder into the image part ... and the state part".)
-  * ΚΟΙΝΟΣ decoder: παίρνει ΟΛΟΚΛΗΡΟ το latent (64) -> reconstruct frame_t.
-  * Losses (ίδια φιλοσοφία με baseline):
-        - reconstruction (MSE) μετά τον κοινό decoder
-        - physical supervision (MSE) στα πρώτα N_SUP dims (mu[:, :N_SUP] ~ state_t)
-        - SPLIT-β KL (ίδιο με baseline): σταθερό μικρό BETA_PHYS στα 4 phys dims,
-          annealed beta_style 0->1 στα 60 image dims (ώστε το KL να μη σπρώχνει τα
-          φυσικά μεγέθη προς N(0,1)· τα image dims καταρρέουν -> καθαρά latents για LSTM).
+  * SHARED decoder: takes the WHOLE latent (64) -> reconstructs frame_t.
+  * Losses (same philosophy as the baseline):
+        - reconstruction (MSE) after the shared decoder
+        - physical supervision (MSE) on the first N_SUP dims (mu[:, :N_SUP] ~ state_t)
+        - split-β KL (same as baseline): small fixed BETA_PHYS on the 4 phys dims,
+          annealed beta_style 0->1 on the 60 image dims (so the KL does not push the
+          physical quantities toward N(0,1); the image dims collapse -> clean latents for the LSTM).
 """
 import os
 import numpy as np
@@ -29,14 +29,15 @@ from tqdm.auto import tqdm
 
 from loader import VaePairDataset, load_norm_stats
 
+from paths import DATA_ROOT, outputs
+
 #
 #  Config
 #
-DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/cartpole_p1_vae"
+SAVE_DIR = outputs("cartpole_p1_vae")
 
 LATENT_SIZE = 64
 N_SUP = 4                    # [x, x_dot, theta, theta_dot] -> state_encoder

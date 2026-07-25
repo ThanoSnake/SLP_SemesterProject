@@ -1,16 +1,16 @@
 """
-test_p4.py — Αξιολόγηση Principle 4 (compositional decoding) για LunarLander, όπως στο paper.
+test_p4.py — Evaluation of Principle 4 (compositional decoding) for LunarLander, as in the paper.
 
-Συγκρίνει baseline VAE (1 μονολιθικός decoder)  vs  VAE_P4 (3 object decoders: lander/flags/bg):
+Compares the baseline VAE (1 monolithic decoder)  vs  VAE_P4 (3 object decoders: lander/flags/bg):
     1) full-image reconstruction MSE   (↓)
     2) SSIM                            (↑)
-    3) ΜΕΓΕΘΟΣ μοντέλου = #params      (decoder-only ΚΑΙ total)
-Claim: ο P4 χάνει ΕΛΑΧΙΣΤΑ σε MSE/SSIM για ΜΕΓΑΛΗ μείωση παραμέτρων decoder.
+    3) model SIZE = #params            (decoder-only AND total)
+Claim: P4 loses VERY LITTLE in MSE/SSIM for a LARGE reduction in decoder params.
 
-ΠΡΟΫΠΟΘΕΣΕΙΣ (notebook — ΔΕΝ ξαναδηλώνουμε models/loaders εδώ). Από προηγούμενα cells:
-    - VAE      (baseline, από LunarVaeBaseline.py)
-    - VAE_P4   (από vae_principle4.py, με .decode -> (composite, comps))
-    - VaePairDataset, load_norm_stats   (από LunarLoader.py)
+PREREQUISITES (notebook — we do NOT redeclare models/loaders here). From earlier cells:
+    - VAE      (baseline, from LunarVaeBaseline.py)
+    - VAE_P4   (from vae_principle4.py, with .decode -> (composite, comps))
+    - VaePairDataset, load_norm_stats   (from LunarLoader.py)
 """
 import os
 import torch
@@ -22,23 +22,24 @@ from loader import VaePairDataset, load_norm_stats
 from vae import VAE
 from vae_p4 import VAE_P4
 
+from paths import BASELINE_VAE, DATA_ROOT, P4_VAE, outputs
+
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_ROOT = "<lunarlander-dataset>"
 EVAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-BASELINE_CKPT = "<lunarlander-baseline-vae>"
-P4_CKPT = "<lunarlander-p4-vae>"
+BASELINE_CKPT = BASELINE_VAE
+P4_CKPT = P4_VAE
 LATENT_SIZE = 64
 N_SUP = 8
 BATCH = 128
 NUM_WORKERS = 4
-SAVE_FIG = "/kaggle/working/lunarlander_p4_out/p4_compare.png"   # None για παράλειψη
+SAVE_FIG = outputs("lunarlander_p4_out/p4_compare.png")   # None to skip
 
 
 # ---------------------------------------------------------------------------
-# SSIM (self-contained, gaussian-windowed) — χωρίς skimage
+# SSIM (self-contained, gaussian-windowed) — without skimage
 # ---------------------------------------------------------------------------
 def _gaussian_window(ch, ksize=11, sigma=1.5, device="cpu"):
     coords = torch.arange(ksize, dtype=torch.float32, device=device) - (ksize - 1) / 2.0
@@ -121,7 +122,7 @@ if __name__ == "__main__":
     print(f"{'decoder params (↓)':<22}{b_dec:>14,}{p_dec:>14,}{f'{100*(1-p_dec/b_dec):.1f}% less':>14}")
     print(f"{'total params':<22}{b_tot:>14,}{p_tot:>14,}{f'{100*(1-p_tot/b_tot):.1f}% less':>14}")
     print("=" * 64)
-    print(f"\n>> P4: {100*(1-p_dec/b_dec):.1f}% λιγότερες decoder-params, ΔSSIM={p_ssim-b_ssim:+.4f}, "
+    print(f"\n>> P4: {100*(1-p_dec/b_dec):.1f}% fewer decoder params, ΔSSIM={p_ssim-b_ssim:+.4f}, "
           f"ΔMSE={p_mse-b_mse:+.6f}")
 
     if SAVE_FIG:

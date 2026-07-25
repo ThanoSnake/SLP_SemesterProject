@@ -1,45 +1,47 @@
 """
-fusion_seed_denoise.py — (F) SINDy seed-denoising ΠΡΙΝ το LSTM rollout (NO re-training).
+fusion_seed_denoise.py — (F) SINDy seed-denoising BEFORE the LSTM rollout (NO re-training).
 
-ΙΔΕΑ: ο encoded seed z_0[:4] είναι θορυβώδης (ειδικά οι ταχύτητες — δες test_baseline:
-χαμηλό R² στα ẋ,θ̇). Χρησιμοποιούμε τη ΜΙΑ ΒΗΜΑΤΟΣ ΣΥΝΕΠΕΙΑ του SINDy για να τον «καθαρίσουμε»
-ΠΡΙΝ τον δώσουμε στον (αμετάβλητο) baseline LSTM:
+IDEA: the encoded seed z_0[:4] is noisy (especially the velocities — see test_baseline:
+low R² on ẋ,θ̇). We use SINDy's ONE-STEP CONSISTENCY to "clean" it
+BEFORE handing it to the (unchanged) baseline LSTM:
 
-    physics_seed = sindy_step(z[s-1], u[s-1])          # πρόβλεψη του seed από το ΠΡΟΗΓΟΥΜΕΝΟ frame
-    seed_denoised = (1-α)·z[s][:4]  +  α·physics_seed   # convex blend (μόνο παρελθούσα πληροφορία!)
+    physics_seed = sindy_step(z[s-1], u[s-1])          # predict the seed from the PREVIOUS frame
+    seed_denoised = (1-α)·z[s][:4]  +  α·physics_seed   # convex blend (past information only!)
 
-Το α∈[0,1] συντονίζεται με ΕΝΑ μικρό fit στο val (καμία επανεκπαίδευση δικτύου). Μετά γίνεται
-κανονικό ENCODED rollout με το seed[:4] αντικατεστημένο (style dims z[4:] μένουν ως έχουν).
+α∈[0,1] is tuned with ONE small fit on val (no network retraining). Then a normal
+ENCODED rollout runs with seed[:4] replaced (the style dims z[4:] are left as they are).
 
-Είναι ουσιαστικά το ελάχιστο, 1-step special case του (E) Kalman — στοχευμένο στον seed.
+It is essentially the minimal 1-step special case of (E) Kalman — targeted at the seed.
 
-ΠΑΡΑΓΟΜΕΝΑ ανά noise condition:
-  (0) Per-dim seed RMSE: raw-seed vs denoised-seed (πόσο καθάρισε ο seed)
+OUTPUTS per noise condition:
+  (0) Per-dim seed RMSE: raw-seed vs denoised-seed (how much the seed was cleaned)
   (1) Overall median+IQR rollout MSE: LSTM(raw seed) vs LSTM(denoised seed)
-  (2) Per-dim median+IQR· (3) Paired Δ (raw − denoised, >0 ⇒ denoise βοηθά)
+  (2) Per-dim median+IQR; (3) Paired Δ (raw − denoised, >0 => denoising helps)
 
-ENV-AGNOSTIC: ΙΔΙΟ αρχείο για cartpole & lunarlander· environment από sindy_core/sindy_eval_utils.
-Τρέξε: !python3 <env-folder>/fusion_seed_denoise.py
+ENV-AGNOSTIC: the SAME file for cartpole & lunarlander; the environment comes from sindy_core/sindy_eval_utils.
+Run: !python3 <env-folder>/fusion_seed_denoise.py
 """
 import os
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sindy_core import *          # SINDy core (numpy) + path-bootstrap για vae/lstm/loader
+from sindy_core import *          # SINDy core (numpy) + path bootstrap for vae/lstm/loader
 from sindy_eval_utils import *    # VAE encode / LSTM rollout / noise / measurement helpers
 
+from paths import outputs
+
 # ---------------------------------------------------------------------------
-# CONFIG — env-agnostic· το per-environment config έρχεται από sindy_eval_utils/sindy_core (import *).
+# CONFIG — env-agnostic; the per-environment config comes from sindy_eval_utils/sindy_core (import *).
 # ---------------------------------------------------------------------------
-SAVE_DIR = f"/kaggle/working/sindy_{ENV_TAG}_seed_denoise_out"
-ALPHA_GRID = np.round(np.linspace(0.0, 1.0, 11), 3)     # συντονισμός α στο val
+SAVE_DIR = outputs(f"sindy_{ENV_TAG}_seed_denoise_out")
+ALPHA_GRID = np.round(np.linspace(0.0, 1.0, 11), 3)     # tuning of α on val
 LOG_Y = True
 C_RAW, C_DEN = "C0", "C3"
 
 
 # ---------------------------------------------------------------------------
-# Denoised seed (standardized) από context + Ξ + α
+# Denoised seed (standardized) from context + Ξ + α
 # ---------------------------------------------------------------------------
 def denoised_seed_std(ctx, Xi, alpha, mean, std):
     mean4 = np.asarray(mean[:N_SUP], np.float64)
@@ -52,7 +54,7 @@ def denoised_seed_std(ctx, Xi, alpha, mean, std):
 
 
 def tune_alpha(lstm, val_dir, Xi, mean, std, device):
-    """Επιλέγει το α που ελαχιστοποιεί το mean standardized rollout-MSE στο val."""
+    """Picks the α minimizing the mean standardized rollout MSE on val."""
     ctx = seed_context(val_dir, mean, std)
     best_a, best_mse = 0.0, np.inf
     scores = []
@@ -63,8 +65,8 @@ def tune_alpha(lstm, val_dir, Xi, mean, std, device):
         scores.append(mse)
         if mse < best_mse:
             best_mse, best_a = mse, float(a)
-    print("  val α-sweep:", "  ".join(f"{a:.1f}->{s:.5f}" for a, s in zip(ALPHA_GRID, scores)))
-    print(f"  -> best α = {best_a:.2f} (val MSE {best_mse:.5f})")
+    print("  val alpha sweep:", "  ".join(f"{a:.1f}->{s:.5f}" for a, s in zip(ALPHA_GRID, scores)))
+    print(f"  -> best alpha = {best_a:.2f} (val MSE {best_mse:.5f})")
     return best_a
 
 
@@ -153,7 +155,7 @@ def main():
     mean, std = load_norm_stats(NORM_STATS)
     rng = np.random.default_rng(BOOT_SEED)
 
-    # ---- fit SINDy (encoded) στο CLEAN train ----
+    # ---- fit SINDy (encoded) on the CLEAN train split ----
     train_dir = ensure_encoded(VAE_CKPT, DATA_ROOT,
                                    os.path.join(LATENT_ROOT, "clean"),
                                    device, noise_fn=None, splits=("train",))["train"]
@@ -169,7 +171,7 @@ def main():
         print(f"\n{'='*60}\n  CONDITION: {label}\n{'='*60}")
 
         nf = make_noise_fn(ntype, level, NOISE_SEED, device)
-        # noisy encode val (για το α-tuning) + test (για evaluation)
+        # noisy encode of val (for the α tuning) + test (for evaluation)
         val_dir = ensure_encoded(VAE_CKPT, DATA_ROOT, os.path.join(LATENT_ROOT, tag),
                                      device, noise_fn=nf, splits=("val",),
                                      force=(level != 0.0))["val"]
@@ -179,7 +181,7 @@ def main():
 
         alpha = tune_alpha(lstm, val_dir, Xi_e, mean, std, device)
 
-        # ---- evaluate στο test ----
+        # ---- evaluate on test ----
         ctx = seed_context(test_dir, mean, std)
         seed_std = denoised_seed_std(ctx, Xi_e, alpha, mean, std)
         pred_raw, gt = lstm_free_run_dir(lstm, test_dir, mean, std, device)            # raw seed
@@ -196,7 +198,7 @@ def main():
         plot_perdim(err, tag, label, SAVE_DIR)
         med_d, lo_d, hi_d = plot_paired(err, tag, label, SAVE_DIR, rng)
 
-        print(f"  α*={alpha:.2f}  seed RMSE(std) per-dim  raw -> denoised:")
+        print(f"  alpha*={alpha:.2f}  seed RMSE(std) per-dim  raw -> denoised:")
         for d in range(N_SUP):
             print(f"    {DIM_NAMES[d]:<10} {raw_rmse[d]:.4f} -> {den_rmse[d]:.4f}")
         for name in ("raw", "den"):

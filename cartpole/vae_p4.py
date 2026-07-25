@@ -1,27 +1,27 @@
 """
-vae_p4.py — Principle 4 (Compositional / object-centric DECODING) VAE για CartPole.
-Loaders/helpers έρχονται από το loader_final.py (τρέξε εκείνο το cell πρώτα). Στόχος (= L2P των
-ερευνητών): ΑΝΤΙ για ΕΝΑΝ μεγάλο decoder, ΤΡΕΙΣ
-ΜΙΚΡΟΥΣ object decoders (cart, pole, background)· καθένας ΑΝΑΚΑΤΑΣΚΕΥΑΖΕΙ ΤΗΝ ΕΙΚΟΝΑ ΤΟΥ
-ΑΝΤΙΚΕΙΜΕΝΟΥ ΤΟΥ (segmented component), και τα 3 συντίθενται (overlay) στο πλήρες frame.
+vae_p4.py — Principle 4 (compositional / object-centric DECODING) VAE for CartPole.
+Loaders/helpers come from loader_final.py (run that cell first). Goal (= the authors' L2P):
+INSTEAD of ONE large decoder, THREE
+SMALL object decoders (cart, pole, background); each RECONSTRUCTS THE IMAGE OF ITS OWN
+OBJECT (segmented component), and the 3 are composed (overlay) into the full frame.
 
-LOSS = σταθμισμένο άθροισμα:
-    W_OBJ  * mean_i MSE(dec_i, comp_gt_i)      # ανακατασκευή ΚΑΘΕ αντικειμένου ξεχωριστά
-  + W_FULL * MSE(composite, full_frame)        # ανακατασκευή ΟΛΗΣ της εικόνας
-  + LAMBDA_SUP * sup + split-β KL              # ίδιος baseline backbone (P4-only ablation)
+LOSS = weighted sum:
+    W_OBJ  * mean_i MSE(dec_i, comp_gt_i)      # reconstruct EACH object separately
+  + W_FULL * MSE(composite, full_frame)        # reconstruct the WHOLE image
+  + LAMBDA_SUP * sup + split-β KL              # same baseline backbone (P4-only ablation)
 
-SEGMENTATION: ΔΕΝ χρειάζονται προ-αποθηκευμένα masks. Υπολογίζονται ON-THE-FLY ανά batch στη GPU
-με απλό COLOR-segmentation (color_segment_cartpole): bg=λευκό, cart=σκούρα pixels (+track), pole=υπόλοιπα.
-Τα GT components = «αντικείμενο πάνω σε λευκό»:  comp_i = img * mask_i + (1 - mask_i)  (λευκό = 1).
-Η segmentation είναι PARTITION (κάθε pixel ΑΚΡΙΒΩΣ ένα από cart/pole/bg) -> το overlay ανακατασκευάζει το frame.
+SEGMENTATION: no pre-stored masks needed. They are computed ON-THE-FLY per batch on the GPU
+with simple COLOR segmentation (color_segment_cartpole): bg=white, cart=dark pixels (+track), pole=the rest.
+The GT components are "object on white":  comp_i = img * mask_i + (1 - mask_i)  (white = 1).
+The segmentation is a PARTITION (each pixel belongs to EXACTLY one of cart/pole/bg) -> the overlay rebuilds the frame.
 
-COMPOSITE (λευκό φόντο, σκούρα αντικείμενα): composite = clamp(comp_cart + comp_pole + comp_bg − 2, 0, 1).
+COMPOSITE (white background, dark objects): composite = clamp(comp_cart + comp_pole + comp_bg − 2, 0, 1).
 
-ΑΞΙΟΛΟΓΗΣΗ (όπως το paper): full-image reconstruction MSE + SSIM + ΜΕΓΕΘΟΣ μοντέλου (#params).
-Δείχνεις ότι ο P4 (3 μικροί decoders) πετυχαίνει ~ίδιο MSE/SSIM με τον baseline (1 μεγάλος) με
-ΠΟΛΥ λιγότερες παραμέτρους.
+EVALUATION (as in the paper): full-image reconstruction MSE + SSIM + model SIZE (#params).
+Shows that P4 (3 small decoders) reaches ~the same MSE/SSIM as the baseline (1 large one) with
+FAR fewer parameters.
 
-ΔΕΔΟΜΕΝΑ: μόνο standard keys (imgs, acts, states). ΔΕΝ απαιτούνται mask keys.
+DATA: only standard keys (imgs, acts, states). No mask keys required.
 """
 import os
 import numpy as np
@@ -34,15 +34,16 @@ from tqdm.auto import tqdm
 
 from loader import VaePairDataset, load_norm_stats
 
+from paths import DATA_ROOT, outputs
+
 
 #
 #  Config
 #
-DATA_ROOT = "<cartpole-dataset>"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-SAVE_DIR = "/kaggle/working/cartpole_p4_vae"
+SAVE_DIR = outputs("cartpole_p4_vae")
 
 LATENT_SIZE = 64
 N_SUP = 4

@@ -4,6 +4,8 @@ import gymnasium as gym
 import numpy as np
 from PIL import Image
 
+from paths import DATA_ROOT
+
 #
 #  Config
 #
@@ -105,7 +107,7 @@ def compute_and_save_norm_stats(train_dir, out_path):
 if __name__ == '__main__':
     assert abs(TRAIN_FRACTION + VAL_FRACTION + TEST_FRACTION - 1.0) < 1e-6
 
-    base_dir = "/kaggle/working/cartpole_data"
+    base_dir = DATA_ROOT   # where the training scripts read it back from
     dirs = {s: os.path.join(base_dir, s) for s in ("train", "val", "test")}
     for d in dirs.values():
         os.makedirs(d, exist_ok=True)

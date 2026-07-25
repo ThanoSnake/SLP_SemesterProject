@@ -43,17 +43,18 @@ from vae import VAE
 from vae_p1 import VAE_P1
 from lstm import LatentPredictor
 
+from paths import BASELINE_LSTM, BASELINE_VAE, DATA_ROOT, HYBRID_BASELINE, HYBRID_P1, P1_LSTM, P1_VAE, outputs
+
 #
 #  Config
 #
-DATA_ROOT = "<cartpole-dataset>"
 NORM_STATS = os.path.join(DATA_ROOT, "norm_stats.npz")
-LATENT_ROOT = "/kaggle/working/cartpole_sindy_latents"
-SAVE_DIR = "/kaggle/working/cartpole_sindy"
+LATENT_ROOT = outputs("cartpole_sindy_latents")
+SAVE_DIR = outputs("cartpole_sindy")
 
 # Trained hybrid checkpoints (absolute, configurable per model)
-HYBRID_BASELINE_CKPT = "<hybrid-baseline>"
-HYBRID_P1_CKPT = "<hybrid-p1>"
+HYBRID_BASELINE_CKPT = HYBRID_BASELINE
+HYBRID_P1_CKPT = HYBRID_P1
 
 LATENT_SIZE = 64
 SHIFT = 0
@@ -73,14 +74,14 @@ ANGLE_DIMS = (2,)   # which physical dims are angles (-> get sin/cos features)
 MODELS = [
     {"label": "Baseline",
      "make_vae": lambda: VAE(latent_size=LATENT_SIZE),
-     "vae_ckpt": "<cartpole-baseline-vae>",
-     "lstm_ckpt": "<cartpole-baseline-lstm>",
+     "vae_ckpt": BASELINE_VAE,
+     "lstm_ckpt": BASELINE_LSTM,
      "latent_root": os.path.join(LATENT_ROOT, "baseline"),
      "hybrid_ckpt": HYBRID_BASELINE_CKPT},
     {"label": "Principle 1",
      "make_vae": lambda: VAE_P1(n_sup=N_SUP, n_img=N_IMG),
-     "vae_ckpt": "<cartpole-p1-vae>",
-     "lstm_ckpt": "<cartpole-p1-lstm>",
+     "vae_ckpt": P1_VAE,
+     "lstm_ckpt": P1_LSTM,
      "latent_root": os.path.join(LATENT_ROOT, "p1"),
      "hybrid_ckpt": HYBRID_P1_CKPT},
 ]
